@@ -822,7 +822,7 @@
     };
 
     $('add').onclick = () => openEntry();
-    $('refresh').onclick = refresh;
+    $('refresh').onclick = () => refresh();
     $('clear-cache').onclick = async () => {
       if (!confirm('Clear every cache entry? This cannot be undone.')) return;
 
