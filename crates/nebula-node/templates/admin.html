@@ -1,0 +1,745 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>NebulaCache · Admin</title>
+  <style>
+    :root {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #e9edf7;
+      background: #080b12;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+      --muted: #8791a5;
+      --line: #222a3a;
+      --surface: #101623;
+      --accent: #8b7cff;
+      --mint: #5de2bd
+    }
+
+    * {
+      box-sizing: border-box
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(ellipse at 18% 0%, #26204a 0, transparent 34%), radial-gradient(ellipse at 100% 50%, #102839 0, transparent 30%), #080b12
+    }
+
+    .shell {
+      width: min(1120px, calc(100% - 40px));
+      margin: auto;
+      padding: 34px 0 64px
+    }
+
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 62px
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      letter-spacing: .01em
+    }
+
+    .mark {
+      width: 36px;
+      height: 36px;
+      border: 1px solid #554c9a;
+      border-radius: 11px;
+      display: grid;
+      place-items: center;
+      color: #c3baff;
+      background: #211d3a;
+      box-shadow: 0 0 30px #7664ff24
+    }
+
+    .mark svg {
+      width: 20px
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: #aab3c4;
+      font-size: 13px
+    }
+
+    .dot {
+      height: 8px;
+      width: 8px;
+      border-radius: 50%;
+      background: var(--mint);
+      box-shadow: 0 0 12px #5de2bd88
+    }
+
+    .intro {
+      margin-bottom: 30px
+    }
+
+    .eyebrow {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .16em;
+      color: #a79cff;
+      text-transform: uppercase
+    }
+
+    .intro h1 {
+      margin: 10px 0 7px;
+      font-size: clamp(30px, 5vw, 43px);
+      letter-spacing: -.04em
+    }
+
+    .intro p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px
+    }
+
+    .metrics {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 22px
+    }
+
+    .metric,
+    .panel {
+      border: 1px solid var(--line);
+      background: linear-gradient(145deg, #121a29eF, #0d131eeF);
+      border-radius: 15px;
+      box-shadow: 0 16px 40px #0002
+    }
+
+    .metric {
+      min-width: 180px;
+      padding: 16px 19px
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px
+    }
+
+    .metric-value {
+      margin-top: 6px;
+      font-size: 22px;
+      font-weight: 650
+    }
+
+    .panel {
+      overflow: hidden
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line)
+    }
+
+    .panel-title {
+      font-weight: 650
+    }
+
+    .panel-sub {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px
+    }
+
+    .actions {
+      display: flex;
+      gap: 9px
+    }
+
+    .button {
+      border: 1px solid #30394d;
+      border-radius: 9px;
+      padding: 9px 13px;
+      background: #151d2c;
+      color: #e7eaf3;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: .15s
+    }
+
+    .button:hover {
+      border-color: #7769da;
+      background: #1d2340
+    }
+
+    .button.primary {
+      color: #fff;
+      border-color: #7769da;
+      background: linear-gradient(135deg, #7467dc, #594db2)
+    }
+
+    .button.danger {
+      color: #ff9d9d
+    }
+
+    .table-wrap {
+      overflow: auto
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left
+    }
+
+    th {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .11em;
+      color: #778297;
+      font-weight: 650;
+      padding: 13px 20px;
+      background: #ffffff03
+    }
+
+    td {
+      padding: 14px 20px;
+      border-top: 1px solid #1c2432;
+      font-size: 13px;
+      vertical-align: middle
+    }
+
+    tbody tr:hover {
+      background: #ffffff03
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace
+    }
+
+    .key-cell {
+      font-weight: 600;
+      max-width: 250px;
+      overflow-wrap: anywhere
+    }
+
+    .value-cell {
+      color: #9ca7ba;
+      max-width: 400px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap
+    }
+
+    .ttl {
+      color: #9da8ba
+    }
+
+    .row-actions {
+      text-align: right;
+      white-space: nowrap
+    }
+
+    .icon-button {
+      background: transparent;
+      color: #9da8ba;
+      border: 0;
+      padding: 5px 7px;
+      cursor: pointer
+    }
+
+    .icon-button:hover {
+      color: #fff
+    }
+
+    .empty {
+      padding: 46px 20px;
+      text-align: center;
+      color: var(--muted)
+    }
+
+    .empty strong {
+      display: block;
+      color: #e9edf7;
+      margin-bottom: 7px
+    }
+
+    .login-wrap {
+      display: none;
+      min-height: 65vh;
+      place-items: center
+    }
+
+    .login {
+      width: min(420px, 100%);
+      padding: 30px
+    }
+
+    .login h1 {
+      font-size: 27px;
+      letter-spacing: -.03em;
+      margin: 0 0 7px
+    }
+
+    .login p {
+      color: var(--muted);
+      font-size: 13px;
+      margin: 0 0 25px
+    }
+
+    .field {
+      display: grid;
+      gap: 7px;
+      margin: 14px 0
+    }
+
+    .field label {
+      font-size: 12px;
+      color: #aeb8ca
+    }
+
+    .field input,
+    .field textarea {
+      width: 100%;
+      border: 1px solid #30394d;
+      background: #090e18;
+      border-radius: 9px;
+      padding: 11px 12px;
+      color: #f1f2f7;
+      font: inherit;
+      font-size: 13px;
+      outline: none
+    }
+
+    .field input:focus,
+    .field textarea:focus {
+      border-color: #8275ed;
+      box-shadow: 0 0 0 3px #8275ed20
+    }
+
+    .field textarea {
+      min-height: 110px;
+      resize: vertical
+    }
+
+    .wide {
+      width: 100%;
+      padding: 11px;
+      margin-top: 8px
+    }
+
+    .error {
+      color: #ff9292;
+      font-size: 12px;
+      min-height: 18px;
+      margin-top: 9px
+    }
+
+    .overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #03050acc;
+      backdrop-filter: blur(6px);
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 5
+    }
+
+    .dialog {
+      width: min(500px, 100%);
+      padding: 23px
+    }
+
+    .dialog-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 17px
+    }
+
+    .dialog-head h2 {
+      font-size: 19px;
+      margin: 0
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 150px;
+      gap: 0 14px
+    }
+
+    .form-grid .full {
+      grid-column: 1/-1
+    }
+
+    .dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 9px;
+      margin-top: 18px
+    }
+
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      padding: 12px 16px;
+      border: 1px solid #334251;
+      border-radius: 10px;
+      background: #151e2b;
+      color: #dce7ef;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: .2s;
+      pointer-events: none
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: none
+    }
+
+    @media(max-width:650px) {
+      .shell {
+        width: calc(100% - 28px);
+        padding-top: 22px
+      }
+
+      .top {
+        margin-bottom: 42px
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: 1fr 1fr
+      }
+
+      .metric {
+        min-width: 0
+      }
+
+      .panel-head {
+        align-items: flex-start;
+        gap: 12px;
+        flex-direction: column
+      }
+
+      .actions {
+        width: 100%
+      }
+
+      .actions .button {
+        flex: 1
+      }
+
+      td,
+      th {
+        padding: 12px
+      }
+
+      .form-grid {
+        grid-template-columns: 1fr
+      }
+
+      .form-grid .full {
+        grid-column: auto
+      }
+
+      .hide-mobile {
+        display: none
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="shell">
+    <header class="top">
+      <div class="brand">
+        <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+            <path d="M12 2.8 20 7v10l-8 4.2L4 17V7l8-4.2Z" />
+            <path d="m4.5 7.3 7.5 4 7.5-4M12 11.5V21" />
+          </svg></div><span>NebulaCache</span>
+      </div>
+      <div class="status"><span class="dot"></span>Node connected</div>
+    </header>
+    <main id="dashboard" style="display:none">
+      <div class="intro">
+        <div class="eyebrow">Control plane</div>
+        <h1>Cache overview</h1>
+        <p>Inspect and manage the entries stored in this NebulaCache node.</p>
+      </div>
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-label">Cache entries</div>
+          <div class="metric-value" id="entry-count">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Console session</div>
+          <div class="metric-value" style="font-size:16px;color:var(--mint)">Authenticated</div>
+        </div>
+      </div>
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">Entries</div>
+            <div class="panel-sub">Keys and values are shown as UTF-8 where possible.</div>
+          </div>
+          <div class="actions"><button class="button" id="refresh">Refresh</button><button class="button primary"
+              id="add">＋ &nbsp;New entry</button><button class="button" id="logout">Sign out</button></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>Value</th>
+                <th class="hide-mobile">Expiry</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="entries"></tbody>
+          </table>
+          <div class="empty" id="empty" style="display:none"><strong>Your cache is empty</strong>Create an entry to get
+            started.</div>
+        </div>
+      </section>
+    </main>
+    <div class="login-wrap" id="login-screen">
+      <section class="panel login">
+        <div class="eyebrow">NebulaCache Admin</div>
+        <h1>Welcome back</h1>
+        <p>Sign in to manage this node's cache entries.</p>
+        <form id="login-form">
+          <div class="field"><label for="username">Username</label><input id="username" autocomplete="username"
+              value="admin" required></div>
+          <div class="field"><label for="password">Password</label><input id="password" type="password"
+              autocomplete="current-password" required></div><button class="button primary wide">Sign in to
+            console</button>
+          <div class="error" id="login-error"></div>
+        </form>
+      </section>
+    </div>
+  </div>
+  <div class="overlay" id="entry-overlay">
+    <form class="panel dialog" id="entry-form">
+      <div class="dialog-head">
+        <h2 id="dialog-title">New entry</h2><button type="button" class="icon-button" id="close-dialog">✕</button>
+      </div>
+      <div class="form-grid">
+        <div class="field full"><label for="entry-key">Key</label><input id="entry-key" required
+            placeholder="e.g. user:42:profile"></div>
+        <div class="field full"><label for="entry-value">Value</label><textarea id="entry-value"
+            placeholder="Enter a value"></textarea></div>
+        <div class="field"><label for="entry-ttl">TTL in seconds <span style="color:var(--muted)">(0 =
+              never)</span></label><input id="entry-ttl" type="number" min="0" value="0"></div>
+      </div>
+      <div class="error" id="entry-error"></div>
+      <div class="dialog-actions"><button type="button" class="button" id="cancel-dialog">Cancel</button><button
+          class="button primary">Save entry</button></div>
+    </form>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script>
+    const $ = id => document.getElementById(id);
+    let entries = [];
+    let editing = null;
+
+    function hex(bytes) {
+      return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+    }
+
+    function unhex(value) {
+      const result = new Uint8Array(value.length / 2);
+      for (let index = 0; index < result.length; index++) {
+        result[index] = parseInt(value.slice(index * 2, index * 2 + 2), 16);
+      }
+      return result;
+    }
+
+    function bytes(value) {
+      return hex(new TextEncoder().encode(value));
+    }
+
+    function text(value) {
+      return new TextDecoder().decode(unhex(value));
+    }
+
+    async function api(url, options = {}) {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(options.headers || {}),
+        },
+      });
+      if (response.status === 401) showLogin();
+      return response;
+    }
+
+    function showLogin() {
+      $('dashboard').style.display = 'none';
+      $('login-screen').style.display = 'grid';
+    }
+
+    function showDashboard() {
+      $('login-screen').style.display = 'none';
+      $('dashboard').style.display = 'block';
+    }
+
+    async function refresh() {
+      const response = await api('/api/entries');
+      if (!response.ok) return;
+
+      entries = await response.json();
+      $('entry-count').textContent = entries.length.toLocaleString();
+      $('entries').replaceChildren();
+      $('empty').style.display = entries.length ? 'none' : 'block';
+
+      for (const entry of entries) {
+        const row = document.createElement('tr');
+        const key = document.createElement('td');
+        key.className = 'key-cell mono';
+        key.textContent = text(entry.key) || '∅';
+
+        const value = document.createElement('td');
+        value.className = 'value-cell mono';
+        value.title = text(entry.value);
+        value.textContent = text(entry.value) || '∅';
+
+        const ttl = document.createElement('td');
+        ttl.className = 'ttl hide-mobile';
+        ttl.textContent = entry.ttl_secs === null ? 'Never' : `${entry.ttl_secs}s`;
+
+        const actions = document.createElement('td');
+        actions.className = 'row-actions';
+
+        const editButton = document.createElement('button');
+        editButton.className = 'icon-button';
+        editButton.textContent = 'Edit';
+        editButton.onclick = () => openEntry(entry);
+
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'icon-button';
+        deleteButton.textContent = 'Delete';
+        deleteButton.onclick = () => removeEntry(entry);
+
+        actions.append(editButton, deleteButton);
+        row.append(key, value, ttl, actions);
+        $('entries').append(row);
+      }
+    }
+
+    function toast(message) {
+      $('toast').textContent = message;
+      $('toast').classList.add('show');
+      setTimeout(() => $('toast').classList.remove('show'), 2400);
+    }
+
+    function openEntry(entry = null) {
+      editing = entry;
+      $('dialog-title').textContent = entry ? 'Edit entry' : 'New entry';
+      $('entry-key').value = entry ? text(entry.key) : '';
+      $('entry-key').disabled = !!entry;
+      $('entry-value').value = entry ? text(entry.value) : '';
+      $('entry-ttl').value = entry?.ttl_secs ?? 0;
+      $('entry-error').textContent = '';
+      $('entry-overlay').style.display = 'flex';
+      $('entry-key').focus();
+    }
+
+    function closeEntry() {
+      $('entry-overlay').style.display = 'none';
+      editing = null;
+    }
+
+    async function removeEntry(entry) {
+      if (!confirm(`Delete “${text(entry.key)}” from the cache?`)) return;
+
+      const response = await api(`/api/entries/${entry.key}`, { method: 'DELETE' });
+      if (response.ok) {
+        toast('Entry deleted');
+        refresh();
+      } else {
+        toast('Unable to delete entry');
+      }
+    }
+
+    $('login-form').onsubmit = async event => {
+      event.preventDefault();
+      $('login-error').textContent = '';
+      const response = await api('/api/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          username: $('username').value,
+          password: $('password').value,
+        }),
+      });
+      if (!response.ok) {
+        $('login-error').textContent = 'The username or password was not accepted.';
+        return;
+      }
+      showDashboard();
+      refresh();
+    };
+
+    $('entry-form').onsubmit = async event => {
+      event.preventDefault();
+      const key = editing ? editing.key : bytes($('entry-key').value);
+      const payload = {
+        key,
+        value: bytes($('entry-value').value),
+        ttl_secs: Number($('entry-ttl').value) || 0,
+      };
+      const response = await api('/api/entries', {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      if (response.ok) {
+        const wasEditing = !!editing;
+        closeEntry();
+        toast(wasEditing ? 'Entry updated' : 'Entry created');
+        refresh();
+      } else {
+        $('entry-error').textContent = response.status === 413
+          ? 'Key or value exceeds the node limits.'
+          : 'Could not save this entry.';
+      }
+    };
+
+    $('add').onclick = () => openEntry();
+    $('refresh').onclick = refresh;
+    $('logout').onclick = async () => {
+      await api('/api/logout', { method: 'POST' });
+      showLogin();
+    };
+    $('close-dialog').onclick = closeEntry;
+    $('cancel-dialog').onclick = closeEntry;
+    $('entry-overlay').onclick = event => {
+      if (event.target === $('entry-overlay')) closeEntry();
+    };
+
+    api('/api/entries').then(response => {
+      if (response.ok) {
+        showDashboard();
+        refresh();
+      } else {
+        showLogin();
+      }
+    });
+  </script>
+</body>
+
+</html>

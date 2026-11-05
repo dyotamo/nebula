@@ -37,6 +37,21 @@ impl CacheStore {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    pub fn snapshot(&self) -> Vec<(Vec<u8>, Vec<u8>, Option<u64>)> {
+        self.entries.retain(|_, entry| !entry.is_expired());
+        self.entries
+            .iter()
+            .map(|entry| {
+                let ttl_secs = entry.expires_at.map(|deadline| {
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_secs()
+                });
+                (entry.key().clone(), entry.value().value.clone(), ttl_secs)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
