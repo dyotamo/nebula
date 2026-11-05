@@ -2,38 +2,51 @@ use std::{io, sync::Arc};
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
     Router,
 };
+use nebula_protocol::FrameLimits;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::engine::CacheStore;
 
-pub async fn run(listener: TcpListener, store: Arc<CacheStore>) -> io::Result<()> {
+pub async fn run(
+    listener: TcpListener,
+    store: Arc<CacheStore>,
+    limits: FrameLimits,
+) -> io::Result<()> {
     info!(address = %listener.local_addr()?, "NebulaCache REST API listening");
-    axum::serve(listener, router(store)).await
+    axum::serve(listener, router(store, limits)).await
 }
 
-fn router(store: Arc<CacheStore>) -> Router {
+fn router(store: Arc<CacheStore>, limits: FrameLimits) -> Router {
     Router::new()
         .route("/v1/ping", get(ping))
         .route(
             "/v1/keys/{key}",
             get(get_key).put(set_key).delete(delete_key),
         )
-        .with_state(store)
+        .layer(DefaultBodyLimit::max(limits.max_value_len))
+        .with_state((store, limits))
 }
 
 async fn ping() -> &'static str {
     "PONG"
 }
 
-async fn get_key(State(store): State<Arc<CacheStore>>, Path(key): Path<String>) -> Response {
+async fn get_key(
+    State((store, limits)): State<(Arc<CacheStore>, FrameLimits)>,
+    Path(key): Path<String>,
+) -> Response {
+    if key.len() > limits.max_key_len {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+
     match store.get(key.as_bytes()) {
         Some(value) => (StatusCode::OK, Body::from(value)).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -41,16 +54,27 @@ async fn get_key(State(store): State<Arc<CacheStore>>, Path(key): Path<String>) 
 }
 
 async fn set_key(
-    State(store): State<Arc<CacheStore>>,
+    State((store, limits)): State<(Arc<CacheStore>, FrameLimits)>,
     Path(key): Path<String>,
     Query(options): Query<SetOptions>,
     body: Bytes,
 ) -> StatusCode {
+    if key.len() > limits.max_key_len {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
+
     store.set(key.into_bytes(), body.to_vec(), options.ttl_secs);
     StatusCode::NO_CONTENT
 }
 
-async fn delete_key(State(store): State<Arc<CacheStore>>, Path(key): Path<String>) -> StatusCode {
+async fn delete_key(
+    State((store, limits)): State<(Arc<CacheStore>, FrameLimits)>,
+    Path(key): Path<String>,
+) -> StatusCode {
+    if key.len() > limits.max_key_len {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
+
     if store.delete(key.as_bytes()) {
         StatusCode::NO_CONTENT
     } else {
@@ -73,6 +97,8 @@ mod tests {
         net::{TcpListener, TcpStream},
     };
 
+    use nebula_protocol::FrameLimits;
+
     use super::router;
     use crate::engine::CacheStore;
 
@@ -92,7 +118,9 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let store = Arc::new(CacheStore::new());
         let server = tokio::spawn(async move {
-            axum::serve(listener, router(store)).await.unwrap();
+            axum::serve(listener, router(store, FrameLimits::default()))
+                .await
+                .unwrap();
         });
 
         let ping = request(
@@ -131,6 +159,36 @@ mod tests {
         )
         .await;
         assert!(missing.starts_with("HTTP/1.1 404"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rest_api_enforces_configured_key_and_value_limits() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let store = Arc::new(CacheStore::new());
+        let limits = FrameLimits {
+            max_key_len: 3,
+            max_value_len: 4,
+        };
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(store, limits)).await.unwrap();
+        });
+
+        let long_key = request(
+            address,
+            "GET /v1/keys/long HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(long_key.starts_with("HTTP/1.1 413"));
+
+        let large_value = request(
+            address,
+            "PUT /v1/keys/key HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+        )
+        .await;
+        assert!(large_value.starts_with("HTTP/1.1 413"));
 
         server.abort();
     }

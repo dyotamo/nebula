@@ -9,6 +9,7 @@ axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 nebula-protocol = { path = "../nebula-protocol" }
 serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

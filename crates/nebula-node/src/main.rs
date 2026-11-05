@@ -12,18 +12,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let config = Config::from_args();
+    let config = Config::from_args()?;
     let listener = TcpListener::bind(config.listen_addr).await?;
     let store = Arc::new(CacheStore::new());
+    let frame_limits = config.frame_limits();
 
     if config.rest_api {
         let rest_listener = TcpListener::bind(config.rest_listen_addr).await?;
         tokio::try_join!(
-            server::run(listener, Arc::clone(&store)),
-            rest::run(rest_listener, store)
+            server::run(listener, Arc::clone(&store), frame_limits),
+            rest::run(rest_listener, store, frame_limits)
         )?;
     } else {
-        server::run(listener, store).await?;
+        server::run(listener, store, frame_limits).await?;
     }
     Ok(())
 }

@@ -61,6 +61,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             client.ping().await?;
             println!("PONG");
         }
+
         Command::Set {
             key,
             value,
@@ -70,6 +71,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .set(key.as_bytes(), value.as_bytes(), ttl_secs)
                 .await?;
         }
+
         Command::Get { key } => match client.get(key.as_bytes()).await? {
             Some(value) => {
                 let mut stdout = tokio_io::stdout();
@@ -79,6 +81,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             }
             None => return Err(invalid_input("key not found").into()),
         },
+
         Command::Delete { key } => {
             if client.delete(key.as_bytes()).await? {
                 println!("deleted");
