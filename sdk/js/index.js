@@ -202,7 +202,7 @@ function parseAddress(address) {
     if ((address.match(/:/g) || []).length !== 1) {
       throw new TypeError('address must be a host:port string; bracket IPv6 addresses');
     }
-    
+
     const separator = address.lastIndexOf(':');
     host = address.slice(0, separator);
     portText = address.slice(separator + 1);
@@ -254,6 +254,7 @@ function encodeTtl(ttlSecs) {
     if (!Number.isSafeInteger(ttlSecs) || ttlSecs < 0) {
       throw new RangeError('ttlSecs must be a non-negative 64-bit integer');
     }
+    
     ttlSecs = BigInt(ttlSecs);
   }
 
