@@ -3,7 +3,7 @@ use thiserror::Error;
 use tokio::net::TcpStream;
 
 #[derive(Debug, Error)]
-pub enum ClientError {
+pub(super) enum ClientError {
     #[error("connection failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("protocol error: {0}")]
@@ -12,28 +12,24 @@ pub enum ClientError {
     Server { status: Status, message: String },
 }
 
-#[derive(Debug, Clone)]
-pub struct Client {
+#[derive(Debug)]
+pub(super) struct Client {
     address: String,
 }
 
 impl Client {
-    pub fn new(address: impl Into<String>) -> Self {
+    pub(super) fn new(address: impl Into<String>) -> Self {
         Self {
             address: address.into(),
         }
     }
 
-    pub fn address(&self) -> &str {
-        &self.address
-    }
-
-    pub async fn ping(&self) -> Result<(), ClientError> {
+    pub(super) async fn ping(&self) -> Result<(), ClientError> {
         let response = self.send(Request::ping()).await?;
         self.ensure_ok(response.status, response.value)
     }
 
-    pub async fn set(
+    pub(super) async fn set(
         &self,
         key: impl AsRef<[u8]>,
         value: impl AsRef<[u8]>,
@@ -50,7 +46,7 @@ impl Client {
         self.ensure_ok(response.status, response.value)
     }
 
-    pub async fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, ClientError> {
+    pub(super) async fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, ClientError> {
         let response = self
             .send(Request {
                 opcode: Opcode::Get,
@@ -66,7 +62,7 @@ impl Client {
         }
     }
 
-    pub async fn delete(&self, key: impl AsRef<[u8]>) -> Result<bool, ClientError> {
+    pub(super) async fn delete(&self, key: impl AsRef<[u8]>) -> Result<bool, ClientError> {
         let response = self
             .send(Request {
                 opcode: Opcode::Delete,

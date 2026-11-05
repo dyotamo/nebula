@@ -4,7 +4,7 @@ NebulaCache is a Rust in-memory cache with a custom TCP protocol, an optional RE
 
 - **`nebula-protocol`**: Defines the versioned binary request/response protocol and TCP framing shared by the node and client.
 - **`nebula-node`**: Provides the asynchronous TCP server, optional HTTP REST API, and concurrent in-memory store with TTL expiration.
-- **`nebulactl`**: Provides a reusable TCP client library and the `nebulactl` command-line tool for interacting with a node.
+- **`nebulactl`**: Provides the command-line tool for interacting with a node.
 
 > **Current status:** Phase 1 — single-node cache engine with TCP and optional REST interfaces. Docker Compose starts three independent nodes; they do not form a cluster and do not share data.
 

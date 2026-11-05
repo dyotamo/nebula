@@ -1,7 +1,10 @@
 use std::{error::Error, io, process};
 
 use clap::{Parser, Subcommand};
-use nebulactl::Client;
+
+mod client;
+
+use client::Client;
 use tokio::io::{self as tokio_io, AsyncWriteExt};
 
 #[derive(Debug, Parser)]
