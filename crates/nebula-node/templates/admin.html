@@ -192,6 +192,57 @@
       color: #ff9d9d
     }
 
+    .list-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--line)
+    }
+
+    .search-input {
+      width: min(360px, 100%);
+      border: 1px solid #30394d;
+      border-radius: 9px;
+      padding: 10px 12px;
+      background: #090e18;
+      color: #f1f2f7;
+      font: inherit;
+      font-size: 13px;
+      outline: none
+    }
+
+    .search-input:focus {
+      border-color: #8275ed;
+      box-shadow: 0 0 0 3px #8275ed20
+    }
+
+    .result-count,
+    .pagination-status {
+      color: var(--muted);
+      font-size: 12px
+    }
+
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 13px 20px
+    }
+
+    .pagination-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px
+    }
+
+    .pagination .button:disabled {
+      opacity: .45;
+      cursor: not-allowed
+    }
+
     .table-wrap {
       overflow: auto
     }
@@ -430,6 +481,20 @@
         min-width: 0
       }
 
+      .list-controls,
+      .pagination {
+        align-items: stretch;
+        flex-direction: column
+      }
+
+      .search-input {
+        width: 100%
+      }
+
+      .pagination-actions {
+        justify-content: space-between
+      }
+
       .panel-head {
         align-items: flex-start;
         gap: 12px;
@@ -437,11 +502,12 @@
       }
 
       .actions {
-        width: 100%
+        width: 100%;
+        flex-wrap: wrap
       }
 
       .actions .button {
-        flex: 1
+        flex: 1 1 40%
       }
 
       td,
@@ -498,7 +564,13 @@
             <div class="panel-sub">Keys and values are shown as UTF-8 where possible.</div>
           </div>
           <div class="actions"><button class="button" id="refresh">Refresh</button><button class="button primary"
-              id="add">＋ &nbsp;New entry</button><button class="button" id="logout">Sign out</button></div>
+              id="add">＋ &nbsp;New entry</button><button class="button danger" id="clear-cache">Clear cache</button><button
+              class="button" id="logout">Sign out</button></div>
+        </div>
+        <div class="list-controls">
+          <input class="search-input" id="search" type="search" placeholder="Search keys and values..."
+            aria-label="Search cache entries">
+          <div class="result-count" id="result-count"></div>
         </div>
         <div class="table-wrap">
           <table>
@@ -512,8 +584,14 @@
             </thead>
             <tbody id="entries"></tbody>
           </table>
-          <div class="empty" id="empty" style="display:none"><strong>Your cache is empty</strong>Create an entry to get
-            started.</div>
+          <div class="empty" id="empty" style="display:none"><strong id="empty-title">Your cache is empty</strong><span
+              id="empty-message">Create an entry to get started.</span></div>
+        </div>
+        <div class="pagination">
+          <div class="pagination-status" id="pagination-status"></div>
+          <div class="pagination-actions"><button class="button" id="previous-page">Previous</button>
+            <span class="pagination-status" id="page-status"></span><button class="button" id="next-page">Next</button>
+          </div>
         </div>
       </section>
     </main>
@@ -554,6 +632,9 @@
     const $ = id => document.getElementById(id);
     let entries = [];
     let editing = null;
+    let currentPage = 1;
+    const pageSize = 20;
+    let searchTimer;
 
     function hex(bytes) {
       return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
@@ -597,14 +678,38 @@
       $('dashboard').style.display = 'block';
     }
 
-    async function refresh() {
-      const response = await api('/api/entries');
+    async function refresh(page = currentPage) {
+      currentPage = page;
+      const params = new URLSearchParams({
+        page: String(currentPage),
+        page_size: String(pageSize),
+        search: $('search').value,
+      });
+      const response = await api(`/api/entries?${params}`);
       if (!response.ok) return;
 
-      entries = await response.json();
-      $('entry-count').textContent = entries.length.toLocaleString();
+      const result = await response.json();
+      entries = result.entries;
+      currentPage = result.page;
+      const pageCount = Math.max(1, Math.ceil(result.matching / result.page_size));
+      const firstEntry = result.matching ? (currentPage - 1) * result.page_size + 1 : 0;
+      const lastEntry = Math.min(currentPage * result.page_size, result.matching);
+      $('entry-count').textContent = result.total.toLocaleString();
+      $('result-count').textContent = `${result.matching.toLocaleString()} matching`;
+      $('pagination-status').textContent = result.matching
+        ? `Showing ${firstEntry.toLocaleString()}–${lastEntry.toLocaleString()} of ${result.matching.toLocaleString()}`
+        : 'No entries to show';
+      $('page-status').textContent = `Page ${currentPage} of ${pageCount}`;
+      $('previous-page').disabled = currentPage <= 1;
+      $('next-page').disabled = currentPage >= pageCount;
       $('entries').replaceChildren();
       $('empty').style.display = entries.length ? 'none' : 'block';
+      $('empty-title').textContent = result.total && $('search').value
+        ? 'No entries found'
+        : 'Your cache is empty';
+      $('empty-message').textContent = $('search').value && !result.matching
+        ? 'No cache entries match your search.'
+        : 'Create an entry to get started.';
 
       for (const entry of entries) {
         const row = document.createElement('tr');
@@ -718,6 +823,25 @@
 
     $('add').onclick = () => openEntry();
     $('refresh').onclick = refresh;
+    $('clear-cache').onclick = async () => {
+      if (!confirm('Clear every cache entry? This cannot be undone.')) return;
+
+      const response = await api('/api/entries', { method: 'DELETE' });
+      if (!response.ok) {
+        toast('Unable to clear the cache');
+        return;
+      }
+
+      $('search').value = '';
+      toast('Cache cleared');
+      refresh(1);
+    };
+    $('search').oninput = () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => refresh(1), 180);
+    };
+    $('previous-page').onclick = () => refresh(currentPage - 1);
+    $('next-page').onclick = () => refresh(currentPage + 1);
     $('logout').onclick = async () => {
       await api('/api/logout', { method: 'POST' });
       showLogin();

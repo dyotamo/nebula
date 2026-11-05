@@ -99,7 +99,10 @@ fn router(store: Arc<CacheStore>, limits: FrameLimits, password: String) -> Rout
         .route("/", get(index))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
-        .route("/api/entries", get(list_entries).put(set_entry))
+        .route(
+            "/api/entries",
+            get(list_entries).put(set_entry).delete(clear_entries),
+        )
         .route("/api/entries/{key}", delete(delete_entry))
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
@@ -199,6 +202,15 @@ async fn list_entries(
         page_size,
     })
     .into_response()
+}
+
+async fn clear_entries(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
+    if !authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    state.store.clear();
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn set_entry(
@@ -321,8 +333,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        constant_time_eq, decode_hex, delete_entry, encode_hex, list_entries, login, set_entry,
-        ConsoleState, ListEntriesQuery, LoginRequest,
+        clear_entries, constant_time_eq, decode_hex, delete_entry, encode_hex, list_entries, login,
+        set_entry, ConsoleState, ListEntriesQuery, LoginRequest,
     };
     use crate::engine::CacheStore;
     use axum::{
@@ -349,6 +361,8 @@ mod tests {
         )
         .await;
         assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        let anonymous_clear = clear_entries(State(Arc::clone(&state)), HeaderMap::new()).await;
+        assert_eq!(anonymous_clear.status(), StatusCode::UNAUTHORIZED);
 
         let invalid_login = login(
             State(Arc::clone(&state)),
@@ -424,8 +438,17 @@ mod tests {
         assert_eq!(result["page"], 2);
         assert_eq!(result["entries"][0]["key"], "62");
 
-        let deleted = delete_entry(State(state), headers, Path("6b".to_owned())).await;
+        let deleted = delete_entry(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Path("6b".to_owned()),
+        )
+        .await;
         assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        let cleared = clear_entries(State(Arc::clone(&state)), headers).await;
+        assert_eq!(cleared.status(), StatusCode::NO_CONTENT);
+        assert!(state.store.is_empty());
     }
 
     #[test]

@@ -30,6 +30,10 @@ impl CacheStore {
         self.entries.remove(key).is_some()
     }
 
+    pub fn clear(&self) {
+        self.entries.clear();
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
