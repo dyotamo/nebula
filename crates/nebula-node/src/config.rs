@@ -11,6 +11,14 @@ pub struct Config {
         value_name = "HOST:PORT"
     )]
     pub listen_addr: SocketAddr,
+    #[arg(long = "rest-api")]
+    pub rest_api: bool,
+    #[arg(
+        long = "rest-listen",
+        default_value = "0.0.0.0:7002",
+        value_name = "HOST:PORT"
+    )]
+    pub rest_listen_addr: SocketAddr,
 }
 
 impl Config {
@@ -42,5 +50,27 @@ mod tests {
     #[test]
     fn rejects_invalid_listen_address() {
         assert!(Config::try_parse_from(["nebula-node", "--listen", "invalid"]).is_err());
+    }
+
+    #[test]
+    fn rest_api_is_disabled_by_default() {
+        let config = Config::try_parse_from(["nebula-node"]).unwrap();
+
+        assert!(!config.rest_api);
+        assert_eq!(config.rest_listen_addr.to_string(), "0.0.0.0:7002");
+    }
+
+    #[test]
+    fn parses_rest_api_options() {
+        let config = Config::try_parse_from([
+            "nebula-node",
+            "--rest-api",
+            "--rest-listen",
+            "127.0.0.1:7003",
+        ])
+        .unwrap();
+
+        assert!(config.rest_api);
+        assert_eq!(config.rest_listen_addr.to_string(), "127.0.0.1:7003");
     }
 }
