@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/nebula-protocol", "crates/nebula-node"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+tokio = { version = "1.41", features = ["full"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+dashmap = "6"
