@@ -1,0 +1,15 @@
+[package]
+name = "nebulactl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nebulactl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+nebula-protocol = { path = "../nebula-protocol" }
+tokio.workspace = true
+thiserror.workspace = true

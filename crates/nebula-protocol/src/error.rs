@@ -14,4 +14,6 @@ pub enum ProtocolError {
     FrameTooLarge,
     #[error("invalid frame: {0}")]
     InvalidFrame(&'static str),
+    #[error("unknown response status: {0}")]
+    UnknownStatus(u8),
 }

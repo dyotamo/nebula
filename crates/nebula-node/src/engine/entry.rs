@@ -17,6 +17,7 @@ impl CacheEntry {
     }
 
     pub fn is_expired(&self) -> bool {
-        self.expires_at.is_some_and(|deadline| Instant::now() >= deadline)
+        self.expires_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
     }
 }

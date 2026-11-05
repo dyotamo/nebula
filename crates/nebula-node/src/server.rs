@@ -1,7 +1,10 @@
 use std::{io, sync::Arc};
 
 use nebula_protocol::{read_request, write_response};
-use tokio::{net::{TcpListener, TcpStream}, io::AsyncWriteExt};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, TcpStream},
+};
 use tracing::{error, info, warn};
 
 use crate::{engine::CacheStore, handler};

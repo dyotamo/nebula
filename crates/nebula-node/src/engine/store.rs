@@ -8,7 +8,9 @@ pub struct CacheStore {
 }
 
 impl CacheStore {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn set(&self, key: Vec<u8>, value: Vec<u8>, ttl_secs: u64) {
         self.entries.insert(key, CacheEntry::new(value, ttl_secs));
@@ -28,9 +30,13 @@ impl CacheStore {
         self.entries.remove(key).is_some()
     }
 
-    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 #[cfg(test)]

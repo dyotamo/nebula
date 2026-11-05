@@ -32,6 +32,11 @@ pub struct Request {
 
 impl Request {
     pub fn ping() -> Self {
-        Self { opcode: Opcode::Ping, key: Vec::new(), value: Vec::new(), ttl_secs: 0 }
+        Self {
+            opcode: Opcode::Ping,
+            key: Vec::new(),
+            value: Vec::new(),
+            ttl_secs: 0,
+        }
     }
 }
