@@ -521,10 +521,8 @@
       <section class="panel login">
         <div class="eyebrow">NebulaCache Admin</div>
         <h1>Welcome back</h1>
-        <p>Sign in to manage this node's cache entries.</p>
+        <p>Enter the admin password to manage this node's cache entries.</p>
         <form id="login-form">
-          <div class="field"><label for="username">Username</label><input id="username" autocomplete="username"
-              value="admin" required></div>
           <div class="field"><label for="password">Password</label><input id="password" type="password"
               autocomplete="current-password" required></div><button class="button primary wide">Sign in to
             console</button>
@@ -683,12 +681,11 @@
       const response = await api('/api/login', {
         method: 'POST',
         body: JSON.stringify({
-          username: $('username').value,
           password: $('password').value,
         }),
       });
       if (!response.ok) {
-        $('login-error').textContent = 'The username or password was not accepted.';
+        $('login-error').textContent = 'The password was not accepted.';
         return;
       }
       showDashboard();

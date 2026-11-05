@@ -2,7 +2,7 @@ use std::{io, sync::Arc, time::Instant};
 
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
@@ -29,8 +29,8 @@ struct ConsoleState {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LoginRequest {
-    username: String,
     password: String,
 }
 
@@ -47,6 +47,33 @@ struct EntryView {
     key: String,
     value: String,
     ttl_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct ListEntriesQuery {
+    page: usize,
+    page_size: usize,
+    search: String,
+}
+
+impl Default for ListEntriesQuery {
+    fn default() -> Self {
+        Self {
+            page: 1,
+            page_size: 50,
+            search: String::new(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct EntriesPage {
+    entries: Vec<EntryView>,
+    total: usize,
+    matching: usize,
+    page: usize,
+    page_size: usize,
 }
 
 pub async fn run(
@@ -86,11 +113,10 @@ async fn login(
     State(state): State<Arc<ConsoleState>>,
     Json(credentials): Json<LoginRequest>,
 ) -> Response {
-    if credentials.username != "admin" || !constant_time_eq(&credentials.password, &state.password)
-    {
+    if !constant_time_eq(&credentials.password, &state.password) {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Invalid username or password"})),
+            Json(json!({"error": "Invalid password"})),
         )
             .into_response();
     }
@@ -126,22 +152,53 @@ async fn logout(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> R
         .into_response()
 }
 
-async fn list_entries(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
+async fn list_entries(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+    Query(query): Query<ListEntriesQuery>,
+) -> Response {
     if !authorized(&state, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let entries: Vec<EntryView> = state
-        .store
-        .snapshot()
+    let search = query.search.trim().to_lowercase();
+    let mut entries = state.store.snapshot();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let total = entries.len();
+    entries.retain(|(key, value, _)| {
+        search.is_empty()
+            || String::from_utf8_lossy(key)
+                .to_lowercase()
+                .contains(&search)
+            || String::from_utf8_lossy(value)
+                .to_lowercase()
+                .contains(&search)
+    });
+
+    let matching = entries.len();
+    let page_size = query.page_size.clamp(1, 100);
+    let page_count = matching.div_ceil(page_size).max(1);
+    let page = query.page.max(1).min(page_count);
+    let offset = (page - 1) * page_size;
+    let entries = entries
         .into_iter()
+        .skip(offset)
+        .take(page_size)
         .map(|(key, value, ttl_secs)| EntryView {
             key: encode_hex(&key),
             value: encode_hex(&value),
             ttl_secs,
         })
         .collect();
-    Json(entries).into_response()
+
+    Json(EntriesPage {
+        entries,
+        total,
+        matching,
+        page,
+        page_size,
+    })
+    .into_response()
 }
 
 async fn set_entry(
@@ -265,12 +322,12 @@ mod tests {
 
     use super::{
         constant_time_eq, decode_hex, delete_entry, encode_hex, list_entries, login, set_entry,
-        ConsoleState, LoginRequest,
+        ConsoleState, ListEntriesQuery, LoginRequest,
     };
     use crate::engine::CacheStore;
     use axum::{
         body::{to_bytes, Bytes},
-        extract::{Path, State},
+        extract::{Path, Query, State},
         http::{header, HeaderMap, HeaderValue, StatusCode},
         Json,
     };
@@ -285,13 +342,17 @@ mod tests {
             sessions: Arc::new(dashmap::DashMap::new()),
         });
 
-        let anonymous = list_entries(State(Arc::clone(&state)), HeaderMap::new()).await;
+        let anonymous = list_entries(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Query(ListEntriesQuery::default()),
+        )
+        .await;
         assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
 
         let invalid_login = login(
             State(Arc::clone(&state)),
             Json(LoginRequest {
-                username: "admin".to_owned(),
                 password: "wrong".to_owned(),
             }),
         )
@@ -301,7 +362,6 @@ mod tests {
         let authenticated = login(
             State(Arc::clone(&state)),
             Json(LoginRequest {
-                username: "admin".to_owned(),
                 password: "secret".to_owned(),
             }),
         )
@@ -327,12 +387,42 @@ mod tests {
         .await;
         assert_eq!(saved.status(), StatusCode::NO_CONTENT);
 
-        let listed = list_entries(State(Arc::clone(&state)), headers.clone()).await;
-        assert_eq!(listed.status(), StatusCode::OK);
-        let body = to_bytes(listed.into_body(), 1024).await.unwrap();
-        let entries: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(entries[0]["key"], "6b");
-        assert_eq!(entries[0]["value"], "6869");
+        state
+            .store
+            .set(b"a".to_vec(), b"searchable value".to_vec(), 0);
+        state.store.set(b"b".to_vec(), b"another value".to_vec(), 0);
+
+        let filtered = list_entries(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Query(ListEntriesQuery {
+                page: 1,
+                page_size: 1,
+                search: "SEARCH".to_owned(),
+            }),
+        )
+        .await;
+        assert_eq!(filtered.status(), StatusCode::OK);
+        let body = to_bytes(filtered.into_body(), 1024).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["total"], 3);
+        assert_eq!(result["matching"], 1);
+        assert_eq!(result["entries"][0]["key"], "61");
+
+        let second_page = list_entries(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Query(ListEntriesQuery {
+                page: 2,
+                page_size: 1,
+                search: String::new(),
+            }),
+        )
+        .await;
+        let body = to_bytes(second_page.into_body(), 1024).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["page"], 2);
+        assert_eq!(result["entries"][0]["key"], "62");
 
         let deleted = delete_entry(State(state), headers, Path("6b".to_owned())).await;
         assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
