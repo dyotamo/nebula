@@ -1,0 +1,14 @@
+{
+  "name": "nebulacache",
+  "version": "0.1.0",
+  "description": "JavaScript client for the NebulaCache binary TCP protocol",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

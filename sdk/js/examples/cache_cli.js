@@ -1,0 +1,107 @@
+const { NebulaCache } = require('../index');
+
+const USAGE = 'Usage: node examples/cache_cli.js [--address host:port] <ping|set|get|delete> [arguments]';
+const MAX_UINT64 = 0xffffffffffffffffn;
+
+async function main(argv) {
+  let address = process.env.NEBULA_ADDR || '127.0.0.1:7001';
+  const args = [...argv];
+
+  while (args[0] === '--address' || args[0]?.startsWith('--address=')) {
+    const option = args.shift();
+    if (option === '--address') {
+      address = args.shift();
+      if (!address) {
+        throw new Error('--address requires a value');
+      }
+    } else {
+      address = option.slice('--address='.length);
+      if (!address) {
+        throw new Error('--address requires a value');
+      }
+    }
+  }
+
+  if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
+    console.log(USAGE);
+    return args.length === 0 ? 1 : 0;
+  }
+
+  const command = args.shift();
+  const cache = new NebulaCache(address);
+
+  if (command === 'ping') {
+    requireNoArguments(args);
+    await cache.ping();
+    console.log('PONG');
+    return 0;
+  }
+
+  if (command === 'set') {
+    const [key, value, ...options] = args;
+    if (key === undefined || value === undefined) {
+      throw new Error('set requires a key and value');
+    }
+    let ttlSecs = 0n;
+    for (let index = 0; index < options.length; index += 1) {
+      if (options[index] !== '--ttl' || index + 1 >= options.length) {
+        throw new Error(`unexpected set argument: ${options[index]}`);
+      }
+      const ttlText = options[index + 1];
+      if (!/^\d+$/.test(ttlText)) {
+        throw new Error('TTL must be a non-negative 64-bit integer');
+      }
+      ttlSecs = BigInt(ttlText);
+      if (ttlSecs > MAX_UINT64) {
+        throw new Error('TTL must be a non-negative 64-bit integer');
+      }
+      index += 1;
+    }
+    await cache.set(key, value, ttlSecs);
+    console.log('stored');
+    return 0;
+  }
+
+  if (command === 'get') {
+    requireArgumentCount(args, 1, command);
+    const value = await cache.get(args[0]);
+    if (value === null) {
+      console.log('not found');
+      return 1;
+    }
+    try {
+      console.log(new TextDecoder('utf-8', { fatal: true }).decode(value));
+    } catch {
+      console.log(value.toString('hex'));
+    }
+    return 0;
+  }
+
+  if (command === 'delete') {
+    requireArgumentCount(args, 1, command);
+    console.log(await cache.delete(args[0]) ? 'deleted' : 'not found');
+    return 0;
+  }
+
+  throw new Error(`unknown command: ${command}`);
+}
+
+function requireNoArguments(args) {
+  if (args.length !== 0) {
+    throw new Error(`unexpected argument: ${args[0]}`);
+  }
+}
+
+function requireArgumentCount(args, count, command) {
+  if (args.length !== count) {
+    throw new Error(`${command} requires ${count} argument${count === 1 ? '' : 's'}`);
+  }
+}
+
+main(process.argv.slice(2)).then((exitCode) => {
+  process.exitCode = exitCode;
+}).catch((error) => {
+  console.error(`nebulacache-example: ${error.message}`);
+  console.error(USAGE);
+  process.exitCode = 1;
+});
