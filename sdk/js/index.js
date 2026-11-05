@@ -50,6 +50,7 @@ class NebulaCache {
     if (!value.equals(Buffer.from('PONG'))) {
       throw new CacheProtocolError('PING response did not contain PONG');
     }
+
     return true;
   }
 
@@ -59,6 +60,7 @@ class NebulaCache {
     if (encodedValue.length > MAX_VALUE_LENGTH) {
       throw new RangeError(`value exceeds the ${MAX_VALUE_LENGTH}-byte protocol limit`);
     }
+
     const encodedTtl = encodeTtl(ttlSecs);
     const { status, value: responseValue } = await this._request(1, encodedKey, encodedValue, encodedTtl);
     ensureOk(status, responseValue);
@@ -70,6 +72,7 @@ class NebulaCache {
     if (status === 1) {
       return null;
     }
+
     ensureOk(status, value);
     return value;
   }
@@ -80,6 +83,7 @@ class NebulaCache {
     if (status === 1) {
       return false;
     }
+
     ensureOk(status, value);
     return true;
   }
@@ -107,9 +111,11 @@ class NebulaCache {
         if (settled) {
           return;
         }
+
         settled = true;
         socket.setTimeout(0);
         socket.destroy();
+
         if (error) {
           reject(error);
         } else {
@@ -120,6 +126,7 @@ class NebulaCache {
       socket.setTimeout(this.timeout, () => {
         finish(new CacheConnectionError(`Request to NebulaCache at ${this.address} timed out`));
       });
+
       socket.on('connect', () => socket.write(request));
       socket.on('data', (chunk) => {
         let offset = 0;
@@ -142,10 +149,12 @@ class NebulaCache {
         if (expectedValueLength !== undefined && offset < chunk.length) {
           const valueChunk = chunk.subarray(offset);
           receivedValueLength += valueChunk.length;
+
           if (receivedValueLength > expectedValueLength) {
             finish(new CacheProtocolError('response contains bytes beyond its declared value length'));
             return;
           }
+
           valueChunks.push(valueChunk);
         }
 
@@ -154,14 +163,17 @@ class NebulaCache {
           finish(null, { status, value: Buffer.concat(valueChunks, expectedValueLength) });
         }
       });
+
       socket.on('end', () => {
         if (!settled) {
           finish(new CacheProtocolError('connection closed before the response was complete'));
         }
       });
+
       socket.on('error', (error) => {
         finish(new CacheConnectionError(`Could not reach NebulaCache at ${this.address}: ${error.message}`));
       });
+
       socket.on('close', () => {
         if (!settled) {
           finish(new CacheProtocolError('connection closed before the response was complete'));
@@ -183,12 +195,14 @@ function parseAddress(address) {
     if (closingBracket < 0 || address[closingBracket + 1] !== ':') {
       throw new TypeError('IPv6 addresses must use the [host]:port format');
     }
+
     host = address.slice(1, closingBracket);
     portText = address.slice(closingBracket + 2);
   } else {
     if ((address.match(/:/g) || []).length !== 1) {
       throw new TypeError('address must be a host:port string; bracket IPv6 addresses');
     }
+    
     const separator = address.lastIndexOf(':');
     host = address.slice(0, separator);
     portText = address.slice(separator + 1);
@@ -197,10 +211,12 @@ function parseAddress(address) {
   if (!host || !/^\d+$/.test(portText)) {
     throw new TypeError('address must be a host:port string');
   }
+
   const port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new RangeError('port must be between 1 and 65535');
   }
+
   return { host, port };
 }
 
@@ -208,13 +224,16 @@ function encodeKey(key) {
   if (typeof key !== 'string') {
     throw new TypeError('key must be a string');
   }
+
   if (key.length === 0) {
     throw new RangeError('key must not be empty');
   }
+
   const encodedKey = Buffer.from(key, 'utf8');
   if (encodedKey.length > MAX_KEY_LENGTH) {
     throw new RangeError(`key exceeds the ${MAX_KEY_LENGTH}-byte protocol limit`);
   }
+
   return encodedKey;
 }
 
@@ -222,9 +241,11 @@ function encodeValue(value) {
   if (typeof value === 'string') {
     return Buffer.from(value, 'utf8');
   }
+
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
     return Buffer.from(value);
   }
+
   throw new TypeError('value must be a string or Uint8Array');
 }
 
@@ -235,9 +256,11 @@ function encodeTtl(ttlSecs) {
     }
     ttlSecs = BigInt(ttlSecs);
   }
+
   if (typeof ttlSecs !== 'bigint' || ttlSecs < 0n || ttlSecs > MAX_UINT64) {
     throw new RangeError('ttlSecs must be a non-negative 64-bit integer');
   }
+
   return ttlSecs;
 }
 
@@ -245,18 +268,22 @@ function parseResponseHeader(header) {
   if (!header.subarray(0, 4).equals(MAGIC)) {
     throw new CacheProtocolError('response has invalid magic bytes');
   }
+
   const version = header.readUInt8(4);
   if (version !== VERSION) {
     throw new CacheProtocolError(`unsupported protocol version: ${version}`);
   }
+
   const status = header.readUInt8(5);
   if (!STATUS_NAMES.has(status)) {
     throw new CacheProtocolError(`unknown response status: ${status}`);
   }
+
   const valueLength = header.readUInt32BE(6);
   if (valueLength > MAX_VALUE_LENGTH) {
     throw new CacheProtocolError(`response exceeds the ${MAX_VALUE_LENGTH}-byte protocol limit`);
   }
+
   return valueLength;
 }
 
