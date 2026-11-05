@@ -1,12 +1,12 @@
 # NebulaCache
 
-NebulaCache is a Rust in-memory cache with a custom TCP protocol, an optional REST API, and a command-line client. The workspace is split into three crates:
+NebulaCache is a Rust in-memory cache with a custom TCP protocol, a command-line client, and an optional password-protected web admin console. The workspace is split into three crates:
 
 - **`nebula-protocol`**: Defines the versioned binary request/response protocol and TCP framing shared by the node and client.
-- **`nebula-node`**: Provides the asynchronous TCP server, optional HTTP REST API, and concurrent in-memory store with TTL expiration.
+- **`nebula-node`**: Provides the asynchronous TCP server, concurrent in-memory store with TTL expiration, and optional password-protected web admin console.
 - **`nebulactl`**: Provides the command-line tool for interacting with a node.
 
-> **Current status:** Phase 1 — single-node cache engine with TCP and optional REST interfaces. Docker Compose starts three independent nodes; they do not form a cluster and do not share data.
+> **Current status:** Single-node cache engine with a TCP interface and an optional web admin console. Docker Compose starts three independent nodes; they do not form a cluster and do not share data.
 
 ## Requirements
 
@@ -31,6 +31,8 @@ Start a node listening on `127.0.0.1:7001`:
 cargo run -p nebula-node -- --listen 127.0.0.1:7001
 ```
 
+The node also accepts a YAML configuration file with `--config PATH`. It can set `listen_addr`, `admin_listen_addr`, `max_key_len`, and `max_value_len`; the default limits are 1 KiB per key and 8 MiB per value. CLI options override the file for the TCP listen address and frame limits.
+
 ## Use the command-line client
 
 In another terminal, `nebulactl` connects to `127.0.0.1:7001` by default. Set `NEBULA_ADDR` or pass `--address` / `-a` to select another node:
@@ -46,30 +48,17 @@ cargo run -p nebulactl -- --address 127.0.0.1:7001 ping
 
 The optional `set` TTL is in seconds; omit it or use `0` for a key without expiration.
 
-## Use the REST API
+## Use the web admin console
 
-The REST API is disabled by default. Enable it with `--rest-api`; it listens on `0.0.0.0:7002` by default. Use `--rest-listen HOST:PORT` to choose another address. Bind to `127.0.0.1` when the API should only be reachable locally:
-
-```bash
-cargo run -p nebula-node -- --listen 127.0.0.1:7001 --rest-api --rest-listen 127.0.0.1:7002
-```
-
-The API provides `GET /v1/ping` and these key operations:
-
-- `PUT /v1/keys/{key}`: Store the raw request body as the value. Optionally set `ttl_secs` in the query string; `0` or an omitted TTL means no expiration.
-- `GET /v1/keys/{key}`: Return the value as an `application/octet-stream` response, or `404` if the key is missing.
-- `DELETE /v1/keys/{key}`: Delete the key, returning `204` when deleted or `404` when missing.
-
-Example requests:
+The password-protected web console is disabled by default. Enable it with `--admin-console` and provide a non-empty password with `--admin-password`. It listens on `127.0.0.1:7002` by default; `--admin-console-port` changes the port while the bind address can be set with `admin_listen_addr` in the YAML configuration file.
 
 ```bash
-curl http://127.0.0.1:7002/v1/ping
-curl -X PUT --data-binary 'hello' 'http://127.0.0.1:7002/v1/keys/greeting?ttl_secs=60'
-curl http://127.0.0.1:7002/v1/keys/greeting
-curl -X DELETE http://127.0.0.1:7002/v1/keys/greeting
+cargo run -p nebula-node -- --listen 127.0.0.1:7001 --admin-console --admin-password '<strong-password>'
 ```
 
-The OpenAPI specification is in `./crates/nebula-node/openapi/openapi.yaml` and is also served at `/openapi.yaml` when the REST API is enabled. The `nebulactl` client currently uses the TCP protocol.
+Open `http://127.0.0.1:7002` to sign in. The console can list and search entries, paginate results, create or edit entries, delete individual entries, and clear the node's cache. It displays keys and values as text and shows each entry's remaining TTL; use the TCP clients for binary values.
+
+The console uses password login and an expiring session cookie, but it does not provide TLS. Keep it bound to loopback unless access is protected by trusted network controls and HTTPS. The password is supplied as a command-line argument, so avoid exposing it through shell history or local process inspection. The TCP protocol itself does not provide authentication or TLS.
 
 ## Run three isolated development nodes
 
@@ -79,17 +68,17 @@ docker compose up --build
 
 The nodes are available on host ports `7001`, `7002`, and `7003`. Each node has its own in-memory store. Stop the containers with `Ctrl-C`.
 
-## Phase 1 capabilities
+## Current capabilities
 
-- Versioned binary protocol over TCP
-- Optional REST API for health checks and key operations
-- `SET`, `GET`, `DELETE`, and `PING` operations over TCP and HTTP
-- Concurrent in-memory key/value store
-- Lazy TTL expiration
+- Versioned binary protocol over TCP with `SET`, `GET`, `DELETE`, and `PING` operations
+- Concurrent, volatile in-memory key/value store with TTL expiration
+- `nebulactl` command-line client and Go, Java, JavaScript, and Python TCP SDKs
+- Optional password-protected web admin console for listing, searching, paging, creating, editing, deleting, and clearing entries
+- YAML node configuration and configurable protocol key/value size limits
 - Unit and integration tests
 
-## Not implemented yet
+## Not implemented
 
-Cluster membership, consistent hashing, replication, quorum, failure detection, automatic failover, persistence, authentication, and TLS.
+Cluster membership, consistent hashing, replication, quorum, failure detection, automatic failover, persistence, authentication for TCP clients, and TLS.
 
 See [architecture](./docs/architecture.md) and [protocol](./docs/protocol.md) for architecture and TCP protocol details.

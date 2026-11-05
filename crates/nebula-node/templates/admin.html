@@ -174,7 +174,7 @@
       font-size: 12px;
       font-weight: 600;
       cursor: pointer;
-      transition: .15s
+      transition: border-color .15s, background .15s
     }
 
     .button:hover {
@@ -185,7 +185,7 @@
     .button.primary {
       color: #fff;
       border-color: #7769da;
-      background: linear-gradient(135deg, #7467dc, #594db2)
+      background: linear-gradient(135deg, #6e61d0, #594db2)
     }
 
     .button.danger {
@@ -257,10 +257,10 @@
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: .11em;
-      color: #778297;
+      color: #c2cad8;
       font-weight: 650;
       padding: 13px 20px;
-      background: #ffffff03
+      background: #151d2c
     }
 
     td {
@@ -643,7 +643,7 @@
     function unhex(value) {
       const result = new Uint8Array(value.length / 2);
       for (let index = 0; index < result.length; index++) {
-        result[index] = parseInt(value.slice(index * 2, index * 2 + 2), 16);
+        result[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
       }
       return result;
     }
@@ -661,7 +661,7 @@
         ...options,
         headers: {
           'Content-Type': 'application/json',
-          ...(options.headers || {}),
+          ...options.headers,
         },
       });
       if (response.status === 401) showLogin();

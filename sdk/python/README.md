@@ -10,7 +10,7 @@ Start a node listening on the default TCP address:
 cargo run -p nebula-node -- --listen 127.0.0.1:7001
 ```
 
-The TCP protocol does not provide authentication or TLS. Expose the node only on trusted interfaces and apply suitable network controls.
+The TCP protocol does not provide authentication or TLS. Expose the node only on trusted interfaces and apply suitable network controls. Nodes also include an optional password-protected web admin console for inspecting and managing entries; it is separate from this TCP SDK. See the [node setup and console instructions](../../README.md#use-the-web-admin-console).
 
 ## Install
 
