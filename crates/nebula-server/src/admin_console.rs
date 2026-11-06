@@ -2,8 +2,9 @@ use std::{io, sync::Arc, time::Instant};
 
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -12,7 +13,12 @@ use nebula_protocol::FrameLimits;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::net::TcpListener;
+use tokio::{
+    net::TcpListener,
+    sync::{oneshot, watch},
+};
+
+use crate::lifecycle::ApplicationState;
 use tracing::info;
 
 use nebula_core::CacheStore;
@@ -81,12 +87,22 @@ pub async fn run(
     store: Arc<CacheStore>,
     limits: FrameLimits,
     password: String,
+    lifecycle: watch::Receiver<ApplicationState>,
+    started: oneshot::Sender<()>,
 ) -> io::Result<()> {
     info!(address = %listener.local_addr()?, "NebulaCache admin console listening");
-    axum::serve(listener, router(store, limits, password)).await
+    let server = axum::serve(listener, router(store, limits, password, lifecycle.clone()))
+        .with_graceful_shutdown(wait_for_shutdown(lifecycle));
+    let _ = started.send(());
+    server.await
 }
 
-fn router(store: Arc<CacheStore>, limits: FrameLimits, password: String) -> Router {
+fn router(
+    store: Arc<CacheStore>,
+    limits: FrameLimits,
+    password: String,
+    lifecycle: watch::Receiver<ApplicationState>,
+) -> Router {
     let body_limit = limits.max_value_len.saturating_mul(2).saturating_add(4096);
     let state = Arc::new(ConsoleState {
         store,
@@ -105,7 +121,33 @@ fn router(store: Arc<CacheStore>, limits: FrameLimits, password: String) -> Rout
         )
         .route("/api/entries/{key}", delete(delete_entry))
         .layer(DefaultBodyLimit::max(body_limit))
+        .layer(middleware::from_fn_with_state(lifecycle, require_ready))
         .with_state(state)
+}
+
+async fn require_ready(
+    State(lifecycle): State<watch::Receiver<ApplicationState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if *lifecycle.borrow() != ApplicationState::Ready {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    next.run(request).await
+}
+
+async fn wait_for_shutdown(mut lifecycle: watch::Receiver<ApplicationState>) {
+    loop {
+        if matches!(
+            *lifecycle.borrow(),
+            ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed
+        ) {
+            return;
+        }
+        if lifecycle.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 async fn index() -> Html<&'static str> {
@@ -334,7 +376,7 @@ mod tests {
 
     use super::{
         clear_entries, constant_time_eq, decode_hex, delete_entry, encode_hex, list_entries, login,
-        set_entry, ConsoleState, ListEntriesQuery, LoginRequest,
+        router, set_entry, wait_for_shutdown, ConsoleState, ListEntriesQuery, LoginRequest,
     };
     use axum::{
         body::{to_bytes, Bytes},
@@ -344,6 +386,46 @@ mod tests {
     };
     use nebula_core::CacheStore;
     use nebula_protocol::FrameLimits;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+
+    use crate::lifecycle::{ApplicationState, Lifecycle};
+
+    #[tokio::test]
+    async fn rejects_admin_requests_before_application_is_ready() {
+        let lifecycle = Lifecycle::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = lifecycle.subscribe();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router(
+                    Arc::new(CacheStore::new()),
+                    FrameLimits::default(),
+                    "secret".to_owned(),
+                    receiver.clone(),
+                ),
+            )
+            .with_graceful_shutdown(wait_for_shutdown(receiver))
+            .await
+        });
+
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut status = [0; 12];
+        stream.read_exact(&mut status).await.unwrap();
+        assert_eq!(&status, b"HTTP/1.1 503");
+        drop(stream);
+
+        lifecycle.transition(ApplicationState::Failed).unwrap();
+        server.await.unwrap().unwrap();
+    }
 
     #[tokio::test]
     async fn login_session_can_manage_entries_and_rejects_anonymous_access() {

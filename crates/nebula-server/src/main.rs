@@ -1,8 +1,4 @@
-use std::sync::Arc;
-
-use nebula_core::CacheStore;
-use nebula_server::{admin_console, config::Config, server};
-use tokio::net::TcpListener;
+use nebula_server::{application::Application, config::Config};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -13,28 +9,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let (config, admin_console) = Config::from_args()?;
-    let listener = TcpListener::bind(config.listen_addr).await?;
-    let store = Arc::new(CacheStore::new());
-    let frame_limits = config.frame_limits();
-
-    if admin_console.enabled {
-        let mut admin_listen_addr = admin_console.listen_addr;
-        if let Some(port) = admin_console.port {
-            admin_listen_addr.set_port(port);
-        }
-        let admin_listener = TcpListener::bind(admin_listen_addr).await?;
-        tokio::try_join!(
-            server::run(listener, Arc::clone(&store), frame_limits),
-            admin_console::run(
-                admin_listener,
-                store,
-                frame_limits,
-                admin_console.password.expect("validated admin password"),
-            )
-        )?;
-    } else {
-        server::run(listener, store, frame_limits).await?;
-    }
-    Ok(())
+    let config = Config::from_args()?;
+    Application::new(config).run().await
 }

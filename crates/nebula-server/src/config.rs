@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub struct Config {
     pub listen_addr: SocketAddr,
     pub admin_console: AdminConsoleOptions,
+    pub shutdown_timeout_secs: u64,
 }
 
 #[derive(Clone, Deserialize)]
@@ -23,8 +24,9 @@ pub struct AdminConsoleOptions {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen_addr: "0.0.0.0:7001".parse().unwrap(),
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 7001)),
             admin_console: AdminConsoleOptions::default(),
+            shutdown_timeout_secs: 30,
         }
     }
 }
@@ -35,17 +37,17 @@ impl Default for AdminConsoleOptions {
             enabled: false,
             password: None,
             port: None,
-            listen_addr: "127.0.0.1:7002".parse().unwrap(),
+            listen_addr: SocketAddr::from(([127, 0, 0, 1], 7002)),
         }
     }
 }
 
 impl Config {
-    pub fn from_args() -> Result<(Self, AdminConsoleOptions), Box<dyn Error>> {
+    pub fn from_args() -> Result<Self, Box<dyn Error>> {
         Self::load(Args::parse())
     }
 
-    fn load(args: Args) -> Result<(Self, AdminConsoleOptions), Box<dyn Error>> {
+    fn load(args: Args) -> Result<Self, Box<dyn Error>> {
         let config = if let Some(path) = args.config {
             match serde_yaml::from_reader::<_, Option<serde_yaml::Value>>(File::open(path)?)? {
                 Some(mut value) => {
@@ -59,9 +61,13 @@ impl Config {
             Self::default()
         };
 
-        let admin_console = config.admin_console.clone();
-
-        if admin_console.enabled && admin_console.password.as_deref().is_none_or(str::is_empty) {
+        if config.admin_console.enabled
+            && config
+                .admin_console
+                .password
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "admin_console.password is required and must not be empty when admin_console.enabled is true",
@@ -69,7 +75,7 @@ impl Config {
             .into());
         }
 
-        Ok((config, admin_console))
+        Ok(config)
     }
 
     pub fn frame_limits(&self) -> FrameLimits {
@@ -163,6 +169,8 @@ fn coerce_environment_values(value: &mut serde_yaml::Value) -> Result<(), Box<dy
         return Ok(());
     };
 
+    coerce_config_field::<u64>(values, "shutdown_timeout_secs")?;
+
     let admin_console_key = serde_yaml::Value::String("admin_console".to_owned());
     if let Some(serde_yaml::Value::Mapping(admin_console)) = values.get_mut(&admin_console_key) {
         coerce_config_field::<bool>(admin_console, "enabled")?;
@@ -196,7 +204,7 @@ where
 #[derive(Debug, Parser)]
 #[command(name = "nebula-server", version, about = "Run a Nebula cache server")]
 struct Args {
-    #[arg(long = "config", value_name = "PATH")]
+    #[arg(value_name = "PATH")]
     config: Option<PathBuf>,
 }
 
@@ -213,17 +221,17 @@ mod tests {
 
     #[test]
     fn defaults_are_applied_without_a_config_file() {
-        let (config, admin_console) =
-            Config::load(Args::try_parse_from(["nebula-server"]).unwrap()).unwrap();
-
+        let args = Args::try_parse_from(["nebula-server"]).unwrap();
+        let config = Config::load(args).unwrap();
         assert_eq!(config.listen_addr.to_string(), "0.0.0.0:7001");
         assert_eq!(
             config.admin_console.listen_addr.to_string(),
             "127.0.0.1:7002"
         );
-        assert!(!admin_console.enabled);
-        assert_eq!(admin_console.password, None);
-        assert_eq!(admin_console.port, None);
+        assert!(!config.admin_console.enabled);
+        assert_eq!(config.admin_console.password, None);
+        assert_eq!(config.admin_console.port, None);
+        assert_eq!(config.shutdown_timeout_secs, 30);
         let frame_limits = config.frame_limits();
         assert_eq!(frame_limits.max_key_len, 1_024);
         assert_eq!(frame_limits.max_value_len, 8 * 1024 * 1024);
@@ -232,7 +240,7 @@ mod tests {
     #[test]
     fn loads_all_server_settings_from_yaml() {
         let config: Config = serde_yaml::from_str(
-            "listen_addr: 127.0.0.1:7003\nadmin_console:\n  enabled: true\n  password: secret\n  port: 7123\n  listen_addr: 127.0.0.1:7004\n",
+            "listen_addr: 127.0.0.1:7003\nshutdown_timeout_secs: 7\nadmin_console:\n  enabled: true\n  password: secret\n  port: 7123\n  listen_addr: 127.0.0.1:7004\n",
         )
         .unwrap();
 
@@ -244,6 +252,7 @@ mod tests {
         assert!(config.admin_console.enabled);
         assert_eq!(config.admin_console.password.as_deref(), Some("secret"));
         assert_eq!(config.admin_console.port, Some(7123));
+        assert_eq!(config.shutdown_timeout_secs, 7);
     }
 
     #[test]
@@ -265,7 +274,7 @@ mod tests {
         )
         .unwrap();
 
-        let (config, admin_console) = Config::load(Args {
+        let config = Config::load(Args {
             config: Some(path.clone()),
         })
         .unwrap();
@@ -273,8 +282,8 @@ mod tests {
         std::env::remove_var(secret_name);
         fs::remove_file(path).unwrap();
         assert!(config.admin_console.enabled);
-        assert_eq!(admin_console.password.as_deref(), Some(secret));
-        assert_eq!(admin_console.port, Some(7123));
+        assert_eq!(config.admin_console.password.as_deref(), Some(secret));
+        assert_eq!(config.admin_console.port, Some(7123));
     }
 
     #[test]
@@ -310,22 +319,41 @@ mod tests {
         let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
         fs::write(&path, "listen_addr: 127.0.0.1:7003\n").unwrap();
 
-        let (config, _) = Config::load(
-            Args::try_parse_from(["nebula-server", "--config", path.to_str().unwrap()]).unwrap(),
-        )
-        .unwrap();
+        let config =
+            Config::load(Args::try_parse_from(["nebula-server", path.to_str().unwrap()]).unwrap())
+                .unwrap();
 
         fs::remove_file(path).unwrap();
         assert_eq!(config.listen_addr.to_string(), "127.0.0.1:7003");
+        assert!(!config.admin_console.enabled);
+        assert_eq!(config.shutdown_timeout_secs, 30);
         assert_eq!(config.frame_limits().max_key_len, 1_024);
         assert_eq!(config.frame_limits().max_value_len, 8 * 1024 * 1024);
     }
 
     #[test]
-    fn rejects_non_config_cli_options() {
-        assert!(Args::try_parse_from(["nebula-server", "--listen", "127.0.0.1:7002"]).is_err());
-        assert!(Args::try_parse_from(["nebula-server", "--admin-console"]).is_err());
-        assert!(Args::try_parse_from(["nebula-server", "--max-key-len", "2048"]).is_err());
+    fn accepts_no_config_argument_or_one_path_and_rejects_extra_arguments() {
+        assert!(Args::try_parse_from(["nebula-server"]).is_ok());
+        assert!(Args::try_parse_from(["nebula-server", "config.yml"]).is_ok());
+        assert!(Args::try_parse_from(["nebula-server", "config.yml", "extra.yml"]).is_err());
+        assert!(Args::try_parse_from(["nebula-server", "--config", "config.yml"]).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_yaml() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
+        fs::write(&path, "listen_addr: [unterminated\n").unwrap();
+
+        assert!(Config::load(Args {
+            config: Some(path.clone())
+        })
+        .is_err());
+
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
