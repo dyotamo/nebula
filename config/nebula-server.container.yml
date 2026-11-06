@@ -1,2 +1,13 @@
 listen_addr: "0.0.0.0:7001"
 shutdown_timeout_secs: 30
+
+admin_console:
+  enabled: true
+  password: admin
+  listen_addr: "127.0.0.1:7002"
+
+persistence:
+  mode: snapshot
+  snapshot_dir: ./data/snapshots
+  snapshot_interval_secs: 60
+  snapshot_retention: 3

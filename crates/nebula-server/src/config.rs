@@ -10,6 +10,25 @@ pub struct Config {
     pub listen_addr: SocketAddr,
     pub admin_console: AdminConsoleOptions,
     pub shutdown_timeout_secs: u64,
+    pub persistence: PersistenceOptions,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PersistenceOptions {
+    pub mode: PersistenceMode,
+    pub snapshot_dir: PathBuf,
+    pub snapshot_interval_secs: u64,
+    pub snapshot_retention: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistenceMode {
+    #[default]
+    Volatile,
+    Snapshot,
+    SnapshotWal,
 }
 
 #[derive(Clone, Deserialize)]
@@ -17,7 +36,6 @@ pub struct Config {
 pub struct AdminConsoleOptions {
     pub enabled: bool,
     pub password: Option<String>,
-    pub port: Option<u16>,
     pub listen_addr: SocketAddr,
 }
 
@@ -27,6 +45,18 @@ impl Default for Config {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 7001)),
             admin_console: AdminConsoleOptions::default(),
             shutdown_timeout_secs: 30,
+            persistence: PersistenceOptions::default(),
+        }
+    }
+}
+
+impl Default for PersistenceOptions {
+    fn default() -> Self {
+        Self {
+            mode: PersistenceMode::Volatile,
+            snapshot_dir: PathBuf::from("data/snapshots"),
+            snapshot_interval_secs: 60,
+            snapshot_retention: 3,
         }
     }
 }
@@ -36,7 +66,6 @@ impl Default for AdminConsoleOptions {
         Self {
             enabled: false,
             password: None,
-            port: None,
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 7002)),
         }
     }
@@ -71,6 +100,18 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "admin_console.password is required and must not be empty when admin_console.enabled is true",
+            )
+            .into());
+        }
+
+        if config.persistence.mode == PersistenceMode::Snapshot
+            && (config.persistence.snapshot_interval_secs == 0
+                || config.persistence.snapshot_retention == 0
+                || config.persistence.snapshot_dir.as_os_str().is_empty())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "persistence.snapshot_dir must not be empty, and snapshot_interval_secs and snapshot_retention must be greater than zero in snapshot mode",
             )
             .into());
         }
@@ -174,7 +215,12 @@ fn coerce_environment_values(value: &mut serde_yaml::Value) -> Result<(), Box<dy
     let admin_console_key = serde_yaml::Value::String("admin_console".to_owned());
     if let Some(serde_yaml::Value::Mapping(admin_console)) = values.get_mut(&admin_console_key) {
         coerce_config_field::<bool>(admin_console, "enabled")?;
-        coerce_config_field::<u16>(admin_console, "port")?;
+    }
+
+    let persistence_key = serde_yaml::Value::String("persistence".to_owned());
+    if let Some(serde_yaml::Value::Mapping(persistence)) = values.get_mut(&persistence_key) {
+        coerce_config_field::<u64>(persistence, "snapshot_interval_secs")?;
+        coerce_config_field::<usize>(persistence, "snapshot_retention")?;
     }
 
     Ok(())
@@ -217,7 +263,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Args, Config};
+    use super::{Args, Config, PersistenceMode};
 
     #[test]
     fn defaults_are_applied_without_a_config_file() {
@@ -230,8 +276,10 @@ mod tests {
         );
         assert!(!config.admin_console.enabled);
         assert_eq!(config.admin_console.password, None);
-        assert_eq!(config.admin_console.port, None);
         assert_eq!(config.shutdown_timeout_secs, 30);
+        assert_eq!(config.persistence.mode, PersistenceMode::Volatile);
+        assert_eq!(config.persistence.snapshot_interval_secs, 60);
+        assert_eq!(config.persistence.snapshot_retention, 3);
         let frame_limits = config.frame_limits();
         assert_eq!(frame_limits.max_key_len, 1_024);
         assert_eq!(frame_limits.max_value_len, 8 * 1024 * 1024);
@@ -240,7 +288,7 @@ mod tests {
     #[test]
     fn loads_all_server_settings_from_yaml() {
         let config: Config = serde_yaml::from_str(
-            "listen_addr: 127.0.0.1:7003\nshutdown_timeout_secs: 7\nadmin_console:\n  enabled: true\n  password: secret\n  port: 7123\n  listen_addr: 127.0.0.1:7004\n",
+            "listen_addr: 127.0.0.1:7003\nshutdown_timeout_secs: 7\nadmin_console:\n  enabled: true\n  password: secret\n  listen_addr: 127.0.0.1:7004\npersistence:\n  mode: snapshot\n  snapshot_dir: /tmp/nebula-snapshots\n  snapshot_interval_secs: 5\n  snapshot_retention: 4\n",
         )
         .unwrap();
 
@@ -251,8 +299,14 @@ mod tests {
         );
         assert!(config.admin_console.enabled);
         assert_eq!(config.admin_console.password.as_deref(), Some("secret"));
-        assert_eq!(config.admin_console.port, Some(7123));
         assert_eq!(config.shutdown_timeout_secs, 7);
+        assert_eq!(config.persistence.mode, PersistenceMode::Snapshot);
+        assert_eq!(
+            config.persistence.snapshot_dir,
+            std::path::PathBuf::from("/tmp/nebula-snapshots")
+        );
+        assert_eq!(config.persistence.snapshot_interval_secs, 5);
+        assert_eq!(config.persistence.snapshot_retention, 4);
     }
 
     #[test]
@@ -269,7 +323,7 @@ mod tests {
         fs::write(
             &path,
             format!(
-                "admin_console:\n  enabled: \"${{{enabled_name}:-true}}\"\n  password: \"${{{secret_name}}}\"\n  port: \"${{MISSING_PORT_{unique}:-7123}}\"\n"
+                "admin_console:\n  enabled: \"${{{enabled_name}:-true}}\"\n  password: \"${{{secret_name}}}\"\npersistence:\n  mode: snapshot\n  snapshot_interval_secs: \"${{MISSING_INTERVAL_{unique}:-7}}\"\n"
             ),
         )
         .unwrap();
@@ -283,7 +337,7 @@ mod tests {
         fs::remove_file(path).unwrap();
         assert!(config.admin_console.enabled);
         assert_eq!(config.admin_console.password.as_deref(), Some(secret));
-        assert_eq!(config.admin_console.port, Some(7123));
+        assert_eq!(config.persistence.snapshot_interval_secs, 7);
     }
 
     #[test]

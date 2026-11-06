@@ -1,4 +1,4 @@
-use std::{error::Error, io, time::Duration};
+use std::{error::Error, io, sync::Arc, time::Duration};
 
 use nebula_core::CacheStore;
 use tokio::{
@@ -11,9 +11,10 @@ use tracing::{error, info, warn};
 
 use crate::{
     admin_console,
-    config::Config,
+    config::{Config, PersistenceMode},
     health::{ComponentHealth, HealthComponent, HealthManager},
     lifecycle::{ApplicationState, Lifecycle},
+    persistence::PersistenceManager,
     server,
 };
 
@@ -22,6 +23,7 @@ pub struct Application {
     store: std::sync::Arc<CacheStore>,
     lifecycle: Lifecycle,
     health: HealthManager,
+    persistence: Option<PersistenceManager>,
     services: JoinSet<io::Result<()>>,
     shutdown_timeout: Duration,
 }
@@ -30,12 +32,27 @@ impl Application {
     pub fn new(config: Config) -> Self {
         let lifecycle = Lifecycle::new();
         let health = HealthManager::new(lifecycle.clone(), config.admin_console.enabled);
+        let persistence = if config.persistence.mode == PersistenceMode::Snapshot {
+            health.report(
+                HealthComponent::Persistence("snapshots".to_owned()),
+                ComponentHealth::Healthy,
+            );
+            Some(PersistenceManager::new(
+                config.persistence.snapshot_dir.clone(),
+                Duration::from_secs(config.persistence.snapshot_interval_secs),
+                config.persistence.snapshot_retention,
+                health.clone(),
+            ))
+        } else {
+            None
+        };
         Self {
             shutdown_timeout: Duration::from_secs(config.shutdown_timeout_secs),
             config,
             store: std::sync::Arc::new(CacheStore::new()),
             lifecycle,
             health,
+            persistence,
             services: JoinSet::new(),
         }
     }
@@ -73,17 +90,47 @@ impl Application {
             .into());
         }
 
+        if self.config.persistence.mode == PersistenceMode::SnapshotWal {
+            return Err(self
+                .fail_startup(
+                    "initialize persistence",
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "snapshot_wal is reserved for Phase 4 and is not implemented",
+                    ),
+                )
+                .await);
+        }
+
+        if self.config.persistence.mode == PersistenceMode::Snapshot
+            && (self.config.persistence.snapshot_interval_secs == 0
+                || self.config.persistence.snapshot_retention == 0
+                || self.config.persistence.snapshot_dir.as_os_str().is_empty())
+        {
+            return Err(self
+                .fail_startup(
+                    "initialize persistence",
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "snapshot directory must not be empty, and snapshot interval and retention must be greater than zero",
+                    ),
+                )
+                .await);
+        }
+
+        if let Some(persistence) = &self.persistence {
+            if let Err(err) = persistence.restore(Arc::clone(&self.store)).await {
+                return Err(self.fail_startup("restore cache snapshot", err).await);
+            }
+        }
+
         let listener = match TcpListener::bind(self.config.listen_addr).await {
             Ok(listener) => listener,
             Err(err) => return Err(self.fail_startup("bind TCP listener", err).await),
         };
 
         let admin_listener = if self.config.admin_console.enabled {
-            let mut address = self.config.admin_console.listen_addr;
-            if let Some(port) = self.config.admin_console.port {
-                address.set_port(port);
-            }
-            match TcpListener::bind(address).await {
+            match TcpListener::bind(self.config.admin_console.listen_addr).await {
                 Ok(listener) => Some(listener),
                 Err(err) => return Err(self.fail_startup("bind admin listener", err).await),
             }
@@ -203,6 +250,16 @@ impl Application {
         if let Err(err) = self.lifecycle.transition(ApplicationState::Ready) {
             return Err(Box::new(err));
         }
+        if let Some(persistence) = self.persistence.clone() {
+            let persistence_store = Arc::clone(&self.store);
+            let persistence_lifecycle = self.lifecycle.subscribe();
+            self.services.spawn(async move {
+                persistence
+                    .run(persistence_store, persistence_lifecycle)
+                    .await;
+                Ok(())
+            });
+        }
         let watchdog_health = self.health.clone();
         let watchdog_lifecycle = self.lifecycle.subscribe();
         self.services.spawn(async move {
@@ -240,6 +297,14 @@ impl Application {
             return Err(err.into());
         }
 
+        if let Some(persistence) = &self.persistence {
+            if let Err(err) = persistence.snapshot(Arc::clone(&self.store)).await {
+                let _ = self.lifecycle.transition(ApplicationState::Failed);
+                error!(error = %err, "final cache snapshot failed during shutdown");
+                return Err(Box::new(err));
+            }
+        }
+
         self.lifecycle.transition(ApplicationState::Stopped)?;
         info!("NebulaCache application stopped");
         Ok(())
@@ -269,7 +334,9 @@ impl Application {
     }
 
     async fn fail_startup(&mut self, context: &str, err: io::Error) -> Box<dyn Error> {
-        let component = if context.contains("admin") {
+        let component = if context.contains("persistence") || context.contains("snapshot") {
+            HealthComponent::Persistence("snapshots".to_owned())
+        } else if context.contains("admin") {
             HealthComponent::AdminConsole
         } else {
             HealthComponent::TcpServer
@@ -385,7 +452,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use crate::{
-        config::Config,
+        config::{Config, PersistenceMode},
         health::{ApplicationHealth, ComponentHealth, HealthComponent},
         lifecycle::ApplicationState,
     };
@@ -397,6 +464,7 @@ mod tests {
             listen_addr: address,
             admin_console: Default::default(),
             shutdown_timeout_secs: 1,
+            persistence: Default::default(),
         }
     }
 
@@ -409,6 +477,88 @@ mod tests {
         app.shutdown().await.unwrap();
         app.shutdown().await.unwrap();
         assert_eq!(app.state(), ApplicationState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_persists_cache_for_the_next_startup() {
+        let directory = std::env::temp_dir().join(format!(
+            "nebula-application-snapshot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = test_config("127.0.0.1:0".parse().unwrap());
+        config.persistence.mode = PersistenceMode::Snapshot;
+        config.persistence.snapshot_dir = directory.clone();
+        config.persistence.snapshot_interval_secs = 1;
+        let mut app = Application::new(config.clone());
+        app.start().await.unwrap();
+        app.store
+            .set(b"restart-key".to_vec(), b"restart-value".to_vec(), 0);
+        let active_snapshot = app
+            .persistence
+            .as_ref()
+            .unwrap()
+            .lock_snapshot_operation()
+            .await;
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let release_snapshot = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(active_snapshot);
+        });
+        app.shutdown().await.unwrap();
+        release_snapshot.await.unwrap();
+
+        let mut restarted = Application::new(config);
+        restarted.start().await.unwrap();
+        assert_eq!(
+            restarted.store.get(b"restart-key"),
+            Some(b"restart-value".to_vec())
+        );
+        restarted.shutdown().await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_wal_mode_fails_explicitly_until_wal_is_implemented() {
+        let mut config = test_config("127.0.0.1:0".parse().unwrap());
+        config.persistence.mode = PersistenceMode::SnapshotWal;
+        let mut app = Application::new(config);
+
+        let error = app.start().await.unwrap_err();
+        assert!(error.to_string().contains("reserved for Phase 4"));
+        assert_eq!(app.state(), ApplicationState::Failed);
+    }
+
+    #[tokio::test]
+    async fn invalid_snapshot_fails_startup_instead_of_using_an_empty_cache() {
+        let directory = std::env::temp_dir().join(format!(
+            "nebula-invalid-snapshot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("snapshot-corrupt.nbs"), b"corrupt").unwrap();
+        let mut config = test_config("127.0.0.1:0".parse().unwrap());
+        config.persistence.mode = PersistenceMode::Snapshot;
+        config.persistence.snapshot_dir = directory.clone();
+        let mut app = Application::new(config);
+
+        assert!(app.start().await.is_err());
+        assert_eq!(app.state(), ApplicationState::Failed);
+        assert!(matches!(
+            app.health()
+                .snapshot()
+                .components
+                .get(&HealthComponent::Persistence("snapshots".to_owned())),
+            Some(ComponentHealth::Unhealthy(_))
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
