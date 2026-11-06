@@ -23,7 +23,8 @@ use tokio::{
     time::{interval, MissedTickBehavior},
 };
 
-use crate::{health::WorkerHeartbeat, lifecycle::ApplicationState};
+use nebula_health::lifecycle::ApplicationState;
+use nebula_watchdog::WorkerHeartbeat;
 use tracing::info;
 
 use nebula_core::CacheStore;
@@ -405,7 +406,7 @@ mod tests {
         net::{TcpListener, TcpStream},
     };
 
-    use crate::lifecycle::{ApplicationState, Lifecycle};
+    use nebula_health::lifecycle::{ApplicationState, Lifecycle};
 
     #[tokio::test]
     async fn rejects_admin_requests_before_application_is_ready() {

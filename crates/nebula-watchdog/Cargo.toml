@@ -1,0 +1,9 @@
+[package]
+name = "nebula-watchdog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nebula-health = { path = "../nebula-health" }
+tokio.workspace = true

@@ -36,12 +36,12 @@ pub struct LifecycleError {
 }
 
 #[derive(Clone)]
-pub(crate) struct Lifecycle {
+pub struct Lifecycle {
     state: watch::Sender<ApplicationState>,
 }
 
 impl Lifecycle {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let (state, _) = watch::channel(ApplicationState::Initializing);
         Self { state }
     }
@@ -50,11 +50,11 @@ impl Lifecycle {
         *self.state.borrow()
     }
 
-    pub(crate) fn subscribe(&self) -> watch::Receiver<ApplicationState> {
+    pub fn subscribe(&self) -> watch::Receiver<ApplicationState> {
         self.state.subscribe()
     }
 
-    pub(crate) fn transition(&self, to: ApplicationState) -> Result<(), LifecycleError> {
+    pub fn transition(&self, to: ApplicationState) -> Result<(), LifecycleError> {
         let mut from = self.state();
         let mut accepted = false;
         self.state.send_if_modified(|state| {

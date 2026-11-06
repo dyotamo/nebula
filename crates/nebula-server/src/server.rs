@@ -11,8 +11,10 @@ use tokio::{
 use tracing::{error, info, warn};
 
 use nebula_core::CacheStore;
+use nebula_health::lifecycle::ApplicationState;
+use nebula_watchdog::WorkerHeartbeat;
 
-use crate::{handler, health::WorkerHeartbeat, lifecycle::ApplicationState};
+use crate::handler;
 
 pub(crate) async fn run(
     listener: TcpListener,
@@ -126,13 +128,13 @@ mod tests {
     use std::sync::Arc;
 
     use nebula_core::CacheStore;
-    use nebula_protocol::{read_response, write_request, Opcode, Request, Status};
-    use tokio::{net::TcpListener, sync::oneshot};
-
-    use crate::{
-        health::{HealthComponent, HealthManager},
+    use nebula_health::{
         lifecycle::{ApplicationState, Lifecycle},
+        HealthComponent, HealthManager,
     };
+    use nebula_protocol::{read_response, write_request, Opcode, Request, Status};
+    use nebula_watchdog::Watchdog;
+    use tokio::{net::TcpListener, sync::oneshot};
 
     use super::run;
 
@@ -143,7 +145,8 @@ mod tests {
         let store = Arc::new(CacheStore::new());
         let lifecycle = Lifecycle::new();
         let health = HealthManager::new(lifecycle.clone(), false);
-        let heartbeat = health.register_worker(
+        let watchdog = Watchdog::new(health);
+        let heartbeat = watchdog.register_worker(
             "tcp-server-test",
             HealthComponent::TcpServer,
             std::time::Duration::from_secs(3),

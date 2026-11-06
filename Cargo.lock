@@ -465,6 +465,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nebula-health"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nebula-protocol"
 version = "0.1.0"
 dependencies = [
@@ -480,7 +489,9 @@ dependencies = [
  "clap",
  "dashmap",
  "nebula-core",
+ "nebula-health",
  "nebula-protocol",
+ "nebula-watchdog",
  "rand",
  "serde",
  "serde_json",
@@ -489,6 +500,14 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nebula-watchdog"
+version = "0.1.0"
+dependencies = [
+ "nebula-health",
+ "tokio",
 ]
 
 [[package]]

@@ -10,17 +10,13 @@ use std::{
 };
 
 use nebula_core::{CacheStore, PersistenceEntry};
+use nebula_health::{lifecycle::ApplicationState, ComponentHealth, HealthComponent, HealthManager};
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::Mutex,
     time::{interval_at, Instant, MissedTickBehavior},
 };
 use tracing::{error, info, warn};
-
-use crate::{
-    health::{ComponentHealth, HealthComponent, HealthManager},
-    lifecycle::ApplicationState,
-};
 
 const MAGIC: &[u8; 4] = b"NBSC";
 const FORMAT_VERSION: u32 = 1;
@@ -429,11 +425,7 @@ mod tests {
     };
 
     use nebula_core::CacheStore;
-
-    use crate::{
-        health::{ComponentHealth, HealthComponent, HealthManager},
-        lifecycle::Lifecycle,
-    };
+    use nebula_health::{lifecycle::Lifecycle, ComponentHealth, HealthComponent, HealthManager};
 
     use super::{
         load_latest_snapshot, write_snapshot, PersistenceManager, SnapshotPayload, Timestamp,

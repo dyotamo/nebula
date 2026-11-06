@@ -1,6 +1,11 @@
 use std::{error::Error, io, sync::Arc, time::Duration};
 
 use nebula_core::CacheStore;
+use nebula_health::{
+    lifecycle::{ApplicationState, Lifecycle},
+    ComponentHealth, HealthComponent, HealthManager,
+};
+use nebula_watchdog::Watchdog;
 use tokio::{
     net::TcpListener,
     sync::oneshot,
@@ -12,8 +17,6 @@ use tracing::{error, info, warn};
 use crate::{
     admin_console,
     config::{Config, PersistenceMode},
-    health::{ComponentHealth, HealthComponent, HealthManager},
-    lifecycle::{ApplicationState, Lifecycle},
     persistence::PersistenceManager,
     server,
 };
@@ -23,6 +26,7 @@ pub struct Application {
     store: std::sync::Arc<CacheStore>,
     lifecycle: Lifecycle,
     health: HealthManager,
+    watchdog: Watchdog,
     persistence: Option<PersistenceManager>,
     services: JoinSet<io::Result<()>>,
     shutdown_timeout: Duration,
@@ -32,6 +36,7 @@ impl Application {
     pub fn new(config: Config) -> Self {
         let lifecycle = Lifecycle::new();
         let health = HealthManager::new(lifecycle.clone(), config.admin_console.enabled);
+        let watchdog = Watchdog::new(health.clone());
         let persistence = if config.persistence.mode == PersistenceMode::Snapshot {
             health.report(
                 HealthComponent::Persistence("snapshots".to_owned()),
@@ -52,6 +57,7 @@ impl Application {
             store: std::sync::Arc::new(CacheStore::new()),
             lifecycle,
             health,
+            watchdog,
             persistence,
             services: JoinSet::new(),
         }
@@ -130,7 +136,7 @@ impl Application {
         let (tcp_started_tx, tcp_started_rx) = oneshot::channel();
         let tcp_store = self.store.clone();
         let tcp_lifecycle = self.lifecycle.subscribe();
-        let tcp_heartbeat = self.health.register_worker(
+        let tcp_heartbeat = self.watchdog.register_worker(
             "tcp-server",
             HealthComponent::TcpServer,
             Duration::from_secs(3),
@@ -181,7 +187,7 @@ impl Application {
             let admin_lifecycle = self.lifecycle.subscribe();
             let admin_lifecycle_state = self.lifecycle.clone();
             let admin_health = self.health.clone();
-            let admin_heartbeat = self.health.register_worker(
+            let admin_heartbeat = self.watchdog.register_worker(
                 "admin-console",
                 HealthComponent::AdminConsole,
                 Duration::from_secs(3),
@@ -248,10 +254,10 @@ impl Application {
                 Ok(())
             });
         }
-        let watchdog_health = self.health.clone();
+        let watchdog = self.watchdog.clone();
         let watchdog_lifecycle = self.lifecycle.subscribe();
         self.services.spawn(async move {
-            watchdog_health.run_watchdog(watchdog_lifecycle).await;
+            watchdog.run(watchdog_lifecycle).await;
             Ok(())
         });
         info!(address = %self.config.listen_addr, "NebulaCache application ready");
@@ -437,13 +443,12 @@ impl ShutdownSignals {
 mod tests {
     use std::{io, net::SocketAddr, time::Duration};
 
+    use nebula_health::{
+        lifecycle::ApplicationState, ApplicationHealth, ComponentHealth, HealthComponent,
+    };
     use tokio::net::TcpListener;
 
-    use crate::{
-        config::{Config, PersistenceMode},
-        health::{ApplicationHealth, ComponentHealth, HealthComponent},
-        lifecycle::ApplicationState,
-    };
+    use crate::config::{Config, PersistenceMode};
 
     use super::Application;
 
