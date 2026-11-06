@@ -1,7 +1,6 @@
-listen_addr: "0.0.0.0:7001"
+listen_addr: "0.0.0.0:7003"
 
 admin_console:
   enabled: true
   password: "${NEBULA_ADMIN_PASSWORD}"
-  port: null
   listen_addr: "127.0.0.1:7002"
