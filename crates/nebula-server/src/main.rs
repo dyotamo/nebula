@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let frame_limits = config.frame_limits();
 
     if admin_console.enabled {
-        let mut admin_listen_addr = config.admin_listen_addr;
+        let mut admin_listen_addr = admin_console.listen_addr;
         if let Some(port) = admin_console.port {
             admin_listen_addr.set_port(port);
         }

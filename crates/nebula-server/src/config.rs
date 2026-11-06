@@ -8,30 +8,34 @@ use serde::Deserialize;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub listen_addr: SocketAddr,
-    pub admin_listen_addr: SocketAddr,
-    pub max_key_len: usize,
-    pub max_value_len: usize,
-    pub admin_console: bool,
-    pub admin_password: Option<String>,
-    pub admin_console_port: Option<u16>,
+    pub admin_console: AdminConsoleOptions,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct AdminConsoleOptions {
     pub enabled: bool,
     pub password: Option<String>,
     pub port: Option<u16>,
+    pub listen_addr: SocketAddr,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             listen_addr: "0.0.0.0:7001".parse().unwrap(),
-            admin_listen_addr: "127.0.0.1:7002".parse().unwrap(),
-            max_key_len: FrameLimits::default().max_key_len,
-            max_value_len: FrameLimits::default().max_value_len,
-            admin_console: false,
-            admin_password: None,
-            admin_console_port: None,
+            admin_console: AdminConsoleOptions::default(),
+        }
+    }
+}
+
+impl Default for AdminConsoleOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            password: None,
+            port: None,
+            listen_addr: "127.0.0.1:7002".parse().unwrap(),
         }
     }
 }
@@ -55,24 +59,12 @@ impl Config {
             Self::default()
         };
 
-        let admin_console = AdminConsoleOptions {
-            enabled: config.admin_console,
-            password: config.admin_password.clone(),
-            port: config.admin_console_port,
-        };
+        let admin_console = config.admin_console.clone();
 
         if admin_console.enabled && admin_console.password.as_deref().is_none_or(str::is_empty) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "admin_password is required and must not be empty when admin_console is enabled",
-            )
-            .into());
-        }
-
-        if config.max_key_len > u32::MAX as usize || config.max_value_len > u32::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "frame limits must not exceed the protocol's length fields",
+                "admin_console.password is required and must not be empty when admin_console.enabled is true",
             )
             .into());
         }
@@ -81,10 +73,7 @@ impl Config {
     }
 
     pub fn frame_limits(&self) -> FrameLimits {
-        FrameLimits {
-            max_key_len: self.max_key_len,
-            max_value_len: self.max_value_len,
-        }
+        FrameLimits::default()
     }
 }
 
@@ -174,10 +163,12 @@ fn coerce_environment_values(value: &mut serde_yaml::Value) -> Result<(), Box<dy
         return Ok(());
     };
 
-    coerce_config_field::<bool>(values, "admin_console")?;
-    coerce_config_field::<usize>(values, "max_key_len")?;
-    coerce_config_field::<usize>(values, "max_value_len")?;
-    coerce_config_field::<u16>(values, "admin_console_port")?;
+    let admin_console_key = serde_yaml::Value::String("admin_console".to_owned());
+    if let Some(serde_yaml::Value::Mapping(admin_console)) = values.get_mut(&admin_console_key) {
+        coerce_config_field::<bool>(admin_console, "enabled")?;
+        coerce_config_field::<u16>(admin_console, "port")?;
+    }
+
     Ok(())
 }
 
@@ -226,28 +217,33 @@ mod tests {
             Config::load(Args::try_parse_from(["nebula-server"]).unwrap()).unwrap();
 
         assert_eq!(config.listen_addr.to_string(), "0.0.0.0:7001");
-        assert_eq!(config.admin_listen_addr.to_string(), "127.0.0.1:7002");
+        assert_eq!(
+            config.admin_console.listen_addr.to_string(),
+            "127.0.0.1:7002"
+        );
         assert!(!admin_console.enabled);
         assert_eq!(admin_console.password, None);
         assert_eq!(admin_console.port, None);
-        assert_eq!(config.max_key_len, 1_024);
-        assert_eq!(config.max_value_len, 8 * 1024 * 1024);
+        let frame_limits = config.frame_limits();
+        assert_eq!(frame_limits.max_key_len, 1_024);
+        assert_eq!(frame_limits.max_value_len, 8 * 1024 * 1024);
     }
 
     #[test]
     fn loads_all_server_settings_from_yaml() {
         let config: Config = serde_yaml::from_str(
-            "listen_addr: 127.0.0.1:7003\nadmin_listen_addr: 127.0.0.1:7004\nmax_key_len: 2048\nmax_value_len: 4096\nadmin_console: true\nadmin_password: secret\nadmin_console_port: 7123\n",
+            "listen_addr: 127.0.0.1:7003\nadmin_console:\n  enabled: true\n  password: secret\n  port: 7123\n  listen_addr: 127.0.0.1:7004\n",
         )
         .unwrap();
 
         assert_eq!(config.listen_addr.to_string(), "127.0.0.1:7003");
-        assert_eq!(config.admin_listen_addr.to_string(), "127.0.0.1:7004");
-        assert_eq!(config.max_key_len, 2048);
-        assert_eq!(config.max_value_len, 4096);
-        assert!(config.admin_console);
-        assert_eq!(config.admin_password.as_deref(), Some("secret"));
-        assert_eq!(config.admin_console_port, Some(7123));
+        assert_eq!(
+            config.admin_console.listen_addr.to_string(),
+            "127.0.0.1:7004"
+        );
+        assert!(config.admin_console.enabled);
+        assert_eq!(config.admin_console.password.as_deref(), Some("secret"));
+        assert_eq!(config.admin_console.port, Some(7123));
     }
 
     #[test]
@@ -257,13 +253,14 @@ mod tests {
             .unwrap()
             .as_nanos();
         let secret_name = format!("NEBULA_TEST_SECRET_{unique}");
+        let enabled_name = format!("NEBULA_TEST_ENABLED_{unique}");
         let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
         let secret = "p@ss: value #1";
         std::env::set_var(&secret_name, secret);
         fs::write(
             &path,
             format!(
-                "admin_console: \"${{ENABLED:-true}}\"\nadmin_password: \"${{{secret_name}}}\"\nmax_key_len: \"${{MISSING_LIMIT_{unique}:-2048}}\"\nadmin_console_port: \"${{MISSING_PORT_{unique}:-7123}}\"\n"
+                "admin_console:\n  enabled: \"${{{enabled_name}:-true}}\"\n  password: \"${{{secret_name}}}\"\n  port: \"${{MISSING_PORT_{unique}:-7123}}\"\n"
             ),
         )
         .unwrap();
@@ -275,9 +272,8 @@ mod tests {
 
         std::env::remove_var(secret_name);
         fs::remove_file(path).unwrap();
-        assert!(config.admin_console);
+        assert!(config.admin_console.enabled);
         assert_eq!(admin_console.password.as_deref(), Some(secret));
-        assert_eq!(config.max_key_len, 2048);
         assert_eq!(admin_console.port, Some(7123));
     }
 
@@ -289,7 +285,11 @@ mod tests {
             .as_nanos();
         let name = format!("NEBULA_MISSING_{unique}");
         let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
-        fs::write(&path, format!("admin_password: \"${{{name}}}\"\n")).unwrap();
+        fs::write(
+            &path,
+            format!("admin_console:\n  password: \"${{{name}}}\"\n"),
+        )
+        .unwrap();
 
         let error = Config::load(Args {
             config: Some(path.clone()),
@@ -308,7 +308,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
-        fs::write(&path, "max_key_len: 2048\n").unwrap();
+        fs::write(&path, "listen_addr: 127.0.0.1:7003\n").unwrap();
 
         let (config, _) = Config::load(
             Args::try_parse_from(["nebula-server", "--config", path.to_str().unwrap()]).unwrap(),
@@ -316,8 +316,9 @@ mod tests {
         .unwrap();
 
         fs::remove_file(path).unwrap();
-        assert_eq!(config.max_key_len, 2048);
-        assert_eq!(config.max_value_len, 8 * 1024 * 1024);
+        assert_eq!(config.listen_addr.to_string(), "127.0.0.1:7003");
+        assert_eq!(config.frame_limits().max_key_len, 1_024);
+        assert_eq!(config.frame_limits().max_value_len, 8 * 1024 * 1024);
     }
 
     #[test]
@@ -339,7 +340,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
-        fs::write(&path, "admin_console: true\n").unwrap();
+        fs::write(&path, "admin_console:\n  enabled: true\n").unwrap();
 
         let error = Config::load(Args {
             config: Some(path.clone()),
@@ -348,25 +349,14 @@ mod tests {
         .unwrap();
 
         fs::remove_file(path).unwrap();
-        assert!(error.to_string().contains("admin_password is required"));
+        assert!(error
+            .to_string()
+            .contains("admin_console.password is required"));
     }
 
     #[test]
-    fn rejects_frame_limits_that_do_not_fit_protocol_fields() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
-        fs::write(&path, "max_key_len: 4294967296\n").unwrap();
-
-        let error = Config::load(Args {
-            config: Some(path.clone()),
-        })
-        .err()
-        .unwrap();
-
-        fs::remove_file(path).unwrap();
-        assert!(error.to_string().contains("protocol's length fields"));
+    fn rejects_protocol_limit_overrides() {
+        assert!(serde_yaml::from_str::<Config>("max_key_len: 2048\n").is_err());
+        assert!(serde_yaml::from_str::<Config>("max_value_len: 4096\n").is_err());
     }
 }
