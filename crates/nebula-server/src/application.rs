@@ -12,6 +12,7 @@ use tracing::{error, info, warn};
 use crate::{
     admin_console,
     config::Config,
+    health::{ComponentHealth, HealthComponent, HealthManager},
     lifecycle::{ApplicationState, Lifecycle},
     server,
 };
@@ -20,23 +21,31 @@ pub struct Application {
     config: Config,
     store: std::sync::Arc<CacheStore>,
     lifecycle: Lifecycle,
+    health: HealthManager,
     services: JoinSet<io::Result<()>>,
     shutdown_timeout: Duration,
 }
 
 impl Application {
     pub fn new(config: Config) -> Self {
+        let lifecycle = Lifecycle::new();
+        let health = HealthManager::new(lifecycle.clone(), config.admin_console.enabled);
         Self {
             shutdown_timeout: Duration::from_secs(config.shutdown_timeout_secs),
             config,
             store: std::sync::Arc::new(CacheStore::new()),
-            lifecycle: Lifecycle::new(),
+            lifecycle,
+            health,
             services: JoinSet::new(),
         }
     }
 
     pub fn state(&self) -> ApplicationState {
         self.lifecycle.state()
+    }
+
+    pub fn health(&self) -> HealthManager {
+        self.health.clone()
     }
 
     pub async fn run(mut self) -> Result<(), Box<dyn Error>> {
@@ -86,8 +95,40 @@ impl Application {
         let (tcp_started_tx, tcp_started_rx) = oneshot::channel();
         let tcp_store = self.store.clone();
         let tcp_lifecycle = self.lifecycle.subscribe();
+        let tcp_heartbeat = self.health.register_worker(
+            "tcp-server",
+            HealthComponent::TcpServer,
+            Duration::from_secs(3),
+        );
+        let tcp_health = self.health.clone();
+        let tcp_lifecycle_state = self.lifecycle.clone();
         self.services.spawn(async move {
-            server::run(listener, tcp_store, limits, tcp_lifecycle, tcp_started_tx).await
+            let result = server::run(
+                listener,
+                tcp_store,
+                limits,
+                tcp_lifecycle,
+                tcp_heartbeat,
+                tcp_started_tx,
+            )
+            .await;
+            if matches!(
+                tcp_lifecycle_state.state(),
+                ApplicationState::Ready | ApplicationState::Degraded
+            ) {
+                tcp_health.report(
+                    HealthComponent::TcpServer,
+                    ComponentHealth::Unhealthy(
+                        result
+                            .as_ref()
+                            .err()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "TCP service exited unexpectedly".to_owned()),
+                    ),
+                );
+                let _ = tcp_lifecycle_state.transition(ApplicationState::Failed);
+            }
+            result
         });
 
         let admin_started = if let Some(listener) = admin_listener {
@@ -103,18 +144,43 @@ impl Application {
                     .await);
             };
             let admin_lifecycle = self.lifecycle.subscribe();
+            let admin_lifecycle_state = self.lifecycle.clone();
+            let admin_health = self.health.clone();
+            let admin_heartbeat = self.health.register_worker(
+                "admin-console",
+                HealthComponent::AdminConsole,
+                Duration::from_secs(3),
+            );
             let store = self.store.clone();
             let (started_tx, started_rx) = oneshot::channel();
             self.services.spawn(async move {
-                admin_console::run(
+                let result = admin_console::run(
                     listener,
                     store,
                     limits,
                     password,
                     admin_lifecycle,
+                    admin_heartbeat,
                     started_tx,
                 )
-                .await
+                .await;
+                if matches!(
+                    admin_lifecycle_state.state(),
+                    ApplicationState::Ready | ApplicationState::Degraded
+                ) {
+                    admin_health.report(
+                        HealthComponent::AdminConsole,
+                        ComponentHealth::Unhealthy(
+                            result
+                                .as_ref()
+                                .err()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "admin console exited unexpectedly".to_owned()),
+                        ),
+                    );
+                    let _ = admin_lifecycle_state.transition(ApplicationState::Failed);
+                }
+                result
             });
             Some(started_rx)
         } else {
@@ -137,6 +203,12 @@ impl Application {
         if let Err(err) = self.lifecycle.transition(ApplicationState::Ready) {
             return Err(Box::new(err));
         }
+        let watchdog_health = self.health.clone();
+        let watchdog_lifecycle = self.lifecycle.subscribe();
+        self.services.spawn(async move {
+            watchdog_health.run_watchdog(watchdog_lifecycle).await;
+            Ok(())
+        });
         info!(address = %self.config.listen_addr, "NebulaCache application ready");
         Ok(())
     }
@@ -144,7 +216,9 @@ impl Application {
     pub async fn shutdown(&mut self) -> Result<(), Box<dyn Error>> {
         match self.lifecycle.state() {
             ApplicationState::Stopped | ApplicationState::Stopping => return Ok(()),
-            ApplicationState::Ready => self.lifecycle.transition(ApplicationState::Stopping)?,
+            ApplicationState::Ready | ApplicationState::Degraded => {
+                self.lifecycle.transition(ApplicationState::Stopping)?
+            }
             ApplicationState::Failed => {
                 self.stop_services().await;
                 return Ok(());
@@ -155,15 +229,6 @@ impl Application {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "cannot shut down an application that has not started",
-                )
-                .into());
-            }
-            ApplicationState::Degraded => {
-                self.lifecycle.transition(ApplicationState::Failed)?;
-                self.stop_services().await;
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "degraded application operation is not supported",
                 )
                 .into());
             }
@@ -204,6 +269,15 @@ impl Application {
     }
 
     async fn fail_startup(&mut self, context: &str, err: io::Error) -> Box<dyn Error> {
+        let component = if context.contains("admin") {
+            HealthComponent::AdminConsole
+        } else {
+            HealthComponent::TcpServer
+        };
+        self.health.report(
+            component,
+            ComponentHealth::Unhealthy(format!("{context}: {err}")),
+        );
         let _ = self.lifecycle.transition(ApplicationState::Failed);
         let error = io::Error::new(err.kind(), format!("{context}: {err}"));
         error!(error = %error, "application startup failed");
@@ -216,6 +290,10 @@ impl Application {
         result: Option<Result<io::Result<()>, JoinError>>,
     ) -> Result<(), Box<dyn Error>> {
         let err = join_result_error(result);
+        self.health.report(
+            HealthComponent::BackgroundWorker("application-service-supervisor".to_owned()),
+            ComponentHealth::Unhealthy(err.to_string()),
+        );
         let _ = self.lifecycle.transition(ApplicationState::Failed);
         error!(error = %err, "mandatory application service exited unexpectedly");
         self.stop_services().await;
@@ -306,7 +384,11 @@ mod tests {
 
     use tokio::net::TcpListener;
 
-    use crate::{config::Config, lifecycle::ApplicationState};
+    use crate::{
+        config::Config,
+        health::{ApplicationHealth, ComponentHealth, HealthComponent},
+        lifecycle::ApplicationState,
+    };
 
     use super::Application;
 
@@ -327,6 +409,25 @@ mod tests {
         app.shutdown().await.unwrap();
         app.shutdown().await.unwrap();
         assert_eq!(app.state(), ApplicationState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn health_degradation_blocks_readiness_until_recovery() {
+        let mut app = Application::new(test_config("127.0.0.1:0".parse().unwrap()));
+        app.start().await.unwrap();
+        let health = app.health();
+
+        health.report(
+            HealthComponent::CacheEngine,
+            ComponentHealth::Degraded("temporary cache issue".to_owned()),
+        );
+        assert_eq!(health.snapshot().overall, ApplicationHealth::Degraded);
+        assert_eq!(app.state(), ApplicationState::Degraded);
+
+        health.report(HealthComponent::CacheEngine, ComponentHealth::Healthy);
+        assert_eq!(health.snapshot().overall, ApplicationHealth::Healthy);
+        assert_eq!(app.state(), ApplicationState::Ready);
+        app.shutdown().await.unwrap();
     }
 
     #[tokio::test]

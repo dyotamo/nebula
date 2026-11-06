@@ -1,4 +1,8 @@
-use std::{io, sync::Arc, time::Instant};
+use std::{
+    io,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     body::Bytes,
@@ -16,9 +20,10 @@ use serde_json::json;
 use tokio::{
     net::TcpListener,
     sync::{oneshot, watch},
+    time::{interval, MissedTickBehavior},
 };
 
-use crate::lifecycle::ApplicationState;
+use crate::{health::WorkerHeartbeat, lifecycle::ApplicationState};
 use tracing::info;
 
 use nebula_core::CacheStore;
@@ -82,19 +87,28 @@ struct EntriesPage {
     page_size: usize,
 }
 
-pub async fn run(
+pub(crate) async fn run(
     listener: TcpListener,
     store: Arc<CacheStore>,
     limits: FrameLimits,
     password: String,
     lifecycle: watch::Receiver<ApplicationState>,
+    heartbeat: WorkerHeartbeat,
     started: oneshot::Sender<()>,
 ) -> io::Result<()> {
     info!(address = %listener.local_addr()?, "NebulaCache admin console listening");
     let server = axum::serve(listener, router(store, limits, password, lifecycle.clone()))
         .with_graceful_shutdown(wait_for_shutdown(lifecycle));
+    let mut server = Box::pin(async move { server.await });
     let _ = started.send(());
-    server.await
+    let mut heartbeat_interval = interval(Duration::from_secs(1));
+    heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut server => return result,
+            _ = heartbeat_interval.tick() => heartbeat.heartbeat(),
+        }
+    }
 }
 
 fn router(

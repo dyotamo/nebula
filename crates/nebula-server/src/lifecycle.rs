@@ -88,8 +88,12 @@ fn valid_transition(from: ApplicationState, to: ApplicationState) -> bool {
         (from, to),
         (ApplicationState::Initializing, ApplicationState::Ready)
             | (ApplicationState::Initializing, ApplicationState::Failed)
+            | (ApplicationState::Ready, ApplicationState::Degraded)
             | (ApplicationState::Ready, ApplicationState::Stopping)
             | (ApplicationState::Ready, ApplicationState::Failed)
+            | (ApplicationState::Degraded, ApplicationState::Ready)
+            | (ApplicationState::Degraded, ApplicationState::Stopping)
+            | (ApplicationState::Degraded, ApplicationState::Failed)
             | (ApplicationState::Stopping, ApplicationState::Stopped)
             | (ApplicationState::Stopping, ApplicationState::Failed)
     )

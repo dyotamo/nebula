@@ -1,4 +1,4 @@
-use std::{io, sync::Arc};
+use std::{io, sync::Arc, time::Duration};
 
 use nebula_protocol::{read_request_with_limits, write_response_with_limits, FrameLimits};
 use tokio::{
@@ -6,23 +6,27 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{oneshot, watch},
     task::JoinSet,
+    time::{interval, MissedTickBehavior},
 };
 use tracing::{error, info, warn};
 
 use nebula_core::CacheStore;
 
-use crate::{handler, lifecycle::ApplicationState};
+use crate::{handler, health::WorkerHeartbeat, lifecycle::ApplicationState};
 
-pub async fn run(
+pub(crate) async fn run(
     listener: TcpListener,
     store: Arc<CacheStore>,
     limits: FrameLimits,
     mut lifecycle: watch::Receiver<ApplicationState>,
+    heartbeat: WorkerHeartbeat,
     started: oneshot::Sender<()>,
 ) -> io::Result<()> {
     info!(address = %listener.local_addr()?, "NebulaCache node listening");
     let _ = started.send(());
     let mut connections = JoinSet::new();
+    let mut heartbeat_interval = interval(Duration::from_secs(1));
+    heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         let state = *lifecycle.borrow();
@@ -33,21 +37,23 @@ pub async fn run(
                 }
                 continue;
             }
-            ApplicationState::Ready => {}
-            _ => break,
+            ApplicationState::Ready | ApplicationState::Degraded => {}
+            ApplicationState::Stopping | ApplicationState::Stopped | ApplicationState::Failed => {
+                break;
+            }
         }
 
         tokio::select! {
             changed = lifecycle.changed() => {
-                if changed.is_err() || *lifecycle.borrow() != ApplicationState::Ready {
+                if changed.is_err() {
                     break;
                 }
             }
-            accepted = listener.accept() => {
+            accepted = listener.accept(), if state == ApplicationState::Ready => {
                 let (socket, peer) = accepted?;
                 if *lifecycle.borrow() != ApplicationState::Ready {
                     drop(socket);
-                    break;
+                    continue;
                 }
                 handler::log_connection(peer);
                 connections.spawn(serve_connection(
@@ -57,6 +63,7 @@ pub async fn run(
                     lifecycle.clone(),
                 ));
             }
+            _ = heartbeat_interval.tick() => heartbeat.heartbeat(),
             completed = connections.join_next(), if !connections.is_empty() => {
                 if let Some(Err(err)) = completed {
                     warn!(error = %err, "connection task failed");
@@ -122,7 +129,10 @@ mod tests {
     use nebula_protocol::{read_response, write_request, Opcode, Request, Status};
     use tokio::{net::TcpListener, sync::oneshot};
 
-    use crate::lifecycle::{ApplicationState, Lifecycle};
+    use crate::{
+        health::{HealthComponent, HealthManager},
+        lifecycle::{ApplicationState, Lifecycle},
+    };
 
     use super::run;
 
@@ -132,12 +142,19 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let store = Arc::new(CacheStore::new());
         let lifecycle = Lifecycle::new();
+        let health = HealthManager::new(lifecycle.clone(), false);
+        let heartbeat = health.register_worker(
+            "tcp-server-test",
+            HealthComponent::TcpServer,
+            std::time::Duration::from_secs(3),
+        );
         let (started_tx, started_rx) = oneshot::channel();
         let server = tokio::spawn(run(
             listener,
             Arc::clone(&store),
             Default::default(),
             lifecycle.subscribe(),
+            heartbeat,
             started_tx,
         ));
         started_rx.await.unwrap();
