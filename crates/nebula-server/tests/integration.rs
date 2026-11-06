@@ -1,7 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use nebula_node::{engine::CacheStore, handler};
+use nebula_core::CacheStore;
 use nebula_protocol::{Opcode, Request, Status};
+use nebula_server::handler;
 
 #[tokio::test]
 async fn set_then_get_returns_value() {

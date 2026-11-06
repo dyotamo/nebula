@@ -88,7 +88,7 @@ impl Config {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "nebula-node", version, about = "Run a Nebula cache server")]
+#[command(name = "nebula-server", version, about = "Run a Nebula cache server")]
 struct Args {
     #[arg(long = "config", value_name = "PATH")]
     config: Option<PathBuf>,
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn defaults_are_applied_without_a_config_file() {
         let (config, admin_console) =
-            Config::load(Args::try_parse_from(["nebula-node"]).unwrap()).unwrap();
+            Config::load(Args::try_parse_from(["nebula-server"]).unwrap()).unwrap();
 
         assert_eq!(config.listen_addr.to_string(), "0.0.0.0:7001");
         assert_eq!(config.admin_listen_addr.to_string(), "127.0.0.1:7002");
@@ -135,7 +135,7 @@ mod tests {
     fn parses_cli_overrides() {
         let (config, admin_console) = Config::load(
             Args::try_parse_from([
-                "nebula-node",
+                "nebula-server",
                 "--listen",
                 "127.0.0.1:7002",
                 "--admin-console",
@@ -179,7 +179,7 @@ mod tests {
         fs::write(&path, "max_key_len: 2048\n").unwrap();
 
         let (config, _) = Config::load(
-            Args::try_parse_from(["nebula-node", "--config", path.to_str().unwrap()]).unwrap(),
+            Args::try_parse_from(["nebula-server", "--config", path.to_str().unwrap()]).unwrap(),
         )
         .unwrap();
 
@@ -197,9 +197,10 @@ mod tests {
 
     #[test]
     fn admin_console_requires_a_non_empty_password() {
-        let error = Config::load(Args::try_parse_from(["nebula-node", "--admin-console"]).unwrap())
-            .err()
-            .unwrap();
+        let error =
+            Config::load(Args::try_parse_from(["nebula-server", "--admin-console"]).unwrap())
+                .err()
+                .unwrap();
 
         assert!(error.to_string().contains("--admin-password is required"));
     }
@@ -207,7 +208,7 @@ mod tests {
     #[test]
     fn rejects_frame_limits_that_do_not_fit_protocol_fields() {
         let error = Config::load(
-            Args::try_parse_from(["nebula-node", "--max-key-len", "4294967296"]).unwrap(),
+            Args::try_parse_from(["nebula-server", "--max-key-len", "4294967296"]).unwrap(),
         )
         .err()
         .unwrap();

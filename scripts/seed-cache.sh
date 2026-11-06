@@ -7,8 +7,8 @@ address=${1:-${NEBULA_ADDR:-127.0.0.1:7001}}
 target_dir=${CARGO_TARGET_DIR:-target}
 
 cd "$project_root"
-cargo build --quiet -p nebulactl
-client=$target_dir/debug/nebulactl
+cargo build --quiet -p nebula-client
+client=$target_dir/debug/nebula-client
 
 index=1
 while [ "$index" -le 1000 ]; do

@@ -15,7 +15,7 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use tracing::info;
 
-use crate::engine::CacheStore;
+use nebula_core::CacheStore;
 
 const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
 const SESSION_COOKIE: &str = "nebula_admin_session";
@@ -336,13 +336,13 @@ mod tests {
         clear_entries, constant_time_eq, decode_hex, delete_entry, encode_hex, list_entries, login,
         set_entry, ConsoleState, ListEntriesQuery, LoginRequest,
     };
-    use crate::engine::CacheStore;
     use axum::{
         body::{to_bytes, Bytes},
         extract::{Path, Query, State},
         http::{header, HeaderMap, HeaderValue, StatusCode},
         Json,
     };
+    use nebula_core::CacheStore;
     use nebula_protocol::FrameLimits;
 
     #[tokio::test]

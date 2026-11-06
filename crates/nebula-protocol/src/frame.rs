@@ -212,7 +212,7 @@ where
     header[4] = VERSION;
     header[5] = response.status as u8;
     header[6..10].copy_from_slice(&value_len.to_be_bytes());
-    
+
     writer.write_all(&header).await?;
     writer.write_all(&response.value).await?;
     writer.flush().await?;

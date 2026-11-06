@@ -448,21 +448,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "nebula-node"
+name = "nebula-client"
 version = "0.1.0"
 dependencies = [
- "axum",
  "clap",
- "dashmap",
  "nebula-protocol",
- "rand",
- "serde",
- "serde_json",
- "serde_yaml",
  "thiserror",
  "tokio",
- "tracing",
- "tracing-subscriber",
+]
+
+[[package]]
+name = "nebula-core"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
 ]
 
 [[package]]
@@ -474,13 +473,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "nebulactl"
+name = "nebula-server"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
+ "dashmap",
+ "nebula-core",
  "nebula-protocol",
+ "rand",
+ "serde",
+ "serde_json",
+ "serde_yaml",
  "thiserror",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

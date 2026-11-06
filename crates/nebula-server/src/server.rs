@@ -7,7 +7,9 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
-use crate::{engine::CacheStore, handler};
+use nebula_core::CacheStore;
+
+use crate::handler;
 
 pub async fn run(
     listener: TcpListener,
@@ -42,7 +44,7 @@ async fn serve_connection(
             {
                 return Ok(());
             }
-            
+
             Err(err) => {
                 error!(error = %err, "invalid request frame");
                 let _ = socket.shutdown().await;

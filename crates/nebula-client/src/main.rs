@@ -9,7 +9,7 @@ use tokio::io::{self as tokio_io, AsyncWriteExt};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "nebulactl",
+    name = "nebula-client",
     version,
     about = "Interact with a Nebula cache server"
 )]
@@ -47,7 +47,7 @@ enum Command {
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("nebulactl: {error}");
+        eprintln!("nebula-client: {error}");
         process::exit(1);
     }
 }
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn parses_global_address_and_subcommand_arguments() {
         let cli = Cli::try_parse_from([
-            "nebulactl",
+            "nebula-client",
             "set",
             "--address",
             "cache:7002",
@@ -129,13 +129,13 @@ mod tests {
 
     #[test]
     fn defaults_set_ttl_to_zero() {
-        let cli = Cli::try_parse_from(["nebulactl", "set", "key", "value"]).unwrap();
+        let cli = Cli::try_parse_from(["nebula-client", "set", "key", "value"]).unwrap();
 
         assert!(matches!(cli.command, Command::Set { ttl_secs: 0, .. }));
     }
 
     #[test]
     fn rejects_invalid_ttl() {
-        assert!(Cli::try_parse_from(["nebulactl", "set", "key", "value", "forever"]).is_err());
+        assert!(Cli::try_parse_from(["nebula-client", "set", "key", "value", "forever"]).is_err());
     }
 }

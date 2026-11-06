@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use nebula_node::{admin_console, config::Config, engine::CacheStore, server};
+use nebula_core::CacheStore;
+use nebula_server::{admin_console, config::Config, server};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 

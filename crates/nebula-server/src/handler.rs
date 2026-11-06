@@ -3,7 +3,7 @@ use std::sync::Arc;
 use nebula_protocol::{Opcode, Request, Response};
 use tracing::debug;
 
-use crate::engine::CacheStore;
+use nebula_core::CacheStore;
 
 pub async fn handle(request: Request, store: Arc<CacheStore>) -> Response {
     match request.opcode {
@@ -13,7 +13,7 @@ pub async fn handle(request: Request, store: Arc<CacheStore>) -> Response {
             if request.key.is_empty() {
                 return Response::invalid_argument();
             }
-            
+
             store.set(request.key, request.value, request.ttl_secs);
             Response::empty_ok()
         }
