@@ -90,18 +90,6 @@ impl Application {
             .into());
         }
 
-        if self.config.persistence.mode == PersistenceMode::SnapshotWal {
-            return Err(self
-                .fail_startup(
-                    "initialize persistence",
-                    io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "snapshot_wal is reserved for Phase 4 and is not implemented",
-                    ),
-                )
-                .await);
-        }
-
         if self.config.persistence.mode == PersistenceMode::Snapshot
             && (self.config.persistence.snapshot_interval_secs == 0
                 || self.config.persistence.snapshot_retention == 0
@@ -519,17 +507,6 @@ mod tests {
         );
         restarted.shutdown().await.unwrap();
         std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[tokio::test]
-    async fn snapshot_wal_mode_fails_explicitly_until_wal_is_implemented() {
-        let mut config = test_config("127.0.0.1:0".parse().unwrap());
-        config.persistence.mode = PersistenceMode::SnapshotWal;
-        let mut app = Application::new(config);
-
-        let error = app.start().await.unwrap_err();
-        assert!(error.to_string().contains("reserved for Phase 4"));
-        assert_eq!(app.state(), ApplicationState::Failed);
     }
 
     #[tokio::test]

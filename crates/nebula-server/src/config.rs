@@ -28,7 +28,6 @@ pub enum PersistenceMode {
     #[default]
     Volatile,
     Snapshot,
-    SnapshotWal,
 }
 
 #[derive(Clone, Deserialize)]
