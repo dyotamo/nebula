@@ -11,4 +11,3 @@ COPY --from=builder /app/target/release/nebula-server /usr/local/bin/nebula-serv
 EXPOSE 7001
 ENTRYPOINT ["nebula-server"]
 USER 1000:1000
-CMD ["--listen", "0.0.0.0:7001"]
