@@ -2,12 +2,13 @@ use std::{io, sync::Arc, time::Duration};
 
 use nebula_protocol::{read_request_with_limits, write_response_with_limits, FrameLimits};
 use tokio::{
-    io::AsyncWriteExt,
-    net::{TcpListener, TcpStream},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    net::TcpListener,
     sync::{oneshot, watch},
     task::JoinSet,
     time::{interval, MissedTickBehavior},
 };
+use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
 
 use nebula_core::CacheStore;
@@ -20,6 +21,7 @@ pub(crate) async fn run(
     listener: TcpListener,
     store: Arc<CacheStore>,
     limits: FrameLimits,
+    tls_acceptor: Option<TlsAcceptor>,
     mut lifecycle: watch::Receiver<ApplicationState>,
     heartbeat: WorkerHeartbeat,
     started: oneshot::Sender<()>,
@@ -58,12 +60,22 @@ pub(crate) async fn run(
                     continue;
                 }
                 handler::log_connection(peer);
-                connections.spawn(serve_connection(
-                    socket,
-                    Arc::clone(&store),
-                    limits,
-                    lifecycle.clone(),
-                ));
+                let store = Arc::clone(&store);
+                let lifecycle = lifecycle.clone();
+                let tls_acceptor = tls_acceptor.clone();
+                connections.spawn(async move {
+                    if let Some(acceptor) = tls_acceptor {
+                        match acceptor.accept(socket).await {
+                            Ok(stream) => serve_connection(stream, store, limits, lifecycle).await,
+                            Err(err) => {
+                                warn!(error = %err, "TLS handshake failed");
+                                Ok(())
+                            }
+                        }
+                    } else {
+                        serve_connection(socket, store, limits, lifecycle).await
+                    }
+                });
             }
             _ = heartbeat_interval.tick() => heartbeat.heartbeat(),
             completed = connections.join_next(), if !connections.is_empty() => {
@@ -82,12 +94,15 @@ pub(crate) async fn run(
     Ok(())
 }
 
-async fn serve_connection(
-    mut socket: TcpStream,
+async fn serve_connection<S>(
+    mut socket: S,
     store: Arc<CacheStore>,
     limits: FrameLimits,
     mut lifecycle: watch::Receiver<ApplicationState>,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     loop {
         if *lifecycle.borrow() != ApplicationState::Ready {
             return Ok(());
@@ -156,6 +171,7 @@ mod tests {
             listener,
             Arc::clone(&store),
             Default::default(),
+            None,
             lifecycle.subscribe(),
             heartbeat,
             started_tx,

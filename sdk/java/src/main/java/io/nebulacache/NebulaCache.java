@@ -9,6 +9,9 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.net.SocketException;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -46,10 +49,17 @@ public final class NebulaCache implements AutoCloseable {
 
     public record Config(int minPoolSize, int maxPoolSize, Duration connectTimeout,
             Duration requestTimeout, Duration acquireTimeout, Duration idleTimeout,
-            Duration maxLifetime, int maxRetries) {
+            Duration maxLifetime, int maxRetries, boolean tlsEnabled) {
         public Config() {
             this(0, 10, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT,
-                    Duration.ofSeconds(60), Duration.ofSeconds(300), 2);
+                    Duration.ofSeconds(60), Duration.ofSeconds(300), 2, false);
+        }
+
+        public Config(int minPoolSize, int maxPoolSize, Duration connectTimeout,
+                Duration requestTimeout, Duration acquireTimeout, Duration idleTimeout,
+                Duration maxLifetime, int maxRetries) {
+            this(minPoolSize, maxPoolSize, connectTimeout, requestTimeout, acquireTimeout,
+                    idleTimeout, maxLifetime, maxRetries, false);
         }
 
         public Config {
@@ -114,13 +124,22 @@ public final class NebulaCache implements AutoCloseable {
     }
 
     public static void main(String[] args) {
-        if (args.length > 1) {
-            throw new IllegalArgumentException("Usage: NebulaCache [host:port]");
+        String address = "127.0.0.1:7001";
+        boolean addressSet = false;
+        boolean tlsEnabled = false;
+        for (String arg : args) {
+            if (arg.equals("--tls")) {
+                tlsEnabled = true;
+            } else if (arg.startsWith("--") || addressSet) {
+                throw new IllegalArgumentException("Usage: NebulaCache [--tls] [host:port]");
+            } else {
+                address = arg;
+                addressSet = true;
+            }
         }
 
-        String address = args.length == 0 ? "127.0.0.1:7001" : args[0];
         Config config = new Config(0, 10, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT,
-                Duration.ofSeconds(60), Duration.ofSeconds(300), 2);
+                Duration.ofSeconds(60), Duration.ofSeconds(300), 2, tlsEnabled);
         try (NebulaCache cache = new NebulaCache(address, config)) {
             String key = "nebula-java-sdk-smoke-" + UUID.randomUUID();
             if (cache.ping()) {
@@ -319,6 +338,16 @@ public final class NebulaCache implements AutoCloseable {
                 }
                 connection.socket.connect(new InetSocketAddress(host, port),
                         millis(Math.min(nanos(config.connectTimeout()), remaining)));
+                if (config.tlsEnabled()) {
+                    SSLSocket tlsSocket = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault())
+                            .createSocket(connection.socket, host, port, true);
+                    SSLParameters parameters = tlsSocket.getSSLParameters();
+                    parameters.setEndpointIdentificationAlgorithm("HTTPS");
+                    tlsSocket.setSSLParameters(parameters);
+                    tlsSocket.setSoTimeout(millis(Math.min(nanos(config.connectTimeout()), remaining)));
+                    tlsSocket.startHandshake();
+                    connection.socket = tlsSocket;
+                }
                 connection.socket.setTcpNoDelay(true);
                 connection.created = System.nanoTime();
                 connection.lastUsed = connection.created;
@@ -438,7 +467,7 @@ public final class NebulaCache implements AutoCloseable {
     }
 
     private static final class Connection {
-        private final Socket socket = new Socket();
+        private Socket socket = new Socket();
         private long created;
         private long lastUsed;
     }

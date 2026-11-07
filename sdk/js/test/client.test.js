@@ -106,6 +106,7 @@ test('rejects invalid arguments', async () => {
   await assert.rejects(cache.set('é'.repeat(513), 'value'), RangeError);
   assert.throws(() => new NebulaCache('localhost:70000'), RangeError);
   assert.throws(() => new NebulaCache('::1:7001'), TypeError);
+  assert.throws(() => new NebulaCache('127.0.0.1:7001', { tls: true }), TypeError);
 });
 
 function response(value = Buffer.alloc(0), status = 0) {

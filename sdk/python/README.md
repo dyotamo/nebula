@@ -10,7 +10,7 @@ Start a node listening on the default TCP address:
 cargo run -p nebula-node -- --listen 127.0.0.1:7001
 ```
 
-The TCP protocol does not provide authentication or TLS. Expose the node only on trusted interfaces and apply suitable network controls. Nodes also include an optional password-protected web admin console for inspecting and managing entries; it is separate from this TCP SDK. See the [node setup and console instructions](../../README.md#use-the-web-admin-console).
+TCP client authentication is not provided. TLS is optional on the server and disabled by default; expose plaintext nodes only on trusted interfaces and apply suitable network controls. The optional password-protected web admin console is separate from this TCP SDK. See the [node setup and console instructions](../../README.md#use-the-web-admin-console).
 
 ## Install
 
@@ -53,7 +53,7 @@ finally:
 
 ## API
 
-- `NebulaCache(address="127.0.0.1:7001", timeout=5.0, ...)`: create a client with a `host:port` node address and optional pool/timeout/retry settings in seconds. IPv6 addresses use the `[host]:port` format.
+- `NebulaCache(address="127.0.0.1:7001", timeout=5.0, ...)`: create a client with a `host:port` node address and optional pool/timeout/retry settings in seconds. Pass `ssl_context` to enable TLS. IPv6 addresses use the `[host]:port` format.
 - `close()`: close idle and active sockets; later operations raise `CacheConnectionError`.
 - `ping() -> bool`: returns `True` if the node responds with `PONG`; otherwise raises an SDK exception.
 - `set(key, value, ttl_secs=0) -> None`: store a non-empty string key and a text or bytes-like value.
@@ -61,6 +61,33 @@ finally:
 - `delete(key) -> bool`: return `True` if an entry was deleted, or `False` if it did not exist.
 
 Keys are UTF-8 encoded and limited to 1 KiB. Values are limited to 8 MiB by the protocol. Each node has its own volatile cache; nodes do not share entries.
+
+## TLS
+
+When the server's TCP TLS listener is enabled, pass a standard-library `ssl.SSLContext` to the client. Use a context configured with your private CA when needed; hostname and certificate verification follow the context's settings.
+
+```python
+import ssl
+from nebulacache import NebulaCache
+
+cache = NebulaCache(
+    "cache.example:7001",
+    ssl_context=ssl.create_default_context(cafile="ca.pem"),
+)
+```
+
+Omit `ssl_context` to use plaintext TCP.
+
+## CLI example
+
+The example CLI accepts `--tls-ca` or the `NEBULA_TLS_CA` environment variable to load a private CA certificate and enable TLS:
+
+```bash
+python examples/cache_cli.py --tls-ca "$(mkcert -CAROOT)/rootCA.pem" ping
+NEBULA_TLS_CA="$(mkcert -CAROOT)/rootCA.pem" python examples/cache_cli.py set greeting hello --ttl 60
+```
+
+Without a CA option, the example uses plaintext TCP.
 
 ## Connection pooling and resilience
 

@@ -240,6 +240,8 @@ class NebulaCacheTests(unittest.TestCase):
             self.cache.set("é" * 513, "value")
         with self.assertRaises(ValueError):
             NebulaCache("localhost:70000")
+        with self.assertRaises(TypeError):
+            NebulaCache(ssl_context=object())
 
     def test_unreachable_node_raises_connection_error(self) -> None:
         with self.assertRaises(CacheConnectionError):

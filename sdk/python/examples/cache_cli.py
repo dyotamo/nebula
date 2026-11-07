@@ -1,5 +1,6 @@
 import argparse
 import os
+import ssl
 import sys
 from pathlib import Path
 
@@ -25,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("NEBULA_ADDR", "127.0.0.1:7001"),
         help="NebulaCache node address (default: %(default)s)",
     )
+    parser.add_argument(
+        "--tls-ca",
+        default=os.environ.get("NEBULA_TLS_CA"),
+        help="PEM CA file; enables TLS (default: NEBULA_TLS_CA)",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("ping", help="check node connectivity")
 
@@ -44,9 +50,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    cache = NebulaCache(args.address, min_pool_size=1, max_pool_size=10)
+    cache: NebulaCache | None = None
 
     try:
+        ssl_context = ssl.create_default_context(cafile=args.tls_ca) if args.tls_ca else None
+        cache = NebulaCache(
+            args.address,
+            min_pool_size=1,
+            max_pool_size=10,
+            ssl_context=ssl_context,
+        )
         if args.command == "ping":
             cache.ping()
             print("PONG")
@@ -65,11 +78,12 @@ def main() -> int:
         elif args.command == "delete":
             print("deleted" if cache.delete(args.key) else "not found")
         return 0
-    except (NebulaCacheError, ValueError) as error:
+    except (NebulaCacheError, OSError, ValueError) as error:
         print(f"nebulacache-example: {error}", file=sys.stderr)
         return 1
     finally:
-        cache.close()
+        if cache is not None:
+            cache.close()
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import errno
 import math
 import random
 import socket
+import ssl
 import struct
 import threading
 import time
@@ -51,6 +52,7 @@ class NebulaCache:
         idle_timeout: float = 60.0,
         max_lifetime: float = 300.0,
         max_retries: int = 2,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self.host, self.port = self._parse_address(address)
         connect_timeout = timeout if connect_timeout is None else connect_timeout
@@ -89,6 +91,9 @@ class NebulaCache:
         self.idle_timeout = idle_timeout
         self.max_lifetime = max_lifetime
         self.max_retries = max_retries
+        if ssl_context is not None and not isinstance(ssl_context, ssl.SSLContext):
+            raise TypeError("ssl_context must be an ssl.SSLContext or None")
+        self.ssl_context = ssl_context
         self._condition = threading.Condition()
         self._closed = threading.Event()
         self._connections: set[_PooledConnection] = set()
@@ -154,6 +159,10 @@ class NebulaCache:
                 connection_socket = socket.create_connection(
                     (self.host, self.port), timeout=min(self.connect_timeout, remaining)
                 )
+                if self.ssl_context is not None:
+                    connection_socket = self.ssl_context.wrap_socket(
+                        connection_socket, server_hostname=self.host
+                    )
             except BaseException:
                 with self._condition:
                     self._connecting -= 1

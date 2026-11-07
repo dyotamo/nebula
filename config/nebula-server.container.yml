@@ -6,6 +6,11 @@ admin_console:
   password: admin
   listen_addr: "127.0.0.1:7002"
 
+tls:
+  enabled: true
+  certificate: ./data/tls/server.pem
+  private_key: ./data/tls/server-key.pem
+
 persistence:
   mode: snapshot
   snapshot_dir: ./data/snapshots

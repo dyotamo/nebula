@@ -1,6 +1,20 @@
+use std::{
+    fs::File,
+    io::{self, BufReader},
+    path::Path,
+    sync::Arc,
+};
+
 use nebula_protocol::{read_response, write_request, Opcode, ProtocolError, Request, Status};
 use thiserror::Error;
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+};
+use tokio_rustls::{
+    rustls::{pki_types::ServerName, ClientConfig, RootCertStore},
+    TlsConnector,
+};
 
 #[derive(Debug, Error)]
 pub(super) enum ClientError {
@@ -12,16 +26,30 @@ pub(super) enum ClientError {
     Server { status: Status, message: String },
 }
 
-#[derive(Debug)]
 pub(super) struct Client {
     address: String,
+    server_name: String,
+    tls_connector: Option<TlsConnector>,
 }
 
 impl Client {
-    pub(super) fn new(address: impl Into<String>) -> Self {
-        Self {
-            address: address.into(),
-        }
+    pub(super) fn new(
+        address: impl Into<String>,
+        tls_ca: Option<impl AsRef<Path>>,
+    ) -> Result<Self, ClientError> {
+        let address = address.into();
+        let server_name = address
+            .rsplit_once(':')
+            .map(|(host, _)| host.trim_start_matches('[').trim_end_matches(']'))
+            .unwrap_or(&address)
+            .to_owned();
+        let tls_connector = tls_ca.map(load_tls_connector).transpose()?;
+
+        Ok(Self {
+            address,
+            server_name,
+            tls_connector,
+        })
     }
 
     pub(super) async fn ping(&self) -> Result<(), ClientError> {
@@ -79,8 +107,25 @@ impl Client {
     }
 
     async fn send(&self, request: Request) -> Result<nebula_protocol::Response, ClientError> {
-        let mut stream = TcpStream::connect(&self.address).await?;
-        write_request(&mut stream, &request).await?;
+        let stream = TcpStream::connect(&self.address).await?;
+        if let Some(connector) = &self.tls_connector {
+            let server_name = ServerName::try_from(self.server_name.clone())
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            let stream = connector.connect(server_name, stream).await?;
+            Self::send_on(stream, &request).await
+        } else {
+            Self::send_on(stream, &request).await
+        }
+    }
+
+    async fn send_on<S>(
+        mut stream: S,
+        request: &Request,
+    ) -> Result<nebula_protocol::Response, ClientError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        write_request(&mut stream, request).await?;
         Ok(read_response(&mut stream).await?)
     }
 
@@ -97,4 +142,27 @@ impl Client {
             message: String::from_utf8_lossy(&value).into_owned(),
         }
     }
+}
+
+fn load_tls_connector(path: impl AsRef<Path>) -> Result<TlsConnector, ClientError> {
+    let certificates = rustls_pemfile::certs(&mut BufReader::new(File::open(path)?))
+        .collect::<Result<Vec<_>, _>>()?;
+    if certificates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "TLS CA file contains no certificates",
+        )
+        .into());
+    }
+
+    let mut roots = RootCertStore::empty();
+    for certificate in certificates {
+        roots
+            .add(certificate)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    }
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(TlsConnector::from(Arc::new(config)))
 }

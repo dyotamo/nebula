@@ -454,7 +454,7 @@ func TestDefaultPoolConfig(t *testing.T) {
 	if cfg.Address != DefaultAddress || cfg.MinPoolSize != 0 || cfg.MaxPoolSize != 10 ||
 		cfg.ConnectTimeout != 5*time.Second || cfg.RequestTimeout != 5*time.Second ||
 		cfg.AcquireTimeout != 5*time.Second || cfg.IdleTimeout != 60*time.Second ||
-		cfg.MaxLifetime != 300*time.Second || cfg.MaxRetries != 2 {
+		cfg.MaxLifetime != 300*time.Second || cfg.MaxRetries != 2 || cfg.TLSConfig != nil {
 		t.Fatalf("DefaultConfig() = %+v, want documented pooling defaults", cfg)
 	}
 	cfg.MaxPoolSize = 1

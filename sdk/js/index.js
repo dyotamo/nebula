@@ -1,4 +1,5 @@
 const net = require('node:net');
+const tls = require('node:tls');
 
 const MAGIC = Buffer.from('NEBU');
 const VERSION = 1;
@@ -162,7 +163,9 @@ class NebulaCache {
   }
 
   _connect() {
-    const socket = new net.Socket();
+    const socket = this.options.tls
+      ? tls.connect({ ...this.options.tls, host: this.host, port: this.port })
+      : new net.Socket();
     const entry = { socket, state: 'connecting', createdAt: Date.now() };
     entry.closed = new Promise((resolve) => socket.once('close', resolve));
     this._connections.add(entry);
@@ -170,7 +173,7 @@ class NebulaCache {
       this._discard(entry, transportError('Connection to NebulaCache timed out'));
     }, this.options.connectTimeout);
     socket.setNoDelay(true);
-    socket.on('connect', () => {
+    socket.on(this.options.tls ? 'secureConnect' : 'connect', () => {
       if (entry.state === 'closed') {
         return;
       }
@@ -196,10 +199,12 @@ class NebulaCache {
     });
     socket.on('end', () => this._discard(entry, transportError('connection closed before the response was complete')));
     socket.on('close', () => this._discard(entry, transportError('connection closed before the response was complete')));
-    try {
-      socket.connect({ host: this.host, port: this.port });
-    } catch (error) {
-      this._discard(entry, new CacheConnectionError(error.message));
+    if (!this.options.tls) {
+      try {
+        socket.connect({ host: this.host, port: this.port });
+      } catch (error) {
+        this._discard(entry, new CacheConnectionError(error.message));
+      }
     }
   }
 
@@ -399,8 +404,12 @@ function parseOptions(options) {
     idleTimeout: 60000,
     maxLifetime: 300000,
     maxRetries: 2,
+    tls: undefined,
     ...options,
   };
+  if (result.tls !== undefined && (!result.tls || typeof result.tls !== 'object' || Array.isArray(result.tls))) {
+    throw new TypeError('tls must be a TLS options object when provided');
+  }
   for (const name of ['minPoolSize', 'maxPoolSize', 'maxRetries']) {
     if (!Number.isSafeInteger(result[name]) || result[name] < (name === 'maxPoolSize' ? 1 : 0)) {
       throw new RangeError(`${name} must be a valid ${name === 'maxPoolSize' ? 'positive' : 'non-negative'} integer`);

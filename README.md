@@ -32,7 +32,18 @@ Start a node listening on `127.0.0.1:7001`:
 cargo run -p nebula-server -- --listen 127.0.0.1:7001
 ```
 
-The node also accepts a YAML configuration file with `--config PATH`. It can set `listen_addr`, `admin_listen_addr`, `max_key_len`, and `max_value_len`; the default limits are 1 KiB per key and 8 MiB per value. CLI options override the file for the TCP listen address and frame limits.
+The node also accepts a YAML configuration file by passing its path as the optional positional argument, for example `cargo run -p nebula-server -- server.yml`. The file can set `listen_addr`, admin console settings, TLS settings, shutdown timeout, and persistence settings. The TCP listener uses plaintext unless TLS is enabled in the configuration.
+
+To enable TLS for the TCP protocol, add PEM certificate and private key paths to the YAML configuration. TLS applies to the TCP listener and all TCP SDKs must also be configured for TLS; the admin console remains separate and does not gain TLS from this setting.
+
+```yaml
+tls:
+  enabled: true
+  certificate: /etc/nebula/server-cert.pem
+  private_key: /etc/nebula/server-key.pem
+```
+
+Both `tls.certificate` and `tls.private_key` are required when TLS is enabled. The default is disabled, preserving plaintext TCP connections.
 
 ## Use the command-line client
 
@@ -59,7 +70,7 @@ cargo run -p nebula-server -- --listen 127.0.0.1:7001 --admin-console --admin-pa
 
 Open `http://127.0.0.1:7002` to sign in. The console can list and search entries, paginate results, create or edit entries, delete individual entries, and clear the node's cache. It displays keys and values as text and shows each entry's remaining TTL; use the TCP clients for binary values.
 
-The console uses password login and an expiring session cookie, but it does not provide TLS. Keep it bound to loopback unless access is protected by trusted network controls and HTTPS. The password is supplied as a command-line argument, so avoid exposing it through shell history or local process inspection. The TCP protocol itself does not provide authentication or TLS.
+The console uses password login and an expiring session cookie, but it does not provide TLS. Keep it bound to loopback unless access is protected by trusted network controls and HTTPS. The password is supplied as a command-line argument, so avoid exposing it through shell history or local process inspection. TCP client authentication is not provided. TCP TLS is optional and must be enabled separately as described above.
 
 ## Run three isolated development nodes
 
@@ -80,6 +91,6 @@ The nodes are available on host ports `7001`, `7002`, and `7003`. Each node has 
 
 ## Not implemented
 
-Cluster membership, consistent hashing, replication, quorum, failure detection, automatic failover, persistence, authentication for TCP clients, and TLS.
+Cluster membership, consistent hashing, replication, quorum, failure detection, automatic failover, and authentication for TCP clients.
 
 See [architecture](./docs/architecture.md) and [protocol](./docs/protocol.md) for architecture and TCP protocol details.

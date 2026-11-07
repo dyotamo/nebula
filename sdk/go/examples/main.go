@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"os"
@@ -11,17 +13,35 @@ import (
 
 func main() {
 	address := flag.String("address", nebulacache.DefaultAddress, "NebulaCache node address")
+	tlsCA := flag.String("tls-ca", os.Getenv("NEBULA_TLS_CA"), "PEM CA file; enables TLS")
 	flag.Parse()
 
-	if err := run(*address); err != nil {
+	if err := run(*address, *tlsCA); err != nil {
 		fmt.Fprintln(os.Stderr, "nebulacache-example:", err)
 		os.Exit(1)
 	}
 }
 
-func run(address string) error {
+func run(address string, tlsCA string) error {
 	config := nebulacache.DefaultConfig()
 	config.Address = address
+	if tlsCA != "" {
+		roots, err := x509.SystemCertPool()
+		if err != nil {
+			return err
+		}
+		if roots == nil {
+			roots = x509.NewCertPool()
+		}
+		certificate, err := os.ReadFile(tlsCA)
+		if err != nil {
+			return err
+		}
+		if !roots.AppendCertsFromPEM(certificate) {
+			return fmt.Errorf("no certificates found in TLS CA file %q", tlsCA)
+		}
+		config.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	}
 	cache, err := nebulacache.NewWithConfig(config)
 	if err != nil {
 		return err

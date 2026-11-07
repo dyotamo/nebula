@@ -10,7 +10,7 @@ Start a node listening on the default TCP address:
 cargo run -p nebula-node -- --listen 127.0.0.1:7001
 ```
 
-The TCP protocol does not provide authentication or TLS. Expose the node only on trusted interfaces and apply suitable network controls. Nodes also include an optional password-protected web admin console for inspecting and managing entries; it is separate from this TCP SDK. See the [node setup and console instructions](../../README.md#use-the-web-admin-console).
+TCP client authentication is not provided. TLS is optional on the server and disabled by default; expose plaintext nodes only on trusted interfaces and apply suitable network controls. The optional password-protected web admin console is separate from this TCP SDK. See the [node setup and console instructions](../../README.md#use-the-web-admin-console).
 
 ## Build and install
 
@@ -68,7 +68,7 @@ try (NebulaCache cache = new NebulaCache("127.0.0.1:7001", config)) {
 - `new NebulaCache()`: connect to `127.0.0.1:7001` with a five-second timeout.
 - `new NebulaCache(address)`: connect to a `host:port` address with a five-second timeout. IPv6 addresses use the `[host]:port` format.
 - `new NebulaCache(address, timeout)`: configure connect and request timeouts with a positive `java.time.Duration`.
-- `new NebulaCache(address, config)`: configure connection pooling, timeouts, and GET retry limits.
+- `new NebulaCache(address, config)`: configure connection pooling, timeouts, GET retry limits, and optional TLS with `config.tlsEnabled()`.
 - `close()`: close idle and active sockets; the client rejects operations after shutdown. Use try-with-resources.
 - `ping() -> boolean`: returns `true` if the node responds with `PONG`; otherwise throws an SDK exception.
 - `set(key, value[, ttlSecs])`: store a non-empty string key and a string or binary value.
@@ -77,22 +77,35 @@ try (NebulaCache cache = new NebulaCache("127.0.0.1:7001", config)) {
 
 Keys are UTF-8 encoded and limited to 1 KiB. Values are limited to 8 MiB by the protocol. Each node has its own volatile cache; nodes do not share entries.
 
+## TLS
+
+When the server's TCP TLS listener is enabled, set `tlsEnabled` to `true` in `NebulaCache.Config`. The SDK uses the JVM's default trust store and validates the server certificate and hostname. Add a private CA to the JVM trust store when required. TLS is disabled by default.
+
+```java
+NebulaCache.Config config = new NebulaCache.Config(
+        0, 10, Duration.ofSeconds(5), Duration.ofSeconds(5), Duration.ofSeconds(5),
+        Duration.ofSeconds(60), Duration.ofSeconds(300), 2, true);
+```
+
 ## Connection pooling and resilience
 
 Connections are reused for sequential requests. Each socket carries one request at a time; concurrent calls use separate pooled sockets. The client lazily opens connections and owns them until `close()`.
 
-`NebulaCache.Config` fields are `minPoolSize` (0), `maxPoolSize` (10), `connectTimeout` (5 seconds), `requestTimeout` (5 seconds), `acquireTimeout` (5 seconds), `idleTimeout` (60 seconds), `maxLifetime` (300 seconds), and `maxRetries` (2). Durations must be positive. The legacy timeout constructor sets connect and request timeouts; acquisition retains its own default.
+`NebulaCache.Config` fields are `minPoolSize` (0), `maxPoolSize` (10), `connectTimeout` (5 seconds), `requestTimeout` (5 seconds), `acquireTimeout` (5 seconds), `idleTimeout` (60 seconds), `maxLifetime` (300 seconds), `maxRetries` (2), and `tlsEnabled` (false). Durations must be positive. The legacy timeout constructor sets connect and request timeouts; acquisition retains its own default.
 
 Only GET is retried, with bounded exponential full jitter and a per-client retry budget. SET and DELETE are not automatically retried because a timeout after sending can leave their outcome ambiguous. Expired or failed sockets are discarded and replaced on later acquisition.
 
 ## Smoke test
 
-The `NebulaCache` main method exercises ping, set, get, and delete. Build the SDK, then run it from this directory with the default node address or provide an address:
+The `NebulaCache` main method exercises ping, set, get, and delete. Build the SDK, then run it from this directory with the default node address or provide an address. Add `--tls` to connect to a TLS-enabled node; for a private CA, configure it in the JVM trust store as described above:
 
 ```bash
 mvn package
 java -cp target/classes io.nebulacache.NebulaCache
 java -cp target/classes io.nebulacache.NebulaCache 127.0.0.1:7001
+keytool -importcert -noprompt -alias mkcert -file "$(mkcert -CAROOT)/rootCA.pem" -keystore /tmp/nebula-truststore.p12 -storetype PKCS12 -storepass changeit
+java -Djavax.net.ssl.trustStore=/tmp/nebula-truststore.p12 -Djavax.net.ssl.trustStorePassword=changeit -cp target/classes io.nebulacache.NebulaCache --tls
+java -Djavax.net.ssl.trustStore=/tmp/nebula-truststore.p12 -Djavax.net.ssl.trustStorePassword=changeit -cp target/classes io.nebulacache.NebulaCache --tls 127.0.0.1:7001
 ```
 
 ## Exceptions

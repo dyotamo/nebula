@@ -3,6 +3,7 @@ package nebulacache
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -40,6 +41,7 @@ type Config struct {
 	IdleTimeout    time.Duration
 	MaxLifetime    time.Duration
 	MaxRetries     int
+	TLSConfig      *tls.Config
 }
 
 func DefaultConfig() Config {
@@ -217,7 +219,14 @@ func (c *NebulaCache) acquire() (*pooledConnection, error) {
 func (c *NebulaCache) fill(ctx context.Context, count int) error {
 	for remaining := count; remaining > 0; remaining-- {
 		dialer := net.Dialer{Timeout: c.config.ConnectTimeout}
-		connection, err := dialer.DialContext(ctx, "tcp", c.endpoint)
+		var connection net.Conn
+		var err error
+		if c.config.TLSConfig == nil {
+			connection, err = dialer.DialContext(ctx, "tcp", c.endpoint)
+		} else {
+			tlsDialer := tls.Dialer{NetDialer: &dialer, Config: c.config.TLSConfig.Clone()}
+			connection, err = tlsDialer.DialContext(ctx, "tcp", c.endpoint)
+		}
 		c.mu.Lock()
 		c.dialing--
 		if c.closed || err != nil {

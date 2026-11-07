@@ -1,24 +1,28 @@
+const fs = require('node:fs');
 const { NebulaCache } = require('../index');
 
-const USAGE = 'Usage: node examples/cache_cli.js [--address host:port] <ping|set|get|delete> [arguments]';
+const USAGE = 'Usage: node examples/cache_cli.js [--address host:port] [--tls-ca PEM] <ping|set|get|delete> [arguments]';
 const MAX_UINT64 = 0xffffffffffffffffn;
 
 async function main(argv) {
   let address = process.env.NEBULA_ADDR || '127.0.0.1:7001';
+  let tlsCA = process.env.NEBULA_TLS_CA;
   const args = [...argv];
 
-  while (args[0] === '--address' || args[0]?.startsWith('--address=')) {
+  while (
+    args[0] === '--address' || args[0]?.startsWith('--address=') ||
+    args[0] === '--tls-ca' || args[0]?.startsWith('--tls-ca=')
+  ) {
     const option = args.shift();
-    if (option === '--address') {
-      address = args.shift();
-      if (!address) {
-        throw new Error('--address requires a value');
-      }
+    const optionName = option.startsWith('--address') ? '--address' : '--tls-ca';
+    const value = option === optionName ? args.shift() : option.slice(`${optionName}=`.length);
+    if (!value) {
+      throw new Error(`${optionName} requires a value`);
+    }
+    if (optionName === '--address') {
+      address = value;
     } else {
-      address = option.slice('--address='.length);
-      if (!address) {
-        throw new Error('--address requires a value');
-      }
+      tlsCA = value;
     }
   }
 
@@ -28,7 +32,11 @@ async function main(argv) {
   }
 
   const command = args.shift();
-  const cache = new NebulaCache(address, { minPoolSize: 1, maxPoolSize: 10 });
+  const options = { minPoolSize: 1, maxPoolSize: 10 };
+  if (tlsCA) {
+    options.tls = { ca: fs.readFileSync(tlsCA) };
+  }
+  const cache = new NebulaCache(address, options);
 
   try {
     if (command === 'ping') {

@@ -1,4 +1,4 @@
-use std::{error::Error, io, sync::Arc, time::Duration};
+use std::{error::Error, fs::File, io, io::BufReader, sync::Arc, time::Duration};
 
 use nebula_core::CacheStore;
 use nebula_health::{
@@ -12,11 +12,12 @@ use tokio::{
     task::{JoinError, JoinSet},
     time::timeout,
 };
+use tokio_rustls::{rustls, TlsAcceptor};
 use tracing::{error, info, warn};
 
 use crate::{
     admin_console,
-    config::{Config, PersistenceMode},
+    config::{Config, PersistenceMode, TlsOptions},
     persistence::PersistenceManager,
     server,
 };
@@ -112,6 +113,11 @@ impl Application {
                 .await);
         }
 
+        let tls_acceptor = match load_tls_acceptor(&self.config.tls) {
+            Ok(acceptor) => acceptor,
+            Err(err) => return Err(self.fail_startup("configure TCP TLS", err).await),
+        };
+
         if let Some(persistence) = &self.persistence {
             if let Err(err) = persistence.restore(Arc::clone(&self.store)).await {
                 return Err(self.fail_startup("restore cache snapshot", err).await);
@@ -148,6 +154,7 @@ impl Application {
                 listener,
                 tcp_store,
                 limits,
+                tls_acceptor,
                 tcp_lifecycle,
                 tcp_heartbeat,
                 tcp_started_tx,
@@ -392,6 +399,37 @@ impl Application {
     }
 }
 
+fn load_tls_acceptor(options: &TlsOptions) -> io::Result<Option<TlsAcceptor>> {
+    if !options.enabled {
+        return Ok(None);
+    }
+
+    let certificate_path = options.certificate.as_ref().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "tls.certificate is required")
+    })?;
+    let private_key_path = options.private_key.as_ref().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "tls.private_key is required")
+    })?;
+    let certificates = rustls_pemfile::certs(&mut BufReader::new(File::open(certificate_path)?))
+        .collect::<Result<Vec<_>, _>>()?;
+    if certificates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "TLS certificate file contains no certificates",
+        ));
+    }
+    let private_key =
+        rustls_pemfile::private_key(&mut BufReader::new(File::open(private_key_path)?))?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "TLS private key file is empty")
+            })?;
+    let server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    Ok(Some(TlsAcceptor::from(Arc::new(server_config))))
+}
+
 fn join_result_error(result: Option<Result<io::Result<()>, JoinError>>) -> io::Error {
     match result {
         Some(Ok(Ok(()))) => io::Error::other("application service stopped unexpectedly"),
@@ -456,6 +494,7 @@ mod tests {
         Config {
             listen_addr: address,
             admin_console: Default::default(),
+            tls: Default::default(),
             shutdown_timeout_secs: 1,
             persistence: Default::default(),
         }

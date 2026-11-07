@@ -141,6 +141,7 @@ class NebulaCacheTest {
         assertEquals(Duration.ofSeconds(60), defaults.idleTimeout());
         assertEquals(Duration.ofSeconds(300), defaults.maxLifetime());
         assertEquals(2, defaults.maxRetries());
+        assertFalse(defaults.tlsEnabled());
         assertThrows(IllegalArgumentException.class, () -> config(-1, 1, 0));
         assertThrows(IllegalArgumentException.class, () -> config(0, 0, 0));
         assertThrows(IllegalArgumentException.class, () -> config(2, 1, 0));

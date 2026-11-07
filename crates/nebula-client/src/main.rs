@@ -1,4 +1,4 @@
-use std::{error::Error, io, process};
+use std::{error::Error, io, path::PathBuf, process};
 
 use clap::{Parser, Subcommand};
 
@@ -23,6 +23,8 @@ struct Cli {
         value_name = "HOST:PORT"
     )]
     address: String,
+    #[arg(long, global = true, env = "NEBULA_TLS_CA", value_name = "PEM")]
+    tls_ca: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -54,7 +56,7 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-    let client = Client::new(cli.address);
+    let client = Client::new(cli.address, cli.tls_ca)?;
 
     match cli.command {
         Command::Ping => {
@@ -110,6 +112,8 @@ mod tests {
             "set",
             "--address",
             "cache:7002",
+            "--tls-ca",
+            "rootCA.pem",
             "key",
             "value",
             "60",
@@ -117,6 +121,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(cli.address, "cache:7002");
+        assert_eq!(
+            cli.tls_ca.as_deref().and_then(|path| path.to_str()),
+            Some("rootCA.pem")
+        );
         assert!(matches!(
             cli.command,
             Command::Set {

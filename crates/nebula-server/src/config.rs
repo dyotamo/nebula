@@ -9,8 +9,17 @@ use serde::Deserialize;
 pub struct Config {
     pub listen_addr: SocketAddr,
     pub admin_console: AdminConsoleOptions,
+    pub tls: TlsOptions,
     pub shutdown_timeout_secs: u64,
     pub persistence: PersistenceOptions,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TlsOptions {
+    pub enabled: bool,
+    pub certificate: Option<PathBuf>,
+    pub private_key: Option<PathBuf>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -43,8 +52,19 @@ impl Default for Config {
         Self {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 7001)),
             admin_console: AdminConsoleOptions::default(),
+            tls: TlsOptions::default(),
             shutdown_timeout_secs: 30,
             persistence: PersistenceOptions::default(),
+        }
+    }
+}
+
+impl Default for TlsOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            certificate: None,
+            private_key: None,
         }
     }
 }
@@ -99,6 +119,16 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "admin_console.password is required and must not be empty when admin_console.enabled is true",
+            )
+            .into());
+        }
+
+        if config.tls.enabled
+            && (config.tls.certificate.is_none() || config.tls.private_key.is_none())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tls.certificate and tls.private_key are required when tls.enabled is true",
             )
             .into());
         }
@@ -211,6 +241,11 @@ fn coerce_environment_values(value: &mut serde_yaml::Value) -> Result<(), Box<dy
 
     coerce_config_field::<u64>(values, "shutdown_timeout_secs")?;
 
+    let tls_key = serde_yaml::Value::String("tls".to_owned());
+    if let Some(serde_yaml::Value::Mapping(tls)) = values.get_mut(&tls_key) {
+        coerce_config_field::<bool>(tls, "enabled")?;
+    }
+
     let admin_console_key = serde_yaml::Value::String("admin_console".to_owned());
     if let Some(serde_yaml::Value::Mapping(admin_console)) = values.get_mut(&admin_console_key) {
         coerce_config_field::<bool>(admin_console, "enabled")?;
@@ -275,6 +310,9 @@ mod tests {
         );
         assert!(!config.admin_console.enabled);
         assert_eq!(config.admin_console.password, None);
+        assert!(!config.tls.enabled);
+        assert_eq!(config.tls.certificate, None);
+        assert_eq!(config.tls.private_key, None);
         assert_eq!(config.shutdown_timeout_secs, 30);
         assert_eq!(config.persistence.mode, PersistenceMode::Volatile);
         assert_eq!(config.persistence.snapshot_interval_secs, 60);
@@ -287,7 +325,7 @@ mod tests {
     #[test]
     fn loads_all_server_settings_from_yaml() {
         let config: Config = serde_yaml::from_str(
-            "listen_addr: 127.0.0.1:7003\nshutdown_timeout_secs: 7\nadmin_console:\n  enabled: true\n  password: secret\n  listen_addr: 127.0.0.1:7004\npersistence:\n  mode: snapshot\n  snapshot_dir: /tmp/nebula-snapshots\n  snapshot_interval_secs: 5\n  snapshot_retention: 4\n",
+            "listen_addr: 127.0.0.1:7003\nshutdown_timeout_secs: 7\nadmin_console:\n  enabled: true\n  password: secret\n  listen_addr: 127.0.0.1:7004\ntls:\n  enabled: true\n  certificate: /etc/nebula/server-cert.pem\n  private_key: /etc/nebula/server-key.pem\npersistence:\n  mode: snapshot\n  snapshot_dir: /tmp/nebula-snapshots\n  snapshot_interval_secs: 5\n  snapshot_retention: 4\n",
         )
         .unwrap();
 
@@ -298,6 +336,15 @@ mod tests {
         );
         assert!(config.admin_console.enabled);
         assert_eq!(config.admin_console.password.as_deref(), Some("secret"));
+        assert!(config.tls.enabled);
+        assert_eq!(
+            config.tls.certificate,
+            Some(std::path::PathBuf::from("/etc/nebula/server-cert.pem"))
+        );
+        assert_eq!(
+            config.tls.private_key,
+            Some(std::path::PathBuf::from("/etc/nebula/server-key.pem"))
+        );
         assert_eq!(config.shutdown_timeout_secs, 7);
         assert_eq!(config.persistence.mode, PersistenceMode::Snapshot);
         assert_eq!(
@@ -306,6 +353,28 @@ mod tests {
         );
         assert_eq!(config.persistence.snapshot_interval_secs, 5);
         assert_eq!(config.persistence.snapshot_retention, 4);
+    }
+
+    #[test]
+    fn enabled_tls_requires_certificate_and_private_key_paths() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("nebula-tls-config-{unique}.yml"));
+        fs::write(&path, "tls:\n  enabled: true\n").unwrap();
+
+        let result = Config::load(Args {
+            config: Some(path.clone()),
+        });
+
+        fs::remove_file(path).unwrap();
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("tls.certificate"));
     }
 
     #[test]
@@ -322,7 +391,7 @@ mod tests {
         fs::write(
             &path,
             format!(
-                "admin_console:\n  enabled: \"${{{enabled_name}:-true}}\"\n  password: \"${{{secret_name}}}\"\npersistence:\n  mode: snapshot\n  snapshot_interval_secs: \"${{MISSING_INTERVAL_{unique}:-7}}\"\n"
+                "admin_console:\n  enabled: \"${{{enabled_name}:-true}}\"\n  password: \"${{{secret_name}}}\"\ntls:\n  enabled: \"${{{enabled_name}:-true}}\"\n  certificate: /tmp/server-cert.pem\n  private_key: /tmp/server-key.pem\npersistence:\n  mode: snapshot\n  snapshot_interval_secs: \"${{MISSING_INTERVAL_{unique}:-7}}\"\n"
             ),
         )
         .unwrap();
@@ -336,6 +405,7 @@ mod tests {
         fs::remove_file(path).unwrap();
         assert!(config.admin_console.enabled);
         assert_eq!(config.admin_console.password.as_deref(), Some(secret));
+        assert!(config.tls.enabled);
         assert_eq!(config.persistence.snapshot_interval_secs, 7);
     }
 
