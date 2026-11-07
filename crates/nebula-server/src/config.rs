@@ -12,6 +12,8 @@ pub struct Config {
     pub tls: TlsOptions,
     pub shutdown_timeout_secs: u64,
     pub persistence: PersistenceOptions,
+    pub metrics: MetricsOptions,
+    pub log_level: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -41,10 +43,18 @@ pub enum PersistenceMode {
 
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct MetricsOptions {
+    pub enabled: bool,
+    pub listen_addr: SocketAddr,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct AdminConsoleOptions {
     pub enabled: bool,
     pub password: Option<String>,
     pub listen_addr: SocketAddr,
+    pub metrics_dashboard: bool,
 }
 
 impl Default for Config {
@@ -55,6 +65,8 @@ impl Default for Config {
             tls: TlsOptions::default(),
             shutdown_timeout_secs: 30,
             persistence: PersistenceOptions::default(),
+            metrics: MetricsOptions::default(),
+            log_level: "info".to_owned(),
         }
     }
 }
@@ -80,12 +92,22 @@ impl Default for PersistenceOptions {
     }
 }
 
+impl Default for MetricsOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen_addr: SocketAddr::from(([127, 0, 0, 1], 7003)),
+        }
+    }
+}
+
 impl Default for AdminConsoleOptions {
     fn default() -> Self {
         Self {
             enabled: false,
             password: None,
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 7002)),
+            metrics_dashboard: true,
         }
     }
 }
@@ -249,6 +271,12 @@ fn coerce_environment_values(value: &mut serde_yaml::Value) -> Result<(), Box<dy
     let admin_console_key = serde_yaml::Value::String("admin_console".to_owned());
     if let Some(serde_yaml::Value::Mapping(admin_console)) = values.get_mut(&admin_console_key) {
         coerce_config_field::<bool>(admin_console, "enabled")?;
+        coerce_config_field::<bool>(admin_console, "metrics_dashboard")?;
+    }
+
+    let metrics_key = serde_yaml::Value::String("metrics".to_owned());
+    if let Some(serde_yaml::Value::Mapping(metrics)) = values.get_mut(&metrics_key) {
+        coerce_config_field::<bool>(metrics, "enabled")?;
     }
 
     let persistence_key = serde_yaml::Value::String("persistence".to_owned());

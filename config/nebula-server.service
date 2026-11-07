@@ -1,0 +1,25 @@
+[Unit]
+Description=NebulaCache in-memory cache server
+After=network.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=nebula
+Group=nebula
+ExecStart=/usr/bin/nebula-server /etc/nebula/nebula-server.yml
+Restart=on-failure
+RestartSec=5s
+WatchdogSec=30s
+TimeoutStartSec=60s
+TimeoutStopSec=40s
+StateDirectory=nebula
+WorkingDirectory=/var/lib/nebula
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nebula
+
+[Install]
+WantedBy=multi-user.target

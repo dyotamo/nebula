@@ -2,5 +2,7 @@ pub mod admin_console;
 pub mod application;
 pub mod config;
 pub mod handler;
+pub mod metrics;
 pub mod persistence;
 pub mod server;
+pub mod systemd;

@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light">
   <title>NebulaCache · Admin</title>
   <style>
     :root {
@@ -124,6 +124,47 @@
     .metric {
       min-width: 180px;
       padding: 16px 19px
+    }
+
+    .runtime-metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin: 20px 0
+    }
+
+    .chart-wrap {
+      padding: 20px
+    }
+
+    .chart {
+      display: block;
+      width: 100%;
+      height: 190px
+    }
+
+    .health-list {
+      display: grid;
+      gap: 10px;
+      padding: 16px 20px
+    }
+
+    .health-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: #c5cede;
+      font-size: 13px
+    }
+
+    .health-ok {
+      color: var(--mint)
+    }
+
+    .health-bad,
+    .unavailable {
+      color: #ff9292
     }
 
     .metric-label {
@@ -527,25 +568,1070 @@
         display: none
       }
     }
+
+    :root {
+      color-scheme: light;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #172235;
+      background: #f2f4f7;
+      --muted: #667386;
+      --line: #dce2e9;
+      --surface: #fff;
+      --accent: #245cda;
+      --mint: #18794e;
+      --navy: #122139;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility
+    }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 82px
+    }
+
+    body {
+      min-width: 320px;
+      background: #f2f4f7;
+      color: #172235
+    }
+
+    button,
+    input,
+    textarea {
+      font: inherit
+    }
+
+    button:focus-visible,
+    a:focus-visible,
+    input:focus-visible,
+    textarea:focus-visible {
+      outline: 3px solid #7ba2f4;
+      outline-offset: 2px
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 236px minmax(0, 1fr);
+      width: 100%;
+      max-width: none;
+      min-height: 100vh;
+      margin: 0;
+      padding: 0
+    }
+
+    .rail {
+      position: sticky;
+      top: 0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      padding: 25px 16px 18px;
+      color: #e6edf7;
+      background: #122139;
+      border-right: 1px solid #20324d
+    }
+
+    .brand {
+      gap: 11px;
+      padding: 0 8px 28px;
+      color: #f5f7fb;
+      font-size: 15px;
+      letter-spacing: -.02em
+    }
+
+    .mark {
+      width: 34px;
+      height: 34px;
+      border: 1px solid #53647c;
+      border-radius: 9px;
+      color: #fff;
+      background: #243954;
+      box-shadow: none
+    }
+
+    .mark svg {
+      width: 19px
+    }
+
+    .rail-caption {
+      padding: 0 11px 10px;
+      color: #91a0b5;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .12em
+    }
+
+    .rail-nav {
+      display: grid;
+      gap: 5px
+    }
+
+    .rail-nav a {
+      display: flex;
+      align-items: center;
+      min-height: 42px;
+      gap: 11px;
+      padding: 8px 10px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      color: #c3cede;
+      font-size: 12px;
+      font-weight: 560;
+      text-decoration: none;
+      transition: color .15s, background .15s, border-color .15s
+    }
+
+    .rail-nav a:hover,
+    .rail-nav a:focus-visible,
+    .rail-nav a[aria-current="location"] {
+      color: #fff;
+      background: #1b2d47;
+      border-color: #2b405d;
+      box-shadow: inset 3px 0 #75a0ff
+    }
+
+    .nav-mark {
+      color: #8394aa;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px
+    }
+
+    .rail-meta {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-top: auto;
+      padding: 17px 10px 2px;
+      border-top: 1px solid #2a3a52;
+      color: #a5b2c4;
+      font-size: 11px
+    }
+
+    .rail-meta-mark {
+      width: 7px;
+      height: 7px;
+      border: 1px solid #788ba4;
+      transform: rotate(45deg)
+    }
+
+    .workspace {
+      min-width: 0
+    }
+
+    .top {
+      position: sticky;
+      z-index: 2;
+      top: 0;
+      display: flex;
+      min-height: 64px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin: 0;
+      padding: 10px clamp(20px, 4vw, 54px);
+      border-bottom: 1px solid #e1e5ea;
+      background: #fff
+    }
+
+    .top-context,
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 15px
+    }
+
+    .top-context {
+      color: #647185;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .025em
+    }
+
+    .top-context span:first-child {
+      color: #27364b;
+      font-size: 10px;
+      letter-spacing: .1em
+    }
+
+    .context-divider {
+      color: #b3bdca
+    }
+
+    .status {
+      gap: 8px;
+      color: #3f5d4c;
+      font-size: 11px;
+      font-weight: 600
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      background: #238653;
+      box-shadow: none
+    }
+
+    #refresh {
+      min-height: 36px;
+      padding: 7px 12px
+    }
+
+    #dashboard {
+      width: min(1440px, 100%);
+      margin: 0 auto;
+      padding: 34px clamp(20px, 4vw, 54px) 60px
+    }
+
+    .intro {
+      margin: 0 0 17px
+    }
+
+    .eyebrow {
+      color: #53657b;
+      font-size: 10px;
+      letter-spacing: .12em
+    }
+
+    .intro h1 {
+      margin: 7px 0 5px;
+      color: #172235;
+      font-size: clamp(25px, 3vw, 31px);
+      font-weight: 680;
+      letter-spacing: -.045em
+    }
+
+    .intro p {
+      color: #667386;
+      font-size: 13px
+    }
+
+    .metrics {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      margin: 0 0 14px;
+      padding: 0 0 16px;
+      border-bottom: 1px solid #dfe4eb
+    }
+
+    .metrics .metric {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      box-shadow: none
+    }
+
+    .metric,
+    .panel {
+      border: 1px solid #dce2e9;
+      border-radius: 7px;
+      background: #fff;
+      box-shadow: 0 1px 2px #17223508
+    }
+
+    .metric-label {
+      color: #687689;
+      font-size: 11px;
+      font-weight: 540
+    }
+
+    .metrics .metric-value {
+      margin: 0;
+      color: #26354a;
+      font-size: 13px;
+      font-weight: 650;
+      font-variant-numeric: tabular-nums
+    }
+
+    .runtime-section {
+      scroll-margin-top: 82px
+    }
+
+    .runtime-metrics {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 0 0 16px
+    }
+
+    .runtime-metrics .metric {
+      position: relative;
+      min-width: 0;
+      min-height: 91px;
+      padding: 15px 16px;
+      border-radius: 6px;
+      box-shadow: 0 1px 2px #17223508
+    }
+
+    .runtime-metrics .metric:nth-child(-n+4) {
+      border-top: 2px solid #245cda
+    }
+
+    .runtime-metrics .metric:nth-child(n+5) {
+      min-height: 72px;
+      background: #f9fafb
+    }
+
+    .metric-value {
+      margin-top: 8px;
+      color: #172235;
+      font-size: 22px;
+      font-weight: 670;
+      letter-spacing: -.035em;
+      font-variant-numeric: tabular-nums
+    }
+
+    .persistence-summary {
+      color: #59687c;
+      font-size: 11px;
+      font-weight: 450;
+      line-height: 1.55;
+      white-space: pre-line;
+      font-variant-numeric: tabular-nums
+    }
+
+    .metrics .metric-value.session-state {
+      color: #18794e;
+      font-size: 13px;
+      letter-spacing: 0
+    }
+
+    .unavailable {
+      color: #8b5c11;
+      background: #fff9eb
+    }
+
+    .panel {
+      margin-bottom: 14px;
+      border-radius: 7px;
+      overflow: hidden
+    }
+
+    .panel-head {
+      gap: 18px;
+      padding: 15px 18px;
+      border-bottom-color: #e5e9ee
+    }
+
+    .panel-title {
+      color: #1f2d40;
+      font-size: 13px;
+      font-weight: 670
+    }
+
+    .panel-sub {
+      color: #6d7989;
+      font-size: 11px;
+      line-height: 1.5
+    }
+
+    #metrics-status {
+      text-align: right
+    }
+
+    .chart-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 18px 0;
+      color: #758194;
+      font-size: 10px
+    }
+
+    .chart-legend {
+      display: flex;
+      gap: 15px
+    }
+
+    .chart-legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px
+    }
+
+    .chart-legend i {
+      display: inline-block;
+      width: 13px;
+      height: 2px
+    }
+
+    .legend-request {
+      background: #245cda
+    }
+
+    .legend-error {
+      background: #bd4a45
+    }
+
+    .chart-wrap {
+      padding: 7px 18px 16px
+    }
+
+    .chart-plot {
+      display: grid;
+      grid-template-columns: 48px minmax(0, 1fr);
+      align-items: stretch;
+      gap: 10px
+    }
+
+    .chart-y-axis {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 14px 0 4px;
+      color: #748195;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+      text-align: right
+    }
+
+    .chart {
+      display: block;
+      width: 100%;
+      height: 190px;
+      overflow: visible
+    }
+
+    .chart-grid line {
+      stroke: #e6ebf1;
+      stroke-width: 1;
+      vector-effect: non-scaling-stroke
+    }
+
+    .chart polyline {
+      vector-effect: non-scaling-stroke
+    }
+
+    .chart-x-axis {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 4px 0 0 58px;
+      color: #748195;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums
+    }
+
+    .chart-legend strong {
+      color: #35465f;
+      font-variant-numeric: tabular-nums
+    }
+
+    .health-list {
+      gap: 0;
+      padding: 4px 18px
+    }
+
+    .health-row {
+      min-height: 39px;
+      border-bottom: 1px solid #edf0f3;
+      color: #364458;
+      font-size: 12px
+    }
+
+    .health-row:last-child {
+      border-bottom: 0
+    }
+
+    .health-ok {
+      color: #18794e
+    }
+
+    .health-bad {
+      color: #a33d38
+    }
+
+    #recent-failures {
+      border-top: 1px solid #e5e9ee;
+      padding-top: 12px;
+      padding-bottom: 12px
+    }
+
+    #recent-failures .panel-sub {
+      color: #18794e
+    }
+
+    .actions {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 7px
+    }
+
+    .button {
+      min-height: 36px;
+      padding: 8px 11px;
+      border: 1px solid #cbd3de;
+      border-radius: 5px;
+      color: #344359;
+      background: #fff;
+      font-size: 11px;
+      font-weight: 620;
+      transition: background .15s, border-color .15s, color .15s
+    }
+
+    .button:hover {
+      border-color: #9daabd;
+      color: #16243a;
+      background: #f7f9fb
+    }
+
+    .button.primary {
+      border-color: #245cda;
+      color: #fff;
+      background: #245cda
+    }
+
+    .button.primary:hover {
+      border-color: #194ab9;
+      background: #194ab9
+    }
+
+    .button.danger {
+      border-color: #e2c9c6;
+      color: #9c3933;
+      background: #fff
+    }
+
+    .button.danger:hover {
+      border-color: #c8837d;
+      background: #fff8f7
+    }
+
+    .list-controls {
+      padding: 12px 18px;
+      border-bottom-color: #e5e9ee
+    }
+
+    .search-input {
+      min-height: 38px;
+      border-color: #cbd3de;
+      border-radius: 5px;
+      color: #172235;
+      background: #fff
+    }
+
+    .search-input:focus,
+    .field input:focus,
+    .field textarea:focus {
+      border-color: #245cda;
+      box-shadow: 0 0 0 3px #245cda20
+    }
+
+    .result-count,
+    .pagination-status {
+      color: #657286;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums
+    }
+
+    .table-scroll-note {
+      display: none
+    }
+
+    .table-wrap {
+      position: relative;
+      overflow: auto;
+      box-shadow: inset -12px 0 12px -14px #172235
+    }
+
+    table {
+      min-width: 660px;
+      table-layout: fixed
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      padding: 11px 14px;
+      color: #627084;
+      background: #f6f8fa;
+      font-size: 9px;
+      letter-spacing: .09em
+    }
+
+    th:first-child {
+      width: 23%
+    }
+
+    th:nth-child(2) {
+      width: 40%
+    }
+
+    th:nth-child(3) {
+      width: 14%
+    }
+
+    th.actions-heading {
+      position: sticky;
+      right: 0;
+      z-index: 4;
+      width: 23%;
+      border-left: 1px solid #e2e7ed;
+      text-align: right;
+      box-shadow: -8px 0 12px -12px #172235
+    }
+
+    td {
+      padding: 13px 17px;
+      border-top-color: #e8ecf0;
+      color: #344257;
+      font-size: 12px
+    }
+
+    tbody tr:hover {
+      background: #f8fafd
+    }
+
+    .mono {
+      font-size: 11px
+    }
+
+    .key-cell {
+      color: #24364e
+    }
+
+    .value-cell {
+      color: #536276
+    }
+
+    .ttl {
+      color: #687689;
+      font-variant-numeric: tabular-nums
+    }
+
+    .row-actions {
+      position: sticky;
+      right: 0;
+      z-index: 1;
+      border-left: 1px solid #e8ecf0;
+      background: #fff;
+      box-shadow: -8px 0 12px -12px #172235
+    }
+
+    tbody tr:hover .row-actions {
+      background: #f8fafd
+    }
+
+    .icon-button {
+      min-width: 54px;
+      min-height: 40px;
+      margin-left: 3px;
+      padding: 7px 9px;
+      border-radius: 4px;
+      color: #52637a;
+      font-size: 11px;
+      font-weight: 600
+    }
+
+    .icon-button:hover {
+      color: #194ab9;
+      background: #edf3ff
+    }
+
+    .icon-button-danger {
+      color: #9c514d
+    }
+
+    .icon-button-danger:hover {
+      color: #8f302b;
+      background: #fff0ee
+    }
+
+    .empty {
+      padding: 42px 20px;
+      color: #657286
+    }
+
+    .empty strong {
+      color: #26354a;
+      font-size: 13px
+    }
+
+    .pagination {
+      padding: 12px 18px;
+      border-top: 1px solid #e6eaef
+    }
+
+    .pagination .button:disabled {
+      opacity: .48
+    }
+
+    .login-wrap {
+      position: fixed;
+      z-index: 8;
+      inset: 0;
+      display: none;
+      min-height: 100vh;
+      padding: 24px;
+      background: #f2f4f7
+    }
+
+    .login {
+      position: relative;
+      width: min(420px, 100%);
+      padding: 31px 34px 23px;
+      border-top: 3px solid #245cda;
+      border-radius: 8px;
+      box-shadow: 0 12px 36px #17223512
+    }
+
+    .login-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 22px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid #e6eaf0
+    }
+
+    .login-brand .mark {
+      width: 38px;
+      height: 38px;
+      color: #fff;
+      background: #122139;
+      border-color: #122139
+    }
+
+    .login-brand strong,
+    .login-brand span {
+      display: block
+    }
+
+    .login-brand strong {
+      color: #1c2b42;
+      font-size: 14px;
+      letter-spacing: -.015em
+    }
+
+    .login-brand span {
+      margin-top: 4px;
+      color: #718096;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .12em
+    }
+
+    .login .eyebrow {
+      margin-bottom: 23px;
+      color: #245cda
+    }
+
+    .login h1 {
+      color: #172235;
+      font-size: 26px;
+      letter-spacing: -.04em
+    }
+
+    .login p {
+      color: #667386;
+      line-height: 1.55
+    }
+
+    .field {
+      gap: 8px
+    }
+
+    .field label {
+      color: #3c4b60;
+      font-size: 11px;
+      font-weight: 630
+    }
+
+    .field input,
+    .field textarea {
+      border-color: #cbd3de;
+      border-radius: 5px;
+      color: #172235;
+      background: #fff
+    }
+
+    .wide {
+      min-height: 42px;
+      margin-top: 10px
+    }
+
+    .error {
+      color: #a33d38
+    }
+
+    .overlay {
+      z-index: 10;
+      background: #111c2e70;
+      backdrop-filter: none
+    }
+
+    .dialog {
+      border-radius: 8px;
+      box-shadow: 0 18px 54px #1722352b
+    }
+
+    .dialog-head h2 {
+      color: #172235
+    }
+
+    .toast {
+      z-index: 12;
+      border-color: #24354e;
+      border-radius: 5px;
+      color: #f4f7fb;
+      background: #17263d;
+      box-shadow: 0 5px 18px #17223524
+    }
+
+    @media (max-width: 1040px) {
+      .shell {
+        grid-template-columns: 208px minmax(0, 1fr)
+      }
+
+      #dashboard {
+        padding-right: 26px;
+        padding-left: 26px
+      }
+
+      .runtime-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr))
+      }
+    }
+
+    @media (max-width: 900px) {
+      html {
+        scroll-padding-top: 142px
+      }
+
+      .shell {
+        display: block
+      }
+
+      .rail {
+        position: static;
+        height: auto;
+        padding: 13px 16px 10px;
+        border-right: 0;
+        border-bottom: 1px solid #20324d
+      }
+
+      .brand {
+        padding: 0 2px 12px
+      }
+
+      .rail-caption,
+      .rail-meta {
+        display: none
+      }
+
+      .rail-nav {
+        display: flex;
+        gap: 4px;
+        margin: 0 -3px;
+        overflow-x: auto;
+        scrollbar-width: thin
+      }
+
+      .rail-nav a {
+        flex: 0 0 auto;
+        min-height: 37px;
+        gap: 7px;
+        padding: 7px 9px;
+        font-size: 11px
+      }
+
+      .nav-mark {
+        font-size: 9px
+      }
+
+      .top {
+        position: static;
+        min-height: 58px;
+        padding: 9px 16px
+      }
+
+      .top-context {
+        gap: 8px;
+        font-size: 10px
+      }
+
+      .top-context span:first-child {
+        display: none
+      }
+
+      .top-actions {
+        gap: 10px
+      }
+
+      .status {
+        font-size: 10px
+      }
+
+      #refresh {
+        padding: 6px 9px;
+        font-size: 10px
+      }
+
+      #dashboard {
+        padding: 26px 16px 42px
+      }
+
+      .metrics {
+        gap: 12px
+      }
+
+      .metrics .metric {
+        display: grid;
+        gap: 3px
+      }
+
+      .runtime-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px
+      }
+
+      .runtime-metrics .metric {
+        min-height: 81px;
+        padding: 12px
+      }
+
+      .metric-value {
+        font-size: 19px
+      }
+
+      .panel-head {
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 14px
+      }
+
+      #metrics-status {
+        text-align: left
+      }
+
+      .actions {
+        width: 100%;
+        justify-content: flex-start
+      }
+
+      .actions .button {
+        flex: 1 1 auto
+      }
+
+      .list-controls,
+      .pagination {
+        align-items: stretch;
+        flex-direction: column;
+        padding: 12px 14px
+      }
+
+      .search-input {
+        width: 100%
+      }
+
+      .pagination-actions {
+        justify-content: space-between
+      }
+
+      .table-scroll-note {
+        display: block;
+        padding: 9px 14px;
+        border-bottom: 1px solid #e8ecf0;
+        color: #6d7989;
+        background: #fbfcfd;
+        font-size: 10px;
+        text-align: right
+      }
+
+      .persistence-summary {
+        width: 100%
+      }
+
+      td,
+      th {
+        padding: 11px 12px
+      }
+
+      .hide-mobile {
+        display: table-cell
+      }
+
+      .chart-meta {
+        padding-right: 14px;
+        padding-left: 14px
+      }
+
+      .chart-wrap {
+        padding-right: 12px;
+        padding-left: 12px
+      }
+    }
+
+    @media (max-width: 420px) {
+      .top-context {
+        display: none
+      }
+
+      .top {
+        justify-content: flex-end
+      }
+
+      .top-actions {
+        justify-content: space-between;
+        width: 100%
+      }
+
+      .chart-meta {
+        align-items: flex-start;
+        flex-direction: column
+      }
+
+      .form-grid {
+        grid-template-columns: 1fr
+      }
+
+      .form-grid .full {
+        grid-column: auto
+      }
+
+      .login {
+        padding: 26px 22px
+      }
+    }
   </style>
 </head>
 
 <body>
   <div class="shell">
-    <header class="top">
+    <aside class="rail" id="rail" aria-label="Main navigation" aria-hidden="true" inert>
       <div class="brand">
         <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
             <path d="M12 2.8 20 7v10l-8 4.2L4 17V7l8-4.2Z" />
             <path d="m4.5 7.3 7.5 4 7.5-4M12 11.5V21" />
           </svg></div><span>NebulaCache</span>
       </div>
-      <div class="status"><span class="dot"></span>Node connected</div>
-    </header>
-    <main id="dashboard" style="display:none">
-      <div class="intro">
-        <div class="eyebrow">Control plane</div>
+      <div class="rail-caption">OPERATIONS</div>
+      <nav class="rail-nav" aria-label="Console sections">
+        <a href="#overview" aria-current="location"><span class="nav-mark">01</span>Cache overview</a>
+        <a href="#runtime"><span class="nav-mark">02</span>Runtime metrics</a>
+        <a href="#health"><span class="nav-mark">03</span>Component health</a>
+        <a href="#entries-section"><span class="nav-mark">04</span>Entries</a>
+      </nav>
+      <div class="rail-meta"><span class="rail-meta-mark"></span><span>Embedded admin console</span></div>
+    </aside>
+    <div class="workspace">
+      <header class="top" id="topbar" aria-hidden="true" inert>
+        <div class="top-context"><span class="context-symbol">NODE</span><span>Local cache instance</span></div>
+        <div class="top-actions">
+          <div class="status"><span class="dot"></span>Node connected</div>
+          <button class="button" id="refresh" type="button">Refresh data</button>
+        </div>
+      </header>
+      <main id="dashboard" style="display:none">
+      <div class="intro" id="overview">
+        <div class="eyebrow">Cache operations</div>
         <h1>Cache overview</h1>
-        <p>Inspect and manage the entries stored in this NebulaCache node.</p>
+        <p>Monitor node activity and manage the data held in this cache.</p>
       </div>
       <div class="metrics">
         <div class="metric">
@@ -554,17 +1640,60 @@
         </div>
         <div class="metric">
           <div class="metric-label">Console session</div>
-          <div class="metric-value" style="font-size:16px;color:var(--mint)">Authenticated</div>
+          <div class="metric-value session-state">Authenticated</div>
         </div>
       </div>
-      <section class="panel">
+      <section class="runtime-section" id="runtime" aria-label="Runtime metrics">
+      <div class="runtime-metrics" id="runtime-metrics">
+        <div class="metric"><div class="metric-label">Requests / sec</div><div class="metric-value" id="request-rate">—</div></div>
+        <div class="metric"><div class="metric-label">Error rate</div><div class="metric-value" id="error-rate">—</div></div>
+        <div class="metric"><div class="metric-label">Average latency</div><div class="metric-value" id="latency">—</div></div>
+        <div class="metric"><div class="metric-label">Active connections</div><div class="metric-value" id="connections">—</div></div>
+        <div class="metric"><div class="metric-label">Cache memory</div><div class="metric-value" id="cache-memory">—</div></div>
+        <div class="metric"><div class="metric-label">Uptime</div><div class="metric-value" id="uptime">—</div></div>
+        <div class="metric"><div class="metric-label">Lifecycle / health</div><div class="metric-value" id="lifecycle-health">—</div></div>
+      </div>
+      <section class="panel persistence-panel" aria-labelledby="persistence-title">
+        <div class="panel-head">
+          <div><div class="panel-title" id="persistence-title">Persistence activity</div><div class="panel-sub">Snapshot and recovery performance for this node.</div></div>
+          <div class="persistence-summary" id="persistence-counts" aria-live="polite">Waiting for metrics</div>
+        </div>
+      </section>
+      <section class="panel history-panel" aria-labelledby="history-title">
+        <div class="panel-head"><div><div class="panel-title" id="history-title">Request history</div><div class="panel-sub">Requests and errors per five-second sample.</div></div><div class="panel-sub" id="metrics-status" aria-live="polite">Refreshing every 5 seconds</div></div>
+        <div class="chart-meta">
+          <span class="chart-range" id="chart-range-label">Runtime history window</span>
+          <div class="chart-legend" aria-label="Latest request rates">
+            <span><i class="legend-request"></i>Requests <strong id="chart-request-rate">—</strong></span>
+            <span><i class="legend-error"></i>Errors <strong id="chart-error-rate">—</strong></span>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-plot">
+            <div class="chart-y-axis" aria-hidden="true"><span id="chart-max-label">—</span><span id="chart-mid-label">—</span><span id="chart-zero-label">0</span></div>
+            <svg class="chart" id="history-chart" viewBox="0 0 800 190" preserveAspectRatio="none" role="img" aria-label="Request and error counts by five-second sample">
+              <g class="chart-grid" aria-hidden="true"><line x1="0" y1="20" x2="800" y2="20"/><line x1="0" y1="60" x2="800" y2="60"/><line x1="0" y1="100" x2="800" y2="100"/><line x1="0" y1="140" x2="800" y2="140"/><line x1="0" y1="180" x2="800" y2="180"/></g>
+              <polyline id="request-line" fill="none" stroke="#245cda" stroke-width="3"/>
+              <polyline id="error-line" fill="none" stroke="#bd4a45" stroke-width="2"/>
+            </svg>
+          </div>
+          <div class="chart-x-axis"><span id="chart-window-start">Waiting for samples</span><span id="chart-window-end">Latest sample</span></div>
+        </div>
+      </section>
+      </section>
+      <section class="panel health-panel" id="health" style="margin-bottom:20px">
+        <div class="panel-head"><div><div class="panel-title">Component health</div><div class="panel-sub">Current health state and recent critical failures.</div></div></div>
+        <div class="health-list" id="component-health"></div>
+        <div class="health-list" id="recent-failures"></div>
+      </section>
+      <section class="panel entries-panel" id="entries-section">
         <div class="panel-head">
           <div>
             <div class="panel-title">Entries</div>
             <div class="panel-sub">Keys and values are shown as UTF-8 where possible.</div>
           </div>
-          <div class="actions"><button class="button" id="refresh">Refresh</button><button class="button primary"
-              id="add">＋ &nbsp;New entry</button><button class="button danger" id="clear-cache">Clear cache</button><button
+          <div class="actions"><button class="button primary"
+              id="add">New entry</button><button class="button danger" id="clear-cache">Clear cache</button><button
               class="button" id="logout">Sign out</button></div>
         </div>
         <div class="list-controls">
@@ -572,14 +1701,15 @@
             aria-label="Search cache entries">
           <div class="result-count" id="result-count"></div>
         </div>
-        <div class="table-wrap">
+        <div class="table-scroll-note" aria-hidden="true">Scroll horizontally for full values; actions stay in view.</div>
+        <div class="table-wrap" role="region" aria-label="Cache entries table" tabindex="0">
           <table>
             <thead>
               <tr>
-                <th>Key</th>
-                <th>Value</th>
-                <th class="hide-mobile">Expiry</th>
-                <th></th>
+                <th scope="col">Key</th>
+                <th scope="col">Value</th>
+                <th scope="col" class="hide-mobile">Expiry</th>
+                <th scope="col" class="actions-heading">Actions</th>
               </tr>
             </thead>
             <tbody id="entries"></tbody>
@@ -596,9 +1726,16 @@
       </section>
     </main>
     <div class="login-wrap" id="login-screen">
-      <section class="panel login">
-        <div class="eyebrow">NebulaCache Admin</div>
-        <h1>Welcome back</h1>
+      <section class="panel login" aria-labelledby="login-title">
+        <div class="login-brand">
+          <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+              <path d="M12 2.8 20 7v10l-8 4.2L4 17V7l8-4.2Z" />
+              <path d="m4.5 7.3 7.5 4 7.5-4M12 11.5V21" />
+            </svg></div>
+          <div><strong>NebulaCache</strong><span>NODE ADMINISTRATION</span></div>
+        </div>
+        <div class="eyebrow">Secure console access</div>
+        <h1 id="login-title">Welcome back</h1>
         <p>Enter the admin password to manage this node's cache entries.</p>
         <form id="login-form">
           <div class="field"><label for="password">Password</label><input id="password" type="password"
@@ -609,10 +1746,11 @@
       </section>
     </div>
   </div>
+  </div>
   <div class="overlay" id="entry-overlay">
-    <form class="panel dialog" id="entry-form">
+    <form class="panel dialog" id="entry-form" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
       <div class="dialog-head">
-        <h2 id="dialog-title">New entry</h2><button type="button" class="icon-button" id="close-dialog">✕</button>
+        <h2 id="dialog-title">New entry</h2><button type="button" class="icon-button" id="close-dialog" aria-label="Close entry dialog">✕</button>
       </div>
       <div class="form-grid">
         <div class="field full"><label for="entry-key">Key</label><input id="entry-key" required
@@ -635,6 +1773,8 @@
     let currentPage = 1;
     const pageSize = 20;
     let searchTimer;
+    let runtimeRefreshTimer;
+    let modalReturnFocus = null;
 
     function hex(bytes) {
       return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
@@ -669,13 +1809,141 @@
     }
 
     function showLogin() {
+      clearInterval(runtimeRefreshTimer);
+      runtimeRefreshTimer = null;
       $('dashboard').style.display = 'none';
+      $('rail').inert = true;
+      $('rail').setAttribute('aria-hidden', 'true');
+      $('topbar').inert = true;
+      $('topbar').setAttribute('aria-hidden', 'true');
       $('login-screen').style.display = 'grid';
+      $('password').focus();
     }
 
     function showDashboard() {
       $('login-screen').style.display = 'none';
+      $('rail').inert = false;
+      $('rail').removeAttribute('aria-hidden');
+      $('topbar').inert = false;
+      $('topbar').removeAttribute('aria-hidden');
       $('dashboard').style.display = 'block';
+      if (!runtimeRefreshTimer) runtimeRefreshTimer = setInterval(refreshRuntimeMetrics, 5000);
+    }
+
+    function formatBytes(value) {
+      if (value < 1024) return `${value} B`;
+      const units = ['KB', 'MB', 'GB', 'TB'];
+      let amount = value / 1024;
+      let unit = 0;
+      while (amount >= 1024 && unit < units.length - 1) {
+        amount /= 1024;
+        unit++;
+      }
+      return `${amount.toFixed(1)} ${units[unit]}`;
+    }
+
+    function formatUptime(seconds) {
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const remainder = seconds % 60;
+      return `${hours}h ${minutes}m ${remainder}s`;
+    }
+
+    function renderHistory(history) {
+      const lines = [
+        { id: 'request-line', field: 'requests_total' },
+        { id: 'error-line', field: 'errors_total' },
+      ];
+      const rates = lines.map(line => history.slice(1).map((point, index) =>
+        Math.max(0, point[line.field] - history[index][line.field])));
+      const maximum = Math.max(1, ...rates.flat());
+      const firstSample = history[0];
+      const lastSample = history[history.length - 1];
+      const sampleSpan = firstSample && lastSample
+        ? lastSample.elapsed_secs - firstSample.elapsed_secs
+        : 0;
+      const sampleWindow = sampleSpan < 60
+        ? `${sampleSpan}s`
+        : sampleSpan < 3600
+          ? `${Math.floor(sampleSpan / 60)}m`
+          : `${Math.floor(sampleSpan / 3600)}h ${Math.floor((sampleSpan % 3600) / 60)}m`;
+      $('chart-max-label').textContent = maximum.toLocaleString();
+      $('chart-mid-label').textContent = (maximum / 2).toFixed(maximum < 10 ? 1 : 0);
+      $('chart-zero-label').textContent = '0';
+      $('chart-range-label').textContent = `${history.length.toLocaleString()} samples · ${sampleWindow} history`;
+      $('chart-window-start').textContent = `${sampleWindow} ago`;
+      $('chart-window-end').textContent = 'Now';
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+        const points = rates[lineIndex].map((value, index) => {
+          const x = rates[lineIndex].length < 2 ? 400 : index * 800 / (rates[lineIndex].length - 1);
+          const y = 180 - value * 160 / maximum;
+          return `${x},${y}`;
+        }).join(' ');
+        $(lines[lineIndex].id).setAttribute('points', points);
+      }
+    }
+
+    async function refreshRuntimeMetrics() {
+      const response = await api('/api/metrics');
+      if (!response.ok) {
+        if (response.status !== 401) $('metrics-status').textContent = 'Runtime metrics unavailable';
+        return;
+      }
+      const data = await response.json();
+      if (!data.available) {
+        $('metrics-status').textContent = 'Runtime metrics unavailable';
+        $('runtime-metrics').classList.add('unavailable');
+        $('chart-request-rate').textContent = 'Unavailable';
+        $('chart-error-rate').textContent = 'Unavailable';
+        $('chart-range-label').textContent = 'History unavailable';
+        $('chart-window-start').textContent = '—';
+        $('chart-window-end').textContent = '—';
+        $('request-line').setAttribute('points', '');
+        $('error-line').setAttribute('points', '');
+        return;
+      }
+      $('runtime-metrics').classList.remove('unavailable');
+      $('metrics-status').textContent = 'Refreshing every 5 seconds';
+      $('request-rate').textContent = `${data.requests_per_second.toFixed(2)}/s`;
+      $('error-rate').textContent = `${data.errors_per_second.toFixed(2)}/s`;
+      $('chart-request-rate').textContent = `${data.requests_per_second.toFixed(2)}/s`;
+      $('chart-error-rate').textContent = `${data.errors_per_second.toFixed(2)}/s`;
+      $('latency').textContent = `${data.avg_latency_ms.toFixed(2)} ms`;
+      $('connections').textContent = data.active_connections.toLocaleString();
+      $('cache-memory').textContent = formatBytes(data.cache_memory_bytes);
+      $('uptime').textContent = formatUptime(data.uptime_secs);
+      $('lifecycle-health').textContent = `${data.state} / ${data.health}`;
+      const lastSnapshot = data.last_snapshot_success_timestamp_secs
+        ? new Date(data.last_snapshot_success_timestamp_secs * 1000).toLocaleString()
+        : 'never';
+      $('persistence-counts').textContent = `Snapshots ${data.snapshot_count.toLocaleString()} · ${data.snapshot_failures.toLocaleString()} failed · ${data.snapshot_duration_ms.toFixed(1)} ms avg · last ${lastSnapshot}\nRecoveries ${data.recovery_count.toLocaleString()} · ${data.recovery_failures.toLocaleString()} failed · ${data.recovery_duration_ms.toFixed(1)} ms avg`;
+      $('component-health').replaceChildren();
+      for (const component of data.components) {
+        const row = document.createElement('div');
+        row.className = 'health-row';
+        const name = document.createElement('span');
+        name.textContent = component.name.replaceAll('_', ' ');
+        const status = document.createElement('strong');
+        status.className = component.status === 'healthy' ? 'health-ok' : 'health-bad';
+        status.textContent = component.status;
+        row.append(name, status);
+        $('component-health').append(row);
+      }
+      $('recent-failures').replaceChildren();
+      if (!data.recent_failures.length) {
+        const row = document.createElement('div');
+        row.className = 'panel-sub';
+        row.textContent = 'No recent critical failures';
+        $('recent-failures').append(row);
+      } else {
+        for (const failure of data.recent_failures) {
+          const row = document.createElement('div');
+          row.className = 'health-row health-bad';
+          row.textContent = failure;
+          $('recent-failures').append(row);
+        }
+      }
+      renderHistory(data.history);
     }
 
     async function refresh(page = currentPage) {
@@ -732,17 +2000,20 @@
         const editButton = document.createElement('button');
         editButton.className = 'icon-button';
         editButton.textContent = 'Edit';
+        editButton.setAttribute('aria-label', `Edit ${text(entry.key)}`);
         editButton.onclick = () => openEntry(entry);
 
         const deleteButton = document.createElement('button');
-        deleteButton.className = 'icon-button';
+        deleteButton.className = 'icon-button icon-button-danger';
         deleteButton.textContent = 'Delete';
+        deleteButton.setAttribute('aria-label', `Delete ${text(entry.key)}`);
         deleteButton.onclick = () => removeEntry(entry);
 
         actions.append(editButton, deleteButton);
         row.append(key, value, ttl, actions);
         $('entries').append(row);
       }
+      refreshRuntimeMetrics();
     }
 
     function toast(message) {
@@ -752,6 +2023,7 @@
     }
 
     function openEntry(entry = null) {
+      modalReturnFocus = document.activeElement;
       editing = entry;
       $('dialog-title').textContent = entry ? 'Edit entry' : 'New entry';
       $('entry-key').value = entry ? text(entry.key) : '';
@@ -760,12 +2032,14 @@
       $('entry-ttl').value = entry?.ttl_secs ?? 0;
       $('entry-error').textContent = '';
       $('entry-overlay').style.display = 'flex';
-      $('entry-key').focus();
+      (entry ? $('entry-value') : $('entry-key')).focus();
     }
 
     function closeEntry() {
       $('entry-overlay').style.display = 'none';
       editing = null;
+      if (modalReturnFocus?.isConnected) modalReturnFocus.focus();
+      modalReturnFocus = null;
     }
 
     async function removeEntry(entry) {
@@ -851,6 +2125,43 @@
     $('entry-overlay').onclick = event => {
       if (event.target === $('entry-overlay')) closeEntry();
     };
+    document.addEventListener('keydown', event => {
+      const overlay = $('entry-overlay');
+      if (overlay.style.display !== 'flex') return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeEntry();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = [...overlay.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled)')];
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        return;
+      }
+      if (event.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+
+    function updateActiveSection() {
+      const currentSection = location.hash || '#overview';
+      document.querySelectorAll('.rail-nav a').forEach(link => {
+        if (link.getAttribute('href') === currentSection) {
+          link.setAttribute('aria-current', 'location');
+        } else {
+          link.removeAttribute('aria-current');
+        }
+      });
+    }
+    window.addEventListener('hashchange', updateActiveSection);
+    updateActiveSection();
 
     api('/api/entries').then(response => {
       if (response.ok) {

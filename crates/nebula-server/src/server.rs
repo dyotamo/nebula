@@ -15,7 +15,7 @@ use nebula_core::CacheStore;
 use nebula_health::lifecycle::ApplicationState;
 use nebula_watchdog::WorkerHeartbeat;
 
-use crate::handler;
+use crate::{handler, metrics::Metrics};
 
 pub(crate) async fn run(
     listener: TcpListener,
@@ -24,6 +24,7 @@ pub(crate) async fn run(
     tls_acceptor: Option<TlsAcceptor>,
     mut lifecycle: watch::Receiver<ApplicationState>,
     heartbeat: WorkerHeartbeat,
+    metrics: Arc<Metrics>,
     started: oneshot::Sender<()>,
 ) -> io::Result<()> {
     info!(address = %listener.local_addr()?, "NebulaCache node listening");
@@ -60,20 +61,23 @@ pub(crate) async fn run(
                     continue;
                 }
                 handler::log_connection(peer);
+                metrics.connection_opened();
+                let metrics = Arc::clone(&metrics);
                 let store = Arc::clone(&store);
                 let lifecycle = lifecycle.clone();
                 let tls_acceptor = tls_acceptor.clone();
                 connections.spawn(async move {
+                    let _active_connection = ActiveConnection(metrics.clone());
                     if let Some(acceptor) = tls_acceptor {
                         match acceptor.accept(socket).await {
-                            Ok(stream) => serve_connection(stream, store, limits, lifecycle).await,
+                            Ok(stream) => serve_connection(stream, store, limits, lifecycle, metrics).await,
                             Err(err) => {
                                 warn!(error = %err, "TLS handshake failed");
                                 Ok(())
                             }
                         }
                     } else {
-                        serve_connection(socket, store, limits, lifecycle).await
+                        serve_connection(socket, store, limits, lifecycle, metrics).await
                     }
                 });
             }
@@ -94,11 +98,20 @@ pub(crate) async fn run(
     Ok(())
 }
 
+struct ActiveConnection(Arc<Metrics>);
+
+impl Drop for ActiveConnection {
+    fn drop(&mut self) {
+        self.0.connection_closed();
+    }
+}
+
 async fn serve_connection<S>(
     mut socket: S,
     store: Arc<CacheStore>,
     limits: FrameLimits,
     mut lifecycle: watch::Receiver<ApplicationState>,
+    metrics: Arc<Metrics>,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -131,7 +144,8 @@ where
             return Ok(());
         }
 
-        let response = handler::handle(request, Arc::clone(&store)).await;
+        let response =
+            handler::handle_with_metrics(request, Arc::clone(&store), Arc::clone(&metrics)).await;
         if let Err(err) = write_response_with_limits(&mut socket, &response, limits).await {
             return Err(io::Error::other(err));
         }
@@ -150,6 +164,8 @@ mod tests {
     use nebula_protocol::{read_response, write_request, Opcode, Request, Status};
     use nebula_watchdog::Watchdog;
     use tokio::{net::TcpListener, sync::oneshot};
+
+    use crate::metrics::Metrics;
 
     use super::run;
 
@@ -174,6 +190,7 @@ mod tests {
             None,
             lifecycle.subscribe(),
             heartbeat,
+            Metrics::new(),
             started_tx,
         ));
         started_rx.await.unwrap();

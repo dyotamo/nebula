@@ -573,6 +573,7 @@ dependencies = [
  "axum",
  "clap",
  "dashmap",
+ "libc",
  "nebula-core",
  "nebula-health",
  "nebula-protocol",

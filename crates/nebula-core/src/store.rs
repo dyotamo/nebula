@@ -72,6 +72,17 @@ impl CacheStore {
         self.entries.len()
     }
 
+    pub fn memory_usage(&self) -> usize {
+        let _snapshot_guard = self
+            .snapshot_gate
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        self.entries
+            .iter()
+            .map(|entry| entry.key().len().saturating_add(entry.value().value.len()))
+            .sum()
+    }
+
     pub fn is_empty(&self) -> bool {
         let _snapshot_guard = self
             .snapshot_gate

@@ -18,8 +18,9 @@ use tracing::{error, info, warn};
 use crate::{
     admin_console,
     config::{Config, PersistenceMode, TlsOptions},
+    metrics::{self, Metrics},
     persistence::PersistenceManager,
-    server,
+    server, systemd,
 };
 
 pub struct Application {
@@ -28,6 +29,7 @@ pub struct Application {
     lifecycle: Lifecycle,
     health: HealthManager,
     watchdog: Watchdog,
+    metrics: Arc<Metrics>,
     persistence: Option<PersistenceManager>,
     services: JoinSet<io::Result<()>>,
     shutdown_timeout: Duration,
@@ -38,6 +40,7 @@ impl Application {
         let lifecycle = Lifecycle::new();
         let health = HealthManager::new(lifecycle.clone(), config.admin_console.enabled);
         let watchdog = Watchdog::new(health.clone());
+        let metrics = Metrics::new();
         let persistence = if config.persistence.mode == PersistenceMode::Snapshot {
             health.report(
                 HealthComponent::Persistence("snapshots".to_owned()),
@@ -48,6 +51,7 @@ impl Application {
                 Duration::from_secs(config.persistence.snapshot_interval_secs),
                 config.persistence.snapshot_retention,
                 health.clone(),
+                Arc::clone(&metrics),
             ))
         } else {
             None
@@ -59,6 +63,7 @@ impl Application {
             lifecycle,
             health,
             watchdog,
+            metrics,
             persistence,
             services: JoinSet::new(),
         }
@@ -137,6 +142,14 @@ impl Application {
         } else {
             None
         };
+        let metrics_listener = if self.config.metrics.enabled {
+            match TcpListener::bind(self.config.metrics.listen_addr).await {
+                Ok(listener) => Some(listener),
+                Err(err) => return Err(self.fail_startup("bind metrics listener", err).await),
+            }
+        } else {
+            None
+        };
 
         let limits = self.config.frame_limits();
         let (tcp_started_tx, tcp_started_rx) = oneshot::channel();
@@ -147,6 +160,7 @@ impl Application {
             HealthComponent::TcpServer,
             Duration::from_secs(3),
         );
+        let tcp_metrics = Arc::clone(&self.metrics);
         let tcp_health = self.health.clone();
         let tcp_lifecycle_state = self.lifecycle.clone();
         self.services.spawn(async move {
@@ -157,6 +171,7 @@ impl Application {
                 tls_acceptor,
                 tcp_lifecycle,
                 tcp_heartbeat,
+                tcp_metrics,
                 tcp_started_tx,
             )
             .await;
@@ -194,6 +209,8 @@ impl Application {
             let admin_lifecycle = self.lifecycle.subscribe();
             let admin_lifecycle_state = self.lifecycle.clone();
             let admin_health = self.health.clone();
+            let admin_metrics = Arc::clone(&self.metrics);
+            let dashboard_enabled = self.config.admin_console.metrics_dashboard;
             let admin_heartbeat = self.watchdog.register_worker(
                 "admin-console",
                 HealthComponent::AdminConsole,
@@ -209,6 +226,9 @@ impl Application {
                     password,
                     admin_lifecycle,
                     admin_heartbeat,
+                    admin_metrics,
+                    admin_health.clone(),
+                    dashboard_enabled,
                     started_tx,
                 )
                 .await;
@@ -235,7 +255,63 @@ impl Application {
             None
         };
 
-        if let Err(err) = self.wait_for_start(tcp_started_rx, admin_started).await {
+        let metrics_started = if let Some(listener) = metrics_listener {
+            let lifecycle = self.lifecycle.subscribe();
+            let lifecycle_state = self.lifecycle.clone();
+            let health = self.health.clone();
+            let heartbeat = self.watchdog.register_worker(
+                "metrics-endpoint",
+                HealthComponent::MetricsEndpoint,
+                Duration::from_secs(3),
+            );
+            let metrics = Arc::clone(&self.metrics);
+            let store = Arc::clone(&self.store);
+            let persistence_directory = self
+                .persistence
+                .as_ref()
+                .map(|_| self.config.persistence.snapshot_dir.clone());
+            let (started_tx, started_rx) = oneshot::channel();
+            self.services.spawn(async move {
+                let result = metrics::run_exporter(
+                    listener,
+                    metrics,
+                    store,
+                    lifecycle,
+                    health.clone(),
+                    persistence_directory,
+                    heartbeat,
+                    started_tx,
+                )
+                .await;
+                if matches!(
+                    lifecycle_state.state(),
+                    ApplicationState::Ready | ApplicationState::Degraded
+                ) {
+                    health.report(
+                        HealthComponent::MetricsEndpoint,
+                        ComponentHealth::Unhealthy(
+                            result
+                                .as_ref()
+                                .err()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| {
+                                    "metrics endpoint exited unexpectedly".to_owned()
+                                }),
+                        ),
+                    );
+                    let _ = lifecycle_state.transition(ApplicationState::Failed);
+                }
+                result
+            });
+            Some(started_rx)
+        } else {
+            None
+        };
+
+        if let Err(err) = self
+            .wait_for_start(tcp_started_rx, admin_started, metrics_started)
+            .await
+        {
             return Err(self.fail_startup("start application services", err).await);
         }
 
@@ -267,6 +343,24 @@ impl Application {
             watchdog.run(watchdog_lifecycle).await;
             Ok(())
         });
+        if let Some(watchdog_interval) = systemd::watchdog_interval() {
+            let watchdog_lifecycle = self.lifecycle.subscribe();
+            let watchdog_state = self.lifecycle.clone();
+            let watchdog_health = self.health.clone();
+            self.services.spawn(async move {
+                systemd::run_watchdog(
+                    watchdog_state,
+                    watchdog_health,
+                    watchdog_lifecycle,
+                    watchdog_interval,
+                )
+                .await;
+                Ok(())
+            });
+        }
+        if let Err(err) = systemd::notify("READY=1") {
+            return Err(self.fail_startup("notify systemd readiness", err).await);
+        }
         info!(address = %self.config.listen_addr, "NebulaCache application ready");
         Ok(())
     }
@@ -275,6 +369,9 @@ impl Application {
         match self.lifecycle.state() {
             ApplicationState::Stopped | ApplicationState::Stopping => return Ok(()),
             ApplicationState::Ready | ApplicationState::Degraded => {
+                if let Err(err) = systemd::notify("STOPPING=1") {
+                    warn!(error = %err, "systemd stopping notification failed");
+                }
                 self.lifecycle.transition(ApplicationState::Stopping)?
             }
             ApplicationState::Failed => {
@@ -315,10 +412,14 @@ impl Application {
         &mut self,
         tcp_started: oneshot::Receiver<()>,
         admin_started: Option<oneshot::Receiver<()>>,
+        metrics_started: Option<oneshot::Receiver<()>>,
     ) -> io::Result<()> {
         let mut started = vec![tcp_started];
         if let Some(admin_started) = admin_started {
             started.push(admin_started);
+        }
+        if let Some(metrics_started) = metrics_started {
+            started.push(metrics_started);
         }
 
         for receiver in started {
@@ -497,6 +598,12 @@ mod tests {
             tls: Default::default(),
             shutdown_timeout_secs: 1,
             persistence: Default::default(),
+            metrics: {
+                let mut metrics = crate::config::MetricsOptions::default();
+                metrics.enabled = false;
+                metrics
+            },
+            log_level: "info".to_owned(),
         }
     }
 

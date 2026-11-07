@@ -23,11 +23,13 @@ use tokio::{
     time::{interval, MissedTickBehavior},
 };
 
-use nebula_health::lifecycle::ApplicationState;
+use nebula_health::{lifecycle::ApplicationState, HealthManager};
 use nebula_watchdog::WorkerHeartbeat;
 use tracing::info;
 
 use nebula_core::CacheStore;
+
+use crate::metrics::Metrics;
 
 const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
 const SESSION_COOKIE: &str = "nebula_admin_session";
@@ -38,6 +40,10 @@ struct ConsoleState {
     limits: FrameLimits,
     password: Arc<str>,
     sessions: Arc<dashmap::DashMap<String, Instant>>,
+    metrics: Arc<Metrics>,
+    health: HealthManager,
+    lifecycle: watch::Receiver<ApplicationState>,
+    dashboard_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -95,11 +101,25 @@ pub(crate) async fn run(
     password: String,
     lifecycle: watch::Receiver<ApplicationState>,
     heartbeat: WorkerHeartbeat,
+    metrics: Arc<Metrics>,
+    health: HealthManager,
+    dashboard_enabled: bool,
     started: oneshot::Sender<()>,
 ) -> io::Result<()> {
     info!(address = %listener.local_addr()?, "NebulaCache admin console listening");
-    let server = axum::serve(listener, router(store, limits, password, lifecycle.clone()))
-        .with_graceful_shutdown(wait_for_shutdown(lifecycle));
+    let server = axum::serve(
+        listener,
+        router(
+            store,
+            limits,
+            password,
+            lifecycle.clone(),
+            metrics,
+            health,
+            dashboard_enabled,
+        ),
+    )
+    .with_graceful_shutdown(wait_for_shutdown(lifecycle));
     let mut server = Box::pin(async move { server.await });
     let _ = started.send(());
     let mut heartbeat_interval = interval(Duration::from_secs(1));
@@ -117,6 +137,9 @@ fn router(
     limits: FrameLimits,
     password: String,
     lifecycle: watch::Receiver<ApplicationState>,
+    metrics: Arc<Metrics>,
+    health: HealthManager,
+    dashboard_enabled: bool,
 ) -> Router {
     let body_limit = limits.max_value_len.saturating_mul(2).saturating_add(4096);
     let state = Arc::new(ConsoleState {
@@ -124,10 +147,15 @@ fn router(
         limits,
         password: password.into(),
         sessions: Arc::new(dashmap::DashMap::new()),
+        metrics,
+        health,
+        lifecycle: lifecycle.clone(),
+        dashboard_enabled,
     });
 
     Router::new()
         .route("/", get(index))
+        .route("/api/metrics", get(dashboard_metrics))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route(
@@ -138,6 +166,25 @@ fn router(
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(middleware::from_fn_with_state(lifecycle, require_ready))
         .with_state(state)
+}
+
+async fn dashboard_metrics(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
+    if !authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !state.dashboard_enabled {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"available": false})),
+        )
+            .into_response();
+    }
+    Json(
+        state
+            .metrics
+            .dashboard_snapshot(&state.store, *state.lifecycle.borrow(), &state.health),
+    )
+    .into_response()
 }
 
 async fn require_ready(
@@ -390,9 +437,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        clear_entries, constant_time_eq, decode_hex, delete_entry, encode_hex, list_entries, login,
-        router, set_entry, wait_for_shutdown, ConsoleState, ListEntriesQuery, LoginRequest,
+        clear_entries, constant_time_eq, dashboard_metrics, decode_hex, delete_entry, encode_hex,
+        list_entries, login, router, set_entry, wait_for_shutdown, ConsoleState, ListEntriesQuery,
+        LoginRequest,
     };
+    use crate::metrics::Metrics;
     use axum::{
         body::{to_bytes, Bytes},
         extract::{Path, Query, State},
@@ -400,6 +449,7 @@ mod tests {
         Json,
     };
     use nebula_core::CacheStore;
+    use nebula_health::HealthManager;
     use nebula_protocol::FrameLimits;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -414,6 +464,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let receiver = lifecycle.subscribe();
+        let health_lifecycle = lifecycle.clone();
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -422,6 +473,9 @@ mod tests {
                     FrameLimits::default(),
                     "secret".to_owned(),
                     receiver.clone(),
+                    Metrics::new(),
+                    HealthManager::new(health_lifecycle, false),
+                    true,
                 ),
             )
             .with_graceful_shutdown(wait_for_shutdown(receiver))
@@ -444,11 +498,16 @@ mod tests {
 
     #[tokio::test]
     async fn login_session_can_manage_entries_and_rejects_anonymous_access() {
+        let lifecycle = Lifecycle::new();
         let state = Arc::new(ConsoleState {
             store: Arc::new(CacheStore::new()),
             limits: FrameLimits::default(),
             password: Arc::from("secret"),
             sessions: Arc::new(dashmap::DashMap::new()),
+            metrics: Metrics::new(),
+            health: HealthManager::new(lifecycle.clone(), false),
+            lifecycle: lifecycle.subscribe(),
+            dashboard_enabled: true,
         });
 
         let anonymous = list_entries(
@@ -489,6 +548,19 @@ mod tests {
             .unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(header::COOKIE, HeaderValue::from_str(cookie).unwrap());
+
+        state.metrics.record_request("set", true, 1_000_000);
+        let dashboard = dashboard_metrics(State(Arc::clone(&state)), headers.clone()).await;
+        assert_eq!(dashboard.status(), StatusCode::OK);
+        let body = to_bytes(dashboard.into_body(), 4096).await.unwrap();
+        let snapshot: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(snapshot["available"], true);
+        assert_eq!(snapshot["requests_total"], 1);
+
+        let mut unavailable = (*state).clone();
+        unavailable.dashboard_enabled = false;
+        let unavailable = dashboard_metrics(State(Arc::new(unavailable)), headers.clone()).await;
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         let saved = set_entry(
             State(Arc::clone(&state)),

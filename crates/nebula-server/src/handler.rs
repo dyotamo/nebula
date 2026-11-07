@@ -1,21 +1,46 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use nebula_protocol::{Opcode, Request, Response};
 use tracing::debug;
 
 use nebula_core::CacheStore;
 
+use crate::metrics::Metrics;
+
 pub async fn handle(request: Request, store: Arc<CacheStore>) -> Response {
-    match request.opcode {
+    handle_observed(request, store, None).await
+}
+
+pub async fn handle_with_metrics(
+    request: Request,
+    store: Arc<CacheStore>,
+    metrics: Arc<Metrics>,
+) -> Response {
+    handle_observed(request, store, Some(metrics)).await
+}
+
+async fn handle_observed(
+    request: Request,
+    store: Arc<CacheStore>,
+    metrics: Option<Arc<Metrics>>,
+) -> Response {
+    let started = Instant::now();
+    let operation = match request.opcode {
+        Opcode::Ping => "ping",
+        Opcode::Set => "set",
+        Opcode::Get => "get",
+        Opcode::Delete => "delete",
+    };
+    let response = match request.opcode {
         Opcode::Ping => Response::ok(b"PONG".to_vec()),
 
         Opcode::Set => {
             if request.key.is_empty() {
-                return Response::invalid_argument();
+                Response::invalid_argument()
+            } else {
+                store.set(request.key, request.value, request.ttl_secs);
+                Response::empty_ok()
             }
-
-            store.set(request.key, request.value, request.ttl_secs);
-            Response::empty_ok()
         }
 
         Opcode::Get => match store.get(&request.key) {
@@ -30,7 +55,15 @@ pub async fn handle(request: Request, store: Arc<CacheStore>) -> Response {
                 Response::not_found()
             }
         }
+    };
+    if let Some(metrics) = metrics {
+        metrics.record_request(
+            operation,
+            response.status == nebula_protocol::Status::Ok,
+            started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        );
     }
+    response
 }
 
 pub fn log_connection(peer: std::net::SocketAddr) {

@@ -18,6 +18,8 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
+use crate::metrics::Metrics;
+
 const MAGIC: &[u8; 4] = b"NBSC";
 const FORMAT_VERSION: u32 = 1;
 const HEADER_LEN: usize = 12;
@@ -32,6 +34,7 @@ pub(crate) struct PersistenceManager {
     retention: usize,
     operation: Arc<Mutex<()>>,
     health: HealthManager,
+    metrics: Arc<Metrics>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -53,12 +56,42 @@ struct Timestamp {
     nanos: u32,
 }
 
+struct PersistenceRecorder {
+    metrics: Arc<Metrics>,
+    started: std::time::Instant,
+    snapshot: bool,
+    success: bool,
+}
+
+impl PersistenceRecorder {
+    fn new(metrics: Arc<Metrics>, snapshot: bool) -> Self {
+        Self {
+            metrics,
+            started: std::time::Instant::now(),
+            snapshot,
+            success: false,
+        }
+    }
+}
+
+impl Drop for PersistenceRecorder {
+    fn drop(&mut self) {
+        let elapsed_ns = self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        if self.snapshot {
+            self.metrics.record_snapshot(elapsed_ns, self.success);
+        } else {
+            self.metrics.record_recovery(elapsed_ns, self.success);
+        }
+    }
+}
+
 impl PersistenceManager {
     pub(crate) fn new(
         directory: PathBuf,
         interval: Duration,
         retention: usize,
         health: HealthManager,
+        metrics: Arc<Metrics>,
     ) -> Self {
         Self {
             directory,
@@ -66,10 +99,12 @@ impl PersistenceManager {
             retention,
             operation: Arc::new(Mutex::new(())),
             health,
+            metrics,
         }
     }
 
     pub(crate) async fn restore(&self, store: Arc<CacheStore>) -> io::Result<bool> {
+        let mut recorder = PersistenceRecorder::new(Arc::clone(&self.metrics), false);
         info!(directory = %self.directory.display(), "cache snapshot restoration started");
         let directory = self.directory.clone();
         let result = tokio::task::spawn_blocking(move || load_latest_snapshot(&directory)).await;
@@ -89,6 +124,7 @@ impl PersistenceManager {
         let Some((path, payload)) = loaded else {
             info!(directory = %self.directory.display(), "no snapshots found; starting with an empty cache");
             self.report_success();
+            recorder.success = true;
             return Ok(false);
         };
 
@@ -115,10 +151,12 @@ impl PersistenceManager {
         };
         info!(path = %path.display(), entries = restored, "cache snapshot restored");
         self.report_success();
+        recorder.success = true;
         Ok(true)
     }
 
     pub(crate) async fn snapshot(&self, store: Arc<CacheStore>) -> io::Result<()> {
+        let mut recorder = PersistenceRecorder::new(Arc::clone(&self.metrics), true);
         let operation = Arc::clone(&self.operation).lock_owned().await;
         let captured = store.snapshot_for_persistence();
         let payload = payload_from_entries(captured)?;
@@ -138,6 +176,7 @@ impl PersistenceManager {
             Ok(Ok(path)) => {
                 info!(path = %path.display(), "cache snapshot completed and synchronized");
                 self.report_success();
+                recorder.success = true;
                 Ok(())
             }
             Ok(Err(error)) => {
@@ -427,6 +466,8 @@ mod tests {
     use nebula_core::CacheStore;
     use nebula_health::{lifecycle::Lifecycle, ComponentHealth, HealthComponent, HealthManager};
 
+    use crate::metrics::Metrics;
+
     use super::{
         load_latest_snapshot, write_snapshot, PersistenceManager, SnapshotPayload, Timestamp,
     };
@@ -448,6 +489,7 @@ mod tests {
             Duration::from_secs(60),
             retention,
             HealthManager::new(Lifecycle::new(), false),
+            Metrics::new(),
         )
     }
 
@@ -575,6 +617,7 @@ mod tests {
             Duration::from_secs(60),
             3,
             health.clone(),
+            Metrics::new(),
         );
         assert!(persistence
             .restore(Arc::new(CacheStore::new()))

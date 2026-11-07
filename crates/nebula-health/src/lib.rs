@@ -1,6 +1,7 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use tokio::sync::watch;
@@ -14,6 +15,7 @@ pub enum HealthComponent {
     TcpServer,
     CacheEngine,
     AdminConsole,
+    MetricsEndpoint,
     BackgroundWorker(String),
     Persistence(String),
 }
@@ -36,6 +38,7 @@ pub enum ApplicationHealth {
 pub struct HealthSnapshot {
     pub overall: ApplicationHealth,
     pub components: BTreeMap<HealthComponent, ComponentHealth>,
+    pub recent_failures: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -46,6 +49,7 @@ pub struct HealthManager {
 
 struct HealthState {
     components: BTreeMap<HealthComponent, ComponentHealth>,
+    recent_failures: VecDeque<String>,
     updates: watch::Sender<HealthSnapshot>,
 }
 
@@ -58,11 +62,12 @@ impl HealthManager {
         if admin_enabled {
             components.insert(HealthComponent::AdminConsole, ComponentHealth::Healthy);
         }
-        let initial = snapshot(&components);
+        let initial = snapshot(&components, &VecDeque::new());
         let (updates, _) = watch::channel(initial);
         Self {
             inner: Arc::new(Mutex::new(HealthState {
                 components,
+                recent_failures: VecDeque::new(),
                 updates,
             })),
             lifecycle,
@@ -88,10 +93,24 @@ impl HealthManager {
         if state.components.get(&component) == Some(&health) {
             return;
         }
-        state.components.insert(component, health);
-        let current = snapshot(&state.components);
+        let previous = state.components.get(&component).cloned();
+        if let ComponentHealth::Unhealthy(reason) = &health {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            state
+                .recent_failures
+                .push_back(format!("{timestamp}: {component:?} unhealthy: {reason}"));
+            if state.recent_failures.len() > 20 {
+                state.recent_failures.pop_front();
+            }
+        }
+        state.components.insert(component.clone(), health.clone());
+        let current = snapshot(&state.components, &state.recent_failures);
         state.updates.send_replace(current.clone());
         drop(state);
+        tracing::info!(component = ?component, previous = ?previous.as_ref().map(health_level), current = health_level(&health), "component health changed");
         self.synchronize_lifecycle(current.overall);
     }
 
@@ -111,7 +130,10 @@ impl HealthManager {
     }
 }
 
-fn snapshot(components: &BTreeMap<HealthComponent, ComponentHealth>) -> HealthSnapshot {
+fn snapshot(
+    components: &BTreeMap<HealthComponent, ComponentHealth>,
+    recent_failures: &VecDeque<String>,
+) -> HealthSnapshot {
     let overall = if components
         .values()
         .any(|health| matches!(health, ComponentHealth::Unhealthy(_)))
@@ -128,6 +150,15 @@ fn snapshot(components: &BTreeMap<HealthComponent, ComponentHealth>) -> HealthSn
     HealthSnapshot {
         overall,
         components: components.clone(),
+        recent_failures: recent_failures.iter().cloned().collect(),
+    }
+}
+
+fn health_level(health: &ComponentHealth) -> &'static str {
+    match health {
+        ComponentHealth::Healthy => "healthy",
+        ComponentHealth::Degraded(_) => "degraded",
+        ComponentHealth::Unhealthy(_) => "unhealthy",
     }
 }
 
