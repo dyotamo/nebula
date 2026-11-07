@@ -33,10 +33,13 @@ import (
 )
 
 func main() {
-	cache, err := nebulacache.New("127.0.0.1:7001")
+	config := nebulacache.DefaultConfig()
+	config.Address = "127.0.0.1:7001"
+	cache, err := nebulacache.NewWithConfig(config)
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer cache.Close()
 
 	if err := cache.SetStringWithTTL("greeting", "hello", 60); err != nil {
 		log.Fatal(err)
@@ -71,7 +74,9 @@ func main() {
 ## API
 
 - `New()` / `New(address)`: create a client for `127.0.0.1:7001` or the provided `host:port` address, using a five-second timeout. IPv6 addresses use the `[host]:port` format.
-- `NewWithTimeout(address, timeout)`: create a client with a custom positive `time.Duration` timeout for connect and read/write operations.
+- `NewWithTimeout(address, timeout)`: create a client with a custom positive `time.Duration` for connection and request timeouts.
+- `NewWithConfig(config)`: create a client with configured pool sizes, timeouts, and retry limits.
+- `Close() error`: close idle and active sockets; later operations return `ErrClosed`. Call it when the client is no longer needed.
 - `Ping() error`: returns `nil` if the node responds with `PONG`.
 - `Set(key, value) error` and `SetString(key, value) error`: store a binary or text value without expiration.
 - `SetWithTTL(key, value, ttlSecs) error` and `SetStringWithTTL(key, value, ttlSecs) error`: store a binary or text value with a TTL in seconds.

@@ -8,13 +8,23 @@ import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
-public final class NebulaCache {
+public final class NebulaCache implements AutoCloseable {
     private static final byte[] MAGIC = new byte[] {'N', 'E', 'B', 'U'};
     private static final int VERSION = 1;
     private static final int MAX_KEY_LENGTH = 1024;
@@ -25,30 +35,82 @@ public final class NebulaCache {
     private final String host;
     private final int port;
     private final String address;
-    private final int timeoutMillis;
+    private final Config config;
+    private final Object poolLock = new Object();
+    private final ArrayDeque<Connection> idle = new ArrayDeque<>();
+    private final Set<Connection> connections = new HashSet<>();
+    private final ScheduledThreadPoolExecutor deadlines;
+    private boolean closed;
+    private double retryTokens = 10;
+    private long retryRefill = System.nanoTime();
+
+    public record Config(int minPoolSize, int maxPoolSize, Duration connectTimeout,
+            Duration requestTimeout, Duration acquireTimeout, Duration idleTimeout,
+            Duration maxLifetime, int maxRetries) {
+        public Config() {
+            this(0, 10, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT,
+                    Duration.ofSeconds(60), Duration.ofSeconds(300), 2);
+        }
+
+        public Config {
+            if (minPoolSize < 0 || maxPoolSize < 1 || minPoolSize > maxPoolSize) {
+                throw new IllegalArgumentException("pool sizes must satisfy 0 <= minPoolSize <= maxPoolSize, maxPoolSize >= 1");
+            }
+            if (maxRetries < 0) {
+                throw new IllegalArgumentException("maxRetries must be non-negative");
+            }
+            requirePositive(connectTimeout, "connectTimeout");
+            requirePositive(requestTimeout, "requestTimeout");
+            requirePositive(acquireTimeout, "acquireTimeout");
+            requirePositive(idleTimeout, "idleTimeout");
+            requirePositive(maxLifetime, "maxLifetime");
+        }
+    }
 
     public NebulaCache() {
-        this("127.0.0.1:7001", DEFAULT_TIMEOUT);
+        this("127.0.0.1:7001");
     }
 
     public NebulaCache(String address) {
-        this(address, DEFAULT_TIMEOUT);
+        this(address, new Config());
     }
 
     public NebulaCache(String address, Duration timeout) {
+        this(address, new Config(0, 10, timeout, timeout, DEFAULT_TIMEOUT,
+                Duration.ofSeconds(60), Duration.ofSeconds(300), 2));
+    }
+
+    public NebulaCache(String address, Config config) {
         this.address = Objects.requireNonNull(address, "address");
         Address parsedAddress = parseAddress(address);
-        Objects.requireNonNull(timeout, "timeout");
-        if (timeout.isZero() || timeout.isNegative()) {
-            throw new IllegalArgumentException("timeout must be greater than zero");
-        }
-
+        this.config = Objects.requireNonNull(config, "config");
         this.host = parsedAddress.host();
         this.port = parsedAddress.port();
-        Duration maxSocketTimeout = Duration.ofMillis(Integer.MAX_VALUE);
-        this.timeoutMillis = timeout.compareTo(maxSocketTimeout) >= 0
-                ? Integer.MAX_VALUE
-                : (int) Math.max(1L, timeout.toMillis());
+        deadlines = new ScheduledThreadPoolExecutor(1, task -> {
+            Thread thread = new Thread(task, "nebulacache-deadlines");
+            thread.setDaemon(true);
+            return thread;
+        });
+        deadlines.setRemoveOnCancelPolicy(true);
+    }
+
+    private static void requirePositive(Duration duration, String name) {
+        Objects.requireNonNull(duration, name);
+        if (duration.isZero() || duration.isNegative()) {
+            throw new IllegalArgumentException(name + " must be greater than zero");
+        }
+    }
+
+    private static long nanos(Duration duration) {
+        try {
+            return duration.toNanos();
+        } catch (ArithmeticException error) {
+            return Long.MAX_VALUE;
+        }
+    }
+
+    private static int millis(long nanos) {
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1, TimeUnit.NANOSECONDS.toMillis(nanos)));
     }
 
     public static void main(String[] args) {
@@ -56,20 +118,24 @@ public final class NebulaCache {
             throw new IllegalArgumentException("Usage: NebulaCache [host:port]");
         }
 
-        NebulaCache cache = args.length == 0 ? new NebulaCache() : new NebulaCache(args[0]);
-        String key = "nebula-java-sdk-smoke-" + UUID.randomUUID();
-        if (cache.ping()) {
-            System.out.println("PING: PONG");
-        }
+        String address = args.length == 0 ? "127.0.0.1:7001" : args[0];
+        Config config = new Config(0, 10, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT,
+                Duration.ofSeconds(60), Duration.ofSeconds(300), 2);
+        try (NebulaCache cache = new NebulaCache(address, config)) {
+            String key = "nebula-java-sdk-smoke-" + UUID.randomUUID();
+            if (cache.ping()) {
+                System.out.println("PING: PONG");
+            }
 
-        cache.set(key, "NebulaCache Java SDK smoke test");
-        try {
-            String value = cache.get(key)
-                    .map(bytes -> new String(bytes, StandardCharsets.UTF_8))
-                    .orElseThrow(() -> new IllegalStateException("smoke-test value was not found"));
-            System.out.println("GET: " + value);
-        } finally {
-            System.out.println("DELETE: " + cache.delete(key));
+            cache.set(key, "NebulaCache Java SDK smoke test");
+            try {
+                String value = cache.get(key)
+                        .map(bytes -> new String(bytes, StandardCharsets.UTF_8))
+                        .orElseThrow(() -> new IllegalStateException("smoke-test value was not found"));
+                System.out.println("GET: " + value);
+            } finally {
+                System.out.println("DELETE: " + cache.delete(key));
+            }
         }
     }
 
@@ -141,11 +207,53 @@ public final class NebulaCache {
     }
 
     private Response request(int opcode, byte[] key, byte[] value, long ttlSecs) {
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(host, port), timeoutMillis);
-            socket.setSoTimeout(timeoutMillis);
+        for (int attempt = 0; ; attempt++) {
+            Connection connection = null;
+            boolean reusable = false;
+            try {
+                connection = acquire();
+                Response response = exchange(connection, opcode, key, value, ttlSecs);
+                reusable = true;
+                return response;
+            } catch (IOException error) {
+                if (connection != null) {
+                    release(connection, false);
+                    connection = null;
+                }
+                synchronized (poolLock) {
+                    ensureOpen();
+                }
+                if (opcode != 2 || attempt >= config.maxRetries() || !isTransient(error) || !takeRetryToken()) {
+                    throw new CacheConnectionException(
+                            "Request to NebulaCache at " + address + " failed: " + error.getMessage(), error);
+                }
+                backoff(attempt);
+            } finally {
+                if (connection != null) {
+                    release(connection, reusable);
+                }
+            }
+        }
+    }
 
-            DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+    private Response exchange(Connection connection, int opcode, byte[] key, byte[] value, long ttlSecs)
+            throws IOException {
+        ScheduledFuture<?> timeout;
+        boolean[] active = {true};
+        long started = System.nanoTime();
+        synchronized (poolLock) {
+            ensureOpen();
+            timeout = deadlines.schedule(() -> {
+                synchronized (connection) {
+                    if (active[0]) {
+                        closeSocket(connection.socket);
+                    }
+                }
+            }, nanos(config.requestTimeout()), TimeUnit.NANOSECONDS);
+        }
+        try {
+            connection.socket.setSoTimeout(millis(nanos(config.requestTimeout())));
+            DataOutputStream output = new DataOutputStream(connection.socket.getOutputStream());
             output.write(MAGIC);
             output.writeByte(VERSION);
             output.writeByte(opcode);
@@ -155,13 +263,189 @@ public final class NebulaCache {
             output.write(key);
             output.write(value);
             output.flush();
+            Response response = readResponse(new DataInputStream(connection.socket.getInputStream()));
+            if (System.nanoTime() - started >= nanos(config.requestTimeout())) {
+                throw new SocketTimeoutException("request timed out");
+            }
+            return response;
+        } finally {
+            synchronized (connection) {
+                active[0] = false;
+                timeout.cancel(false);
+            }
+        }
+    }
 
-            return readResponse(new DataInputStream(socket.getInputStream()));
-        } catch (SocketTimeoutException error) {
-            throw new CacheConnectionException("Request to NebulaCache at " + address + " timed out", error);
-        } catch (IOException error) {
-            throw new CacheConnectionException(
-                    "Could not reach NebulaCache at " + address + ": " + error.getMessage(), error);
+    private Connection acquire() throws IOException {
+        long started = System.nanoTime();
+        List<Connection> reserved = new ArrayList<>();
+        synchronized (poolLock) {
+            while (true) {
+                ensureOpen();
+                long now = System.nanoTime();
+                idle.removeIf(connection -> {
+                    if (expired(connection, now)) {
+                        connections.remove(connection);
+                        closeSocket(connection.socket);
+                        return true;
+                    }
+                    return false;
+                });
+                int needed = Math.max(0, config.minPoolSize() - connections.size());
+                if (needed == 0 && !idle.isEmpty()) {
+                    return idle.removeFirst();
+                }
+                if (needed > 0 || connections.size() < config.maxPoolSize()) {
+                    for (int index = 0; index < Math.max(1, needed); index++) {
+                        Connection connection = new Connection();
+                        connections.add(connection);
+                        reserved.add(connection);
+                    }
+                    break;
+                }
+                long remaining = nanos(config.acquireTimeout()) - (now - started);
+                if (remaining <= 0) {
+                    throw new AcquireTimeoutException();
+                }
+                waitForPool(remaining);
+            }
+        }
+        boolean connected = false;
+        try {
+            for (Connection connection : reserved) {
+                long remaining = nanos(config.acquireTimeout()) - (System.nanoTime() - started);
+                if (remaining <= 0) {
+                    throw new AcquireTimeoutException();
+                }
+                connection.socket.connect(new InetSocketAddress(host, port),
+                        millis(Math.min(nanos(config.connectTimeout()), remaining)));
+                connection.socket.setTcpNoDelay(true);
+                connection.created = System.nanoTime();
+                connection.lastUsed = connection.created;
+            }
+            synchronized (poolLock) {
+                ensureOpen();
+                if (System.nanoTime() - started >= nanos(config.acquireTimeout())) {
+                    throw new AcquireTimeoutException();
+                }
+                for (int index = 1; index < reserved.size(); index++) {
+                    idle.addLast(reserved.get(index));
+                }
+                connected = true;
+                poolLock.notifyAll();
+                return reserved.get(0);
+            }
+        } finally {
+            if (!connected) {
+                for (Connection connection : reserved) {
+                    release(connection, false);
+                }
+            }
+        }
+    }
+
+    private boolean expired(Connection connection, long now) {
+        return connection.socket.isClosed()
+                || now - connection.created >= nanos(config.maxLifetime())
+                || now - connection.lastUsed >= nanos(config.idleTimeout());
+    }
+
+    private void release(Connection connection, boolean reusable) {
+        synchronized (poolLock) {
+            long now = System.nanoTime();
+            connection.lastUsed = now;
+            if (reusable && !closed && !expired(connection, now)) {
+                idle.addLast(connection);
+            } else {
+                connections.remove(connection);
+                closeSocket(connection.socket);
+            }
+            poolLock.notifyAll();
+        }
+    }
+
+    private static boolean isTransient(IOException error) {
+        return !(error instanceof AcquireTimeoutException)
+                && (error instanceof SocketException || error instanceof SocketTimeoutException
+                        || error instanceof EOFException);
+    }
+
+    private boolean takeRetryToken() {
+        synchronized (poolLock) {
+            long now = System.nanoTime();
+            retryTokens = Math.min(10, retryTokens + (now - retryRefill) / 1_000_000_000.0);
+            retryRefill = now;
+            if (retryTokens < 1) {
+                return false;
+            }
+            retryTokens--;
+            return true;
+        }
+    }
+
+    private void backoff(int attempt) {
+        long ceilingMillis = Math.min(1000, 50L << Math.min(attempt, 5));
+        long duration = TimeUnit.MILLISECONDS.toNanos(ThreadLocalRandom.current().nextLong(ceilingMillis + 1));
+        long deadline = System.nanoTime() + duration;
+        synchronized (poolLock) {
+            long remaining = duration;
+            while (remaining > 0) {
+                ensureOpen();
+                waitForPool(remaining);
+                remaining = deadline - System.nanoTime();
+            }
+            ensureOpen();
+        }
+    }
+
+    private void waitForPool(long remaining) {
+        try {
+            TimeUnit.NANOSECONDS.timedWait(poolLock, remaining);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new CacheConnectionException("Interrupted while waiting for NebulaCache", error);
+        }
+    }
+
+    private void ensureOpen() {
+        if (closed) {
+            throw new IllegalStateException("NebulaCache is closed");
+        }
+    }
+
+    @Override
+    public void close() {
+        synchronized (poolLock) {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            for (Connection connection : connections) {
+                closeSocket(connection.socket);
+            }
+            connections.clear();
+            idle.clear();
+            deadlines.shutdownNow();
+            poolLock.notifyAll();
+        }
+    }
+
+    private static void closeSocket(Socket socket) {
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+        }
+    }
+
+    private static final class Connection {
+        private final Socket socket = new Socket();
+        private long created;
+        private long lastUsed;
+    }
+
+    private static final class AcquireTimeoutException extends SocketTimeoutException {
+        private AcquireTimeoutException() {
+            super("timed out acquiring a pooled connection");
         }
     }
 
@@ -193,7 +477,9 @@ public final class NebulaCache {
             input.readFully(value);
             return new Response(status, value);
         } catch (EOFException error) {
-            throw new CacheProtocolException("connection closed before the response was complete", error);
+            SocketException connectionError = new SocketException("connection closed before the response was complete");
+            connectionError.initCause(error);
+            throw connectionError;
         }
     }
 

@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    cache = NebulaCache(args.address)
+    cache = NebulaCache(args.address, min_pool_size=1, max_pool_size=10)
 
     try:
         if args.command == "ping":
@@ -68,6 +68,8 @@ def main() -> int:
     except (NebulaCacheError, ValueError) as error:
         print(f"nebulacache-example: {error}", file=sys.stderr)
         return 1
+    finally:
+        cache.close()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import errno
+import math
+import random
 import socket
 import struct
+import threading
+import time
+from dataclasses import dataclass
 from typing import TypeAlias
 
 from .exceptions import CacheConnectionError, CacheProtocolError, CacheResponseError
@@ -22,15 +28,185 @@ _STATUS_NAMES = {
 }
 
 
+@dataclass(eq=False)
+class _PooledConnection:
+    socket: socket.socket
+    created_at: float
+    last_used: float
+
+
 class NebulaCache:
     """Synchronous client for the NebulaCache binary TCP protocol."""
 
-    def __init__(self, address: str = "127.0.0.1:7001", timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        address: str = "127.0.0.1:7001",
+        timeout: float = 5.0,
+        *,
+        min_pool_size: int = 0,
+        max_pool_size: int = 10,
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        acquire_timeout: float = 5.0,
+        idle_timeout: float = 60.0,
+        max_lifetime: float = 300.0,
+        max_retries: int = 2,
+    ) -> None:
         self.host, self.port = self._parse_address(address)
-        if timeout <= 0:
-            raise ValueError("timeout must be greater than zero")
+        connect_timeout = timeout if connect_timeout is None else connect_timeout
+        request_timeout = timeout if request_timeout is None else request_timeout
+        for name, duration in (
+            ("timeout", timeout),
+            ("connect_timeout", connect_timeout),
+            ("request_timeout", request_timeout),
+            ("acquire_timeout", acquire_timeout),
+            ("idle_timeout", idle_timeout),
+            ("max_lifetime", max_lifetime),
+        ):
+            if (
+                isinstance(duration, bool)
+                or not isinstance(duration, (int, float))
+                or not math.isfinite(duration)
+                or duration <= 0
+            ):
+                raise ValueError(f"{name} must be finite and greater than zero")
+        for name, size in (
+            ("min_pool_size", min_pool_size),
+            ("max_pool_size", max_pool_size),
+            ("max_retries", max_retries),
+        ):
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if max_pool_size == 0 or min_pool_size > max_pool_size:
+            raise ValueError("pool sizes must satisfy 0 <= min_pool_size <= max_pool_size and max_pool_size > 0")
         self.address = address
         self.timeout = timeout
+        self.min_pool_size = min_pool_size
+        self.max_pool_size = max_pool_size
+        self.connect_timeout = connect_timeout
+        self.request_timeout = request_timeout
+        self.acquire_timeout = acquire_timeout
+        self.idle_timeout = idle_timeout
+        self.max_lifetime = max_lifetime
+        self.max_retries = max_retries
+        self._condition = threading.Condition()
+        self._closed = threading.Event()
+        self._connections: set[_PooledConnection] = set()
+        self._idle: list[_PooledConnection] = []
+        self._connecting = 0
+        self._retry_tokens = 10.0
+        self._retry_updated_at = time.monotonic()
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed.set()
+            for connection in self._connections:
+                self._close_socket(connection.socket)
+            self._connections.clear()
+            self._idle.clear()
+            self._condition.notify_all()
+
+    @staticmethod
+    def _close_socket(connection: socket.socket) -> None:
+        try:
+            connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        connection.close()
+
+    def _expire_idle(self, now: float) -> None:
+        for connection in self._idle[:]:
+            if (
+                now - connection.last_used >= self.idle_timeout
+                or now - connection.created_at >= self.max_lifetime
+            ):
+                self._idle.remove(connection)
+                self._connections.remove(connection)
+                self._close_socket(connection.socket)
+
+    def _acquire(self) -> _PooledConnection:
+        deadline = time.monotonic() + self.acquire_timeout
+        while True:
+            with self._condition:
+                if self._closed.is_set():
+                    raise CacheConnectionError("NebulaCache client is closed")
+                now = time.monotonic()
+                for connection in self._idle[:]:
+                    if (
+                        now - connection.last_used >= self.idle_timeout
+                        or now - connection.created_at >= self.max_lifetime
+                    ):
+                        self._idle.remove(connection)
+                        self._connections.remove(connection)
+                        self._close_socket(connection.socket)
+                remaining = deadline - now
+                if remaining <= 0:
+                    raise CacheConnectionError("Timed out acquiring a NebulaCache connection")
+                total = len(self._connections) + self._connecting
+                if total < self.min_pool_size or (not self._idle and total < self.max_pool_size):
+                    self._connecting += 1
+                elif self._idle:
+                    return self._idle.pop()
+                else:
+                    self._condition.wait(remaining)
+                    continue
+            try:
+                connection_socket = socket.create_connection(
+                    (self.host, self.port), timeout=min(self.connect_timeout, remaining)
+                )
+            except BaseException:
+                with self._condition:
+                    self._connecting -= 1
+                    self._condition.notify_all()
+                raise
+            with self._condition:
+                self._connecting -= 1
+                if self._closed.is_set():
+                    self._close_socket(connection_socket)
+                    self._condition.notify_all()
+                    raise CacheConnectionError("NebulaCache client is closed")
+                now = time.monotonic()
+                connection = _PooledConnection(connection_socket, now, now)
+                self._connections.add(connection)
+                self._idle.append(connection)
+                self._condition.notify_all()
+
+    def _release(self, connection: _PooledConnection, healthy: bool) -> None:
+        with self._condition:
+            if connection not in self._connections:
+                return
+            now = time.monotonic()
+            if not healthy or self._closed.is_set() or now - connection.created_at >= self.max_lifetime:
+                self._connections.remove(connection)
+                self._close_socket(connection.socket)
+            else:
+                connection.last_used = now
+                self._idle.append(connection)
+            self._condition.notify_all()
+
+    def _take_retry_token(self) -> bool:
+        with self._condition:
+            now = time.monotonic()
+            self._retry_tokens = min(10.0, self._retry_tokens + now - self._retry_updated_at)
+            self._retry_updated_at = now
+            if self._closed.is_set() or self._retry_tokens < 1:
+                return False
+            self._retry_tokens -= 1
+            return True
+
+    @staticmethod
+    def _is_transient(error: OSError) -> bool:
+        return isinstance(error, (TimeoutError, ConnectionError)) or error.errno in {
+            errno.ECONNABORTED,
+            errno.ECONNREFUSED,
+            errno.ECONNRESET,
+            errno.EHOSTUNREACH,
+            errno.ENETDOWN,
+            errno.ENETRESET,
+            errno.ENETUNREACH,
+            errno.EPIPE,
+            errno.ETIMEDOUT,
+        }
 
     def ping(self) -> bool:
         status, value = self._request(4)
@@ -127,17 +303,44 @@ class NebulaCache:
             len(value),
             ttl_secs,
         )
-        try:
-            with socket.create_connection((self.host, self.port), timeout=self.timeout) as connection:
-                connection.settimeout(self.timeout)
-                connection.sendall(header + key + value)
-                return self._read_response(connection)
-        except OSError as error:
-            raise CacheConnectionError(f"Could not reach NebulaCache at {self.address}: {error}") from error
+        payload = header + key + value
+        attempt = 0
+        while True:
+            connection = None
+            healthy = False
+            transport_error = None
+            try:
+                connection = self._acquire()
+                deadline = time.monotonic() + self.request_timeout
+                connection.socket.settimeout(self.request_timeout)
+                connection.socket.sendall(payload)
+                response = self._read_response(connection.socket, deadline)
+                if opcode == 4 and response[0] == 0 and response[1] != b"PONG":
+                    raise CacheProtocolError("PING response did not contain PONG")
+                healthy = True
+                return response
+            except OSError as error:
+                transport_error = error
+            finally:
+                if connection is not None:
+                    self._release(connection, healthy)
+            if (
+                opcode != 2
+                or attempt >= self.max_retries
+                or not self._is_transient(transport_error)
+                or not self._take_retry_token()
+            ):
+                raise CacheConnectionError(
+                    f"Could not reach NebulaCache at {self.address}: {transport_error}"
+                ) from transport_error
+            delay = random.uniform(0.0, min(1.0, 0.05 * 2 ** min(attempt, 5)))
+            attempt += 1
+            if self._closed.wait(delay):
+                raise CacheConnectionError("NebulaCache client is closed") from transport_error
 
     @staticmethod
-    def _read_response(connection: socket.socket) -> tuple[int, bytes]:
-        header = NebulaCache._receive_exactly(connection, _RESPONSE_HEADER.size)
+    def _read_response(connection: socket.socket, deadline: float | None = None) -> tuple[int, bytes]:
+        header = NebulaCache._receive_exactly(connection, _RESPONSE_HEADER.size, deadline)
         magic, version, status, value_len = _RESPONSE_HEADER.unpack(header)
         if magic != _MAGIC:
             raise CacheProtocolError("response has invalid magic bytes")
@@ -147,15 +350,22 @@ class NebulaCache:
             raise CacheProtocolError(f"unknown response status: {status}")
         if value_len > _MAX_VALUE_LEN:
             raise CacheProtocolError(f"response exceeds the {_MAX_VALUE_LEN}-byte protocol limit")
-        return status, NebulaCache._receive_exactly(connection, value_len)
+        return status, NebulaCache._receive_exactly(connection, value_len, deadline)
 
     @staticmethod
-    def _receive_exactly(connection: socket.socket, length: int) -> bytes:
+    def _receive_exactly(
+        connection: socket.socket, length: int, deadline: float | None = None
+    ) -> bytes:
         chunks = bytearray()
         while len(chunks) < length:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("NebulaCache request timed out")
+                connection.settimeout(remaining)
             chunk = connection.recv(length - len(chunks))
             if not chunk:
-                raise CacheProtocolError("connection closed before the response was complete")
+                raise ConnectionResetError("connection closed before the response was complete")
             chunks.extend(chunk)
         return bytes(chunks)
 

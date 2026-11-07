@@ -20,10 +20,13 @@ func main() {
 }
 
 func run(address string) error {
-	cache, err := nebulacache.New(address)
+	config := nebulacache.DefaultConfig()
+	config.Address = address
+	cache, err := nebulacache.NewWithConfig(config)
 	if err != nil {
 		return err
 	}
+	defer cache.Close()
 
 	if err := cache.Ping(); err != nil {
 		return err

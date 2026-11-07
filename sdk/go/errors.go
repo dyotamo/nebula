@@ -1,6 +1,11 @@
 package nebulacache
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrClosed = errors.New("NebulaCache client is closed")
 
 type CacheConnectionError struct {
 	Address  string

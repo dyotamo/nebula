@@ -28,62 +28,66 @@ async function main(argv) {
   }
 
   const command = args.shift();
-  const cache = new NebulaCache(address);
+  const cache = new NebulaCache(address, { minPoolSize: 1, maxPoolSize: 10 });
 
-  if (command === 'ping') {
-    requireNoArguments(args);
-    await cache.ping();
-    console.log('PONG');
-    return 0;
-  }
-
-  if (command === 'set') {
-    const [key, value, ...options] = args;
-    if (key === undefined || value === undefined) {
-      throw new Error('set requires a key and value');
+  try {
+    if (command === 'ping') {
+      requireNoArguments(args);
+      await cache.ping();
+      console.log('PONG');
+      return 0;
     }
-    let ttlSecs = 0n;
-    for (let index = 0; index < options.length; index += 1) {
-      if (options[index] !== '--ttl' || index + 1 >= options.length) {
-        throw new Error(`unexpected set argument: ${options[index]}`);
+
+    if (command === 'set') {
+      const [key, value, ...options] = args;
+      if (key === undefined || value === undefined) {
+        throw new Error('set requires a key and value');
       }
-      const ttlText = options[index + 1];
-      if (!/^\d+$/.test(ttlText)) {
-        throw new Error('TTL must be a non-negative 64-bit integer');
+      let ttlSecs = 0n;
+      for (let index = 0; index < options.length; index += 1) {
+        if (options[index] !== '--ttl' || index + 1 >= options.length) {
+          throw new Error(`unexpected set argument: ${options[index]}`);
+        }
+        const ttlText = options[index + 1];
+        if (!/^\d+$/.test(ttlText)) {
+          throw new Error('TTL must be a non-negative 64-bit integer');
+        }
+        ttlSecs = BigInt(ttlText);
+        if (ttlSecs > MAX_UINT64) {
+          throw new Error('TTL must be a non-negative 64-bit integer');
+        }
+        index += 1;
       }
-      ttlSecs = BigInt(ttlText);
-      if (ttlSecs > MAX_UINT64) {
-        throw new Error('TTL must be a non-negative 64-bit integer');
+      await cache.set(key, value, ttlSecs);
+      console.log('stored');
+      return 0;
+    }
+
+    if (command === 'get') {
+      requireArgumentCount(args, 1, command);
+      const value = await cache.get(args[0]);
+      if (value === null) {
+        console.log('not found');
+        return 1;
       }
-      index += 1;
+      try {
+        console.log(new TextDecoder('utf-8', { fatal: true }).decode(value));
+      } catch {
+        console.log(value.toString('hex'));
+      }
+      return 0;
     }
-    await cache.set(key, value, ttlSecs);
-    console.log('stored');
-    return 0;
-  }
 
-  if (command === 'get') {
-    requireArgumentCount(args, 1, command);
-    const value = await cache.get(args[0]);
-    if (value === null) {
-      console.log('not found');
-      return 1;
+    if (command === 'delete') {
+      requireArgumentCount(args, 1, command);
+      console.log(await cache.delete(args[0]) ? 'deleted' : 'not found');
+      return 0;
     }
-    try {
-      console.log(new TextDecoder('utf-8', { fatal: true }).decode(value));
-    } catch {
-      console.log(value.toString('hex'));
-    }
-    return 0;
-  }
 
-  if (command === 'delete') {
-    requireArgumentCount(args, 1, command);
-    console.log(await cache.delete(args[0]) ? 'deleted' : 'not found');
-    return 0;
+    throw new Error(`unknown command: ${command}`);
+  } finally {
+    await cache.close();
   }
-
-  throw new Error(`unknown command: ${command}`);
 }
 
 function requireNoArguments(args) {
