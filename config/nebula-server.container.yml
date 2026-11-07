@@ -1,18 +1,22 @@
-listen_addr: "0.0.0.0:7001"
+listen_addr: "127.0.0.1:7001"
 shutdown_timeout_secs: 30
+log_level: debug
 
 admin_console:
   enabled: true
   password: admin
   listen_addr: "127.0.0.1:7002"
+  metrics_dashboard: true
 
 tls:
-  enabled: true
-  certificate: ./data/tls/server.pem
-  private_key: ./data/tls/server-key.pem
+  enabled: false
 
 persistence:
   mode: snapshot
   snapshot_dir: ./data/snapshots
   snapshot_interval_secs: 60
   snapshot_retention: 3
+
+metrics:
+  enabled: true
+  listen_addr: "127.0.0.1:7003"
