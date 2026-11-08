@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="dark">
   <title>NebulaCache · Admin</title>
   <style>
     :root {
@@ -1596,6 +1596,498 @@
 
       .login {
         padding: 26px 22px
+      }
+    }
+
+    :root {
+      color-scheme: dark;
+      color: #f8fafc;
+      background: #080d19;
+      --primary: #6366f1;
+      --cyan: #38bdf8;
+      --indigo: #818cf8;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --canvas: #080d19;
+      --surface: #111827;
+      --elevated: #1e293b;
+      --line: #273449;
+      --text: #f8fafc;
+      --secondary: #94a3b8;
+      --muted: #64748b;
+      --accent: var(--primary);
+      --mint: var(--success)
+    }
+
+    html {
+      color-scheme: dark;
+      scroll-behavior: smooth
+    }
+
+    body {
+      color: var(--text);
+      background: var(--canvas)
+    }
+
+    .rail {
+      border-right-color: var(--line);
+      color: var(--text);
+      background: #0b1220
+    }
+
+    .brand {
+      color: var(--text)
+    }
+
+    .mark {
+      border-color: #35436a;
+      color: #c7d2fe;
+      background: #171d38
+    }
+
+    .rail-caption {
+      color: var(--muted)
+    }
+
+    .rail-nav a {
+      color: var(--secondary)
+    }
+
+    .rail-nav a:hover,
+    .rail-nav a:focus-visible,
+    .rail-nav a[aria-current="location"] {
+      border-color: #303d58;
+      color: var(--text);
+      background: #182238;
+      box-shadow: inset 2px 0 var(--primary)
+    }
+
+    .nav-mark {
+      color: #73829a
+    }
+
+    .rail-meta {
+      border-top-color: var(--line);
+      color: var(--secondary)
+    }
+
+    .rail-meta-mark {
+      border-color: var(--cyan)
+    }
+
+    .top {
+      border-bottom-color: var(--line);
+      background: #0c1422
+    }
+
+    .top-context,
+    .context-divider {
+      color: var(--secondary)
+    }
+
+    .top-context span:first-child {
+      color: var(--cyan)
+    }
+
+    .status {
+      color: #a7f3d0
+    }
+
+    .dot {
+      background: var(--success);
+      box-shadow: 0 0 0 3px #22c55e1c
+    }
+
+    #dashboard {
+      max-width: 1600px
+    }
+
+    .eyebrow {
+      color: var(--indigo)
+    }
+
+    .intro h1 {
+      color: var(--text);
+      font-size: clamp(26px, 3vw, 30px)
+    }
+
+    .intro p {
+      color: var(--secondary)
+    }
+
+    .metrics {
+      border-bottom-color: var(--line)
+    }
+
+    .metrics .metric-label,
+    .metric-label {
+      color: var(--secondary)
+    }
+
+    .metrics .metric-value {
+      color: var(--text)
+    }
+
+    .metrics .metric-value.session-state {
+      color: var(--success)
+    }
+
+    .metric,
+    .panel {
+      border-color: var(--line);
+      color: var(--text);
+      background: var(--surface);
+      box-shadow: 0 1px 2px #0003
+    }
+
+    .runtime-metrics .metric {
+      border-radius: 6px;
+      background: var(--surface)
+    }
+
+    .runtime-metrics .metric:nth-child(-n+4) {
+      border-top-color: var(--primary)
+    }
+
+    .runtime-metrics .metric:nth-child(n+5) {
+      background: #0e1726
+    }
+
+    .metric-value {
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 20px;
+      font-weight: 620;
+      letter-spacing: -.025em;
+      font-variant-numeric: tabular-nums
+    }
+
+    .persistence-summary {
+      color: var(--secondary);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px
+    }
+
+    .panel-head {
+      border-bottom-color: var(--line)
+    }
+
+    .panel-title {
+      color: var(--text);
+      font-size: 18px;
+      font-weight: 620
+    }
+
+    .panel-sub {
+      color: var(--secondary)
+    }
+
+    .chart-meta,
+    .chart-x-axis,
+    .chart-y-axis {
+      color: var(--muted)
+    }
+
+    .chart-grid line {
+      stroke: #273449
+    }
+
+    .chart polyline#request-line {
+      stroke: var(--cyan)
+    }
+
+    .chart polyline#error-line {
+      stroke: var(--danger)
+    }
+
+    .legend-request {
+      background: var(--cyan)
+    }
+
+    .legend-error {
+      background: var(--danger)
+    }
+
+    .chart-legend strong {
+      color: var(--text)
+    }
+
+    .health-row {
+      border-bottom-color: #202c3e;
+      color: #cbd5e1
+    }
+
+    .health-ok {
+      color: var(--success)
+    }
+
+    .health-bad,
+    .unavailable,
+    .error {
+      color: #f87171
+    }
+
+    .unavailable {
+      background: #2a1b23
+    }
+
+    .runtime-metrics.unavailable {
+      background: transparent
+    }
+
+    #recent-failures {
+      border-top-color: var(--line)
+    }
+
+    #recent-failures .panel-sub {
+      color: var(--secondary)
+    }
+
+    .button {
+      border-color: #3a4960;
+      border-radius: 5px;
+      color: #dbe4f0;
+      background: #172235
+    }
+
+    .button:hover {
+      border-color: #536684;
+      color: var(--text);
+      background: #202e44
+    }
+
+    .button.primary {
+      border-color: var(--primary);
+      color: #fff;
+      background: var(--primary)
+    }
+
+    .button.primary:hover {
+      border-color: #7779fa;
+      background: #5558de
+    }
+
+    .button.danger {
+      border-color: #71333d;
+      color: #fca5a5;
+      background: #211821
+    }
+
+    .button.danger:hover {
+      border-color: var(--danger);
+      background: #321d25
+    }
+
+    .button:disabled,
+    .button:disabled:hover {
+      border-color: var(--line);
+      color: var(--muted);
+      background: #111827;
+      opacity: .55;
+      cursor: not-allowed
+    }
+
+    .list-controls {
+      border-bottom-color: var(--line)
+    }
+
+    .search-input,
+    .field input,
+    .field textarea {
+      border-color: #344258;
+      border-radius: 5px;
+      color: var(--text);
+      background: #0a1220
+    }
+
+    .search-input::placeholder,
+    .field input::placeholder,
+    .field textarea::placeholder {
+      color: #718096
+    }
+
+    .search-input:focus,
+    .field input:focus,
+    .field textarea:focus,
+    .search-input:focus-visible,
+    .field input:focus-visible,
+    .field textarea:focus-visible {
+      border-color: var(--indigo);
+      box-shadow: 0 0 0 3px #818cf826
+    }
+
+    button:focus-visible,
+    a:focus-visible,
+    input:focus-visible,
+    textarea:focus-visible,
+    .table-wrap:focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 2px
+    }
+
+    .result-count,
+    .pagination-status {
+      color: var(--secondary)
+    }
+
+    .table-wrap {
+      box-shadow: inset -12px 0 12px -14px #000
+    }
+
+    th {
+      border-bottom: 1px solid var(--line);
+      color: var(--secondary);
+      background: #172235
+    }
+
+    th.actions-heading {
+      border-left-color: var(--line);
+      box-shadow: -8px 0 12px -12px #000
+    }
+
+    td {
+      border-top-color: #202c3e;
+      color: #cbd5e1
+    }
+
+    tbody tr:hover {
+      background: #ffffff08
+    }
+
+    .key-cell {
+      color: #e2e8f0
+    }
+
+    .value-cell,
+    .ttl {
+      color: var(--secondary)
+    }
+
+    .row-actions {
+      border-left-color: var(--line);
+      background: var(--surface);
+      box-shadow: -8px 0 12px -12px #000
+    }
+
+    tbody tr:hover .row-actions {
+      background: #172235
+    }
+
+    .icon-button {
+      border-radius: 4px;
+      color: var(--secondary)
+    }
+
+    .icon-button:hover {
+      color: var(--cyan);
+      background: #16283a
+    }
+
+    .icon-button-danger {
+      color: #fca5a5
+    }
+
+    .icon-button-danger:hover {
+      color: #fecaca;
+      background: #321d25
+    }
+
+    .empty {
+      color: var(--secondary)
+    }
+
+    .empty strong {
+      color: var(--text)
+    }
+
+    .pagination {
+      border-top-color: var(--line)
+    }
+
+    .table-scroll-note {
+      border-bottom-color: var(--line);
+      color: var(--secondary);
+      background: #0e1726
+    }
+
+    .login-wrap {
+      color: var(--text);
+      background: var(--canvas)
+    }
+
+    .login {
+      border-top-color: var(--primary);
+      background: var(--surface);
+      box-shadow: 0 18px 54px #0006
+    }
+
+    .login-brand {
+      border-bottom-color: var(--line)
+    }
+
+    .login-brand .mark {
+      border-color: #35436a;
+      background: #171d38
+    }
+
+    .login-brand strong,
+    .login h1,
+    .dialog-head h2 {
+      color: var(--text)
+    }
+
+    .login-brand span,
+    .login p {
+      color: var(--secondary)
+    }
+
+    .login .eyebrow {
+      color: var(--indigo)
+    }
+
+    .field label {
+      color: #cbd5e1
+    }
+
+    .error {
+      color: #f87171
+    }
+
+    .overlay {
+      background: #020617c9;
+      backdrop-filter: blur(3px)
+    }
+
+    .dialog {
+      border-radius: 7px;
+      background: var(--surface);
+      box-shadow: 0 18px 54px #0009
+    }
+
+    .toast {
+      border-color: #3a4960;
+      color: var(--text);
+      background: #1e293b;
+      box-shadow: 0 8px 24px #0006
+    }
+
+    @media (max-width: 900px) {
+      .rail {
+        border-bottom-color: var(--line);
+        background: #0b1220
+      }
+
+      .table-scroll-note {
+        border-bottom-color: var(--line);
+        color: var(--secondary);
+        background: #0e1726
+      }
+    }
+
+    @media (max-width: 650px) {
+      .metrics {
+        border-bottom-color: var(--line)
       }
     }
   </style>
