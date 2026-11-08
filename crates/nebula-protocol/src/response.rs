@@ -49,4 +49,10 @@ impl Response {
             value: b"invalid argument".to_vec(),
         }
     }
+    pub fn internal_error(message: &[u8]) -> Self {
+        Self {
+            status: Status::InternalError,
+            value: message.to_vec(),
+        }
+    }
 }

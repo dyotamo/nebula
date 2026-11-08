@@ -4,7 +4,7 @@ use nebula_protocol::{read_request_with_limits, write_response_with_limits, Fram
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
-    sync::{oneshot, watch},
+    sync::{oneshot, watch, Semaphore},
     task::JoinSet,
     time::{interval, MissedTickBehavior},
 };
@@ -17,10 +17,15 @@ use nebula_watchdog::WorkerHeartbeat;
 
 use crate::{handler, metrics::Metrics};
 
+pub(crate) struct ServerLimits {
+    pub frame: FrameLimits,
+    pub max_connections: usize,
+}
+
 pub(crate) async fn run(
     listener: TcpListener,
     store: Arc<CacheStore>,
-    limits: FrameLimits,
+    limits: ServerLimits,
     tls_acceptor: Option<TlsAcceptor>,
     mut lifecycle: watch::Receiver<ApplicationState>,
     heartbeat: WorkerHeartbeat,
@@ -29,7 +34,12 @@ pub(crate) async fn run(
 ) -> io::Result<()> {
     info!(address = %listener.local_addr()?, "NebulaCache node listening");
     let _ = started.send(());
+    let ServerLimits {
+        frame,
+        max_connections,
+    } = limits;
     let mut connections = JoinSet::new();
+    let connection_slots = Arc::new(Semaphore::new(max_connections));
     let mut heartbeat_interval = interval(Duration::from_secs(1));
     heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -60,6 +70,14 @@ pub(crate) async fn run(
                     drop(socket);
                     continue;
                 }
+                let connection_permit = match Arc::clone(&connection_slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        warn!(%peer, max_connections, "connection limit reached; rejecting client");
+                        drop(socket);
+                        continue;
+                    }
+                };
                 handler::log_connection(peer);
                 metrics.connection_opened();
                 let metrics = Arc::clone(&metrics);
@@ -67,17 +85,18 @@ pub(crate) async fn run(
                 let lifecycle = lifecycle.clone();
                 let tls_acceptor = tls_acceptor.clone();
                 connections.spawn(async move {
+                    let _connection_permit = connection_permit;
                     let _active_connection = ActiveConnection(metrics.clone());
                     if let Some(acceptor) = tls_acceptor {
                         match acceptor.accept(socket).await {
-                            Ok(stream) => serve_connection(stream, store, limits, lifecycle, metrics).await,
+                            Ok(stream) => serve_connection(stream, store, frame, lifecycle, metrics).await,
                             Err(err) => {
                                 warn!(error = %err, "TLS handshake failed");
                                 Ok(())
                             }
                         }
                     } else {
-                        serve_connection(socket, store, limits, lifecycle, metrics).await
+                        serve_connection(socket, store, frame, lifecycle, metrics).await
                     }
                 });
             }
@@ -167,7 +186,7 @@ mod tests {
 
     use crate::metrics::Metrics;
 
-    use super::run;
+    use super::{run, ServerLimits};
 
     #[tokio::test]
     async fn tcp_requests_are_not_processed_until_application_is_ready() {
@@ -186,7 +205,10 @@ mod tests {
         let server = tokio::spawn(run(
             listener,
             Arc::clone(&store),
-            Default::default(),
+            ServerLimits {
+                frame: Default::default(),
+                max_connections: 1,
+            },
             None,
             lifecycle.subscribe(),
             heartbeat,
@@ -213,6 +235,25 @@ mod tests {
         let response = read_response(&mut client).await.unwrap();
         assert_eq!(response.status, Status::Ok);
         assert_eq!(store.get(b"key"), Some(b"value".to_vec()));
+
+        let mut rejected = tokio::net::TcpStream::connect(address).await.unwrap();
+        let _ = write_request(
+            &mut rejected,
+            &Request {
+                opcode: Opcode::Ping,
+                key: Vec::new(),
+                value: Vec::new(),
+                ttl_secs: 0,
+            },
+        )
+        .await;
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            read_response(&mut rejected)
+        )
+        .await
+        .unwrap()
+        .is_err());
 
         lifecycle.transition(ApplicationState::Stopping).unwrap();
         server.await.unwrap().unwrap();

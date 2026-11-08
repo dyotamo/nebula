@@ -38,8 +38,11 @@ async fn handle_observed(
             if request.key.is_empty() {
                 Response::invalid_argument()
             } else {
-                store.set(request.key, request.value, request.ttl_secs);
-                Response::empty_ok()
+                if store.set(request.key, request.value, request.ttl_secs) {
+                    Response::empty_ok()
+                } else {
+                    Response::internal_error(b"cache size limit exceeded")
+                }
             }
         }
 

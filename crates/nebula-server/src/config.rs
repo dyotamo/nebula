@@ -1,6 +1,7 @@
 use std::{error::Error, io, net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
+use nebula_core::EvictionPolicy;
 use nebula_protocol::FrameLimits;
 use serde::Deserialize;
 
@@ -13,7 +14,16 @@ pub struct Config {
     pub shutdown_timeout_secs: u64,
     pub persistence: PersistenceOptions,
     pub metrics: MetricsOptions,
+    pub resource_limits: ResourceLimitsOptions,
     pub log_level: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourceLimitsOptions {
+    pub max_cache_size_bytes: usize,
+    pub max_connections: usize,
+    pub eviction_policy: EvictionPolicy,
 }
 
 #[derive(Clone, Deserialize)]
@@ -66,7 +76,18 @@ impl Default for Config {
             shutdown_timeout_secs: 30,
             persistence: PersistenceOptions::default(),
             metrics: MetricsOptions::default(),
+            resource_limits: ResourceLimitsOptions::default(),
             log_level: "info".to_owned(),
+        }
+    }
+}
+
+impl Default for ResourceLimitsOptions {
+    fn default() -> Self {
+        Self {
+            max_cache_size_bytes: 64 * 1024 * 1024,
+            max_connections: 1_024,
+            eviction_policy: EvictionPolicy::Lru,
         }
     }
 }
@@ -131,6 +152,14 @@ impl Config {
         } else {
             Self::default()
         };
+
+        if config.resource_limits.max_connections > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "resource_limits.max_connections exceeds the supported maximum",
+            )
+            .into());
+        }
 
         if config.admin_console.enabled
             && config
@@ -282,6 +311,11 @@ fn coerce_environment_values(value: &mut toml::Value) -> Result<(), Box<dyn Erro
         coerce_config_field::<usize>(persistence, "snapshot_retention")?;
     }
 
+    if let Some(toml::Value::Table(resource_limits)) = values.get_mut("resource_limits") {
+        coerce_config_field::<usize>(resource_limits, "max_cache_size_bytes")?;
+        coerce_config_field::<usize>(resource_limits, "max_connections")?;
+    }
+
     Ok(())
 }
 
@@ -318,7 +352,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Args, Config, PersistenceMode};
+    use super::{Args, Config, EvictionPolicy, PersistenceMode};
 
     #[test]
     fn defaults_are_applied_without_a_config_file() {
@@ -338,6 +372,12 @@ mod tests {
         assert_eq!(config.persistence.mode, PersistenceMode::Volatile);
         assert_eq!(config.persistence.snapshot_interval_secs, 60);
         assert_eq!(config.persistence.snapshot_retention, 3);
+        assert_eq!(
+            config.resource_limits.max_cache_size_bytes,
+            64 * 1024 * 1024
+        );
+        assert_eq!(config.resource_limits.max_connections, 1_024);
+        assert_eq!(config.resource_limits.eviction_policy, EvictionPolicy::Lru);
         let frame_limits = config.frame_limits();
         assert_eq!(frame_limits.max_key_len, 1_024);
         assert_eq!(frame_limits.max_value_len, 8 * 1024 * 1024);
@@ -364,6 +404,11 @@ mode = "snapshot"
 snapshot_dir = "/tmp/nebula-snapshots"
 snapshot_interval_secs = 5
 snapshot_retention = 4
+
+[resource_limits]
+max_cache_size_bytes = 4096
+max_connections = 12
+eviction_policy = "lfu"
 "#,
         )
         .unwrap();
@@ -392,6 +437,9 @@ snapshot_retention = 4
         );
         assert_eq!(config.persistence.snapshot_interval_secs, 5);
         assert_eq!(config.persistence.snapshot_retention, 4);
+        assert_eq!(config.resource_limits.max_cache_size_bytes, 4096);
+        assert_eq!(config.resource_limits.max_connections, 12);
+        assert_eq!(config.resource_limits.eviction_policy, EvictionPolicy::Lfu);
     }
 
     #[test]

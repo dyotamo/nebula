@@ -41,6 +41,10 @@ impl Application {
         let health = HealthManager::new(lifecycle.clone(), config.admin_console.enabled);
         let watchdog = Watchdog::new(health.clone());
         let metrics = Metrics::new();
+        let store = Arc::new(CacheStore::with_limits(
+            config.resource_limits.max_cache_size_bytes,
+            config.resource_limits.eviction_policy,
+        ));
         let persistence = if config.persistence.mode == PersistenceMode::Snapshot {
             health.report(
                 HealthComponent::Persistence("snapshots".to_owned()),
@@ -59,7 +63,7 @@ impl Application {
         Self {
             shutdown_timeout: Duration::from_secs(config.shutdown_timeout_secs),
             config,
-            store: std::sync::Arc::new(CacheStore::new()),
+            store,
             lifecycle,
             health,
             watchdog,
@@ -151,7 +155,11 @@ impl Application {
             None
         };
 
-        let limits = self.config.frame_limits();
+        let frame_limits = self.config.frame_limits();
+        let limits = server::ServerLimits {
+            frame: frame_limits,
+            max_connections: self.config.resource_limits.max_connections,
+        };
         let (tcp_started_tx, tcp_started_rx) = oneshot::channel();
         let tcp_store = self.store.clone();
         let tcp_lifecycle = self.lifecycle.subscribe();
@@ -222,7 +230,7 @@ impl Application {
                 let result = admin_console::run(
                     listener,
                     store,
-                    limits,
+                    frame_limits,
                     password,
                     admin_lifecycle,
                     admin_heartbeat,
@@ -603,6 +611,7 @@ mod tests {
                 metrics.enabled = false;
                 metrics
             },
+            resource_limits: Default::default(),
             log_level: "info".to_owned(),
         }
     }
