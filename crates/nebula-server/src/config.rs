@@ -1,4 +1,4 @@
-use std::{error::Error, fs::File, io, net::SocketAddr, path::PathBuf};
+use std::{error::Error, io, net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
 use nebula_protocol::FrameLimits;
@@ -119,13 +119,14 @@ impl Config {
 
     fn load(args: Args) -> Result<Self, Box<dyn Error>> {
         let config = if let Some(path) = args.config {
-            match serde_yaml::from_reader::<_, Option<serde_yaml::Value>>(File::open(path)?)? {
-                Some(mut value) => {
-                    expand_environment_variables(&mut value)?;
-                    coerce_environment_values(&mut value)?;
-                    serde_yaml::from_value(value)?
-                }
-                None => Self::default(),
+            let contents = std::fs::read_to_string(path)?;
+            if contents.trim().is_empty() {
+                Self::default()
+            } else {
+                let mut value = toml::from_str::<toml::Value>(&contents)?;
+                expand_environment_variables(&mut value)?;
+                coerce_environment_values(&mut value)?;
+                value.try_into()?
             }
         } else {
             Self::default()
@@ -175,16 +176,16 @@ impl Config {
     }
 }
 
-fn expand_environment_variables(value: &mut serde_yaml::Value) -> Result<(), Box<dyn Error>> {
+fn expand_environment_variables(value: &mut toml::Value) -> Result<(), Box<dyn Error>> {
     match value {
-        serde_yaml::Value::String(text) => *text = expand_environment_string(text)?,
-        serde_yaml::Value::Sequence(values) => {
+        toml::Value::String(text) => *text = expand_environment_string(text)?,
+        toml::Value::Array(values) => {
             for value in values {
                 expand_environment_variables(value)?;
             }
         }
-        serde_yaml::Value::Mapping(values) => {
-            for value in values.values_mut() {
+        toml::Value::Table(values) => {
+            for (_, value) in values.iter_mut() {
                 expand_environment_variables(value)?;
             }
         }
@@ -256,31 +257,27 @@ fn valid_environment_name(name: &str) -> bool {
         && characters.all(|character| matches!(character, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'))
 }
 
-fn coerce_environment_values(value: &mut serde_yaml::Value) -> Result<(), Box<dyn Error>> {
-    let serde_yaml::Value::Mapping(values) = value else {
+fn coerce_environment_values(value: &mut toml::Value) -> Result<(), Box<dyn Error>> {
+    let toml::Value::Table(values) = value else {
         return Ok(());
     };
 
     coerce_config_field::<u64>(values, "shutdown_timeout_secs")?;
 
-    let tls_key = serde_yaml::Value::String("tls".to_owned());
-    if let Some(serde_yaml::Value::Mapping(tls)) = values.get_mut(&tls_key) {
+    if let Some(toml::Value::Table(tls)) = values.get_mut("tls") {
         coerce_config_field::<bool>(tls, "enabled")?;
     }
 
-    let admin_console_key = serde_yaml::Value::String("admin_console".to_owned());
-    if let Some(serde_yaml::Value::Mapping(admin_console)) = values.get_mut(&admin_console_key) {
+    if let Some(toml::Value::Table(admin_console)) = values.get_mut("admin_console") {
         coerce_config_field::<bool>(admin_console, "enabled")?;
         coerce_config_field::<bool>(admin_console, "metrics_dashboard")?;
     }
 
-    let metrics_key = serde_yaml::Value::String("metrics".to_owned());
-    if let Some(serde_yaml::Value::Mapping(metrics)) = values.get_mut(&metrics_key) {
+    if let Some(toml::Value::Table(metrics)) = values.get_mut("metrics") {
         coerce_config_field::<bool>(metrics, "enabled")?;
     }
 
-    let persistence_key = serde_yaml::Value::String("persistence".to_owned());
-    if let Some(serde_yaml::Value::Mapping(persistence)) = values.get_mut(&persistence_key) {
+    if let Some(toml::Value::Table(persistence)) = values.get_mut("persistence") {
         coerce_config_field::<u64>(persistence, "snapshot_interval_secs")?;
         coerce_config_field::<usize>(persistence, "snapshot_retention")?;
     }
@@ -288,22 +285,18 @@ fn coerce_environment_values(value: &mut serde_yaml::Value) -> Result<(), Box<dy
     Ok(())
 }
 
-fn coerce_config_field<T>(
-    values: &mut serde_yaml::Mapping,
-    name: &str,
-) -> Result<(), Box<dyn Error>>
+fn coerce_config_field<T>(values: &mut toml::Table, name: &str) -> Result<(), Box<dyn Error>>
 where
     T: std::str::FromStr + serde::Serialize,
 {
-    let key = serde_yaml::Value::String(name.to_owned());
-    if let Some(serde_yaml::Value::String(text)) = values.get(&key) {
+    if let Some(toml::Value::String(text)) = values.get(name) {
         let parsed = text.parse::<T>().map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("invalid value for config field {name}"),
             )
         })?;
-        values.insert(key, serde_yaml::to_value(parsed)?);
+        values.insert(name.to_owned(), toml::Value::try_from(parsed)?);
     }
 
     Ok(())
@@ -351,9 +344,27 @@ mod tests {
     }
 
     #[test]
-    fn loads_all_server_settings_from_yaml() {
-        let config: Config = serde_yaml::from_str(
-            "listen_addr: 127.0.0.1:7003\nshutdown_timeout_secs: 7\nadmin_console:\n  enabled: true\n  password: secret\n  listen_addr: 127.0.0.1:7004\ntls:\n  enabled: true\n  certificate: /etc/nebula/server-cert.pem\n  private_key: /etc/nebula/server-key.pem\npersistence:\n  mode: snapshot\n  snapshot_dir: /tmp/nebula-snapshots\n  snapshot_interval_secs: 5\n  snapshot_retention: 4\n",
+    fn loads_all_server_settings_from_toml() {
+        let config: Config = toml::from_str(
+            r#"listen_addr = "127.0.0.1:7003"
+shutdown_timeout_secs = 7
+
+[admin_console]
+enabled = true
+password = "secret"
+listen_addr = "127.0.0.1:7004"
+
+[tls]
+enabled = true
+certificate = "/etc/nebula/server-cert.pem"
+private_key = "/etc/nebula/server-key.pem"
+
+[persistence]
+mode = "snapshot"
+snapshot_dir = "/tmp/nebula-snapshots"
+snapshot_interval_secs = 5
+snapshot_retention = 4
+"#,
         )
         .unwrap();
 
@@ -389,8 +400,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("nebula-tls-config-{unique}.yml"));
-        fs::write(&path, "tls:\n  enabled: true\n").unwrap();
+        let path = std::env::temp_dir().join(format!("nebula-tls-config-{unique}.toml"));
+        fs::write(&path, "[tls]\nenabled = true\n").unwrap();
 
         let result = Config::load(Args {
             config: Some(path.clone()),
@@ -413,13 +424,13 @@ mod tests {
             .as_nanos();
         let secret_name = format!("NEBULA_TEST_SECRET_{unique}");
         let enabled_name = format!("NEBULA_TEST_ENABLED_{unique}");
-        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
+        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
         let secret = "p@ss: value #1";
         std::env::set_var(&secret_name, secret);
         fs::write(
             &path,
             format!(
-                "admin_console:\n  enabled: \"${{{enabled_name}:-true}}\"\n  password: \"${{{secret_name}}}\"\ntls:\n  enabled: \"${{{enabled_name}:-true}}\"\n  certificate: /tmp/server-cert.pem\n  private_key: /tmp/server-key.pem\npersistence:\n  mode: snapshot\n  snapshot_interval_secs: \"${{MISSING_INTERVAL_{unique}:-7}}\"\n"
+                "[admin_console]\nenabled = \"${{{enabled_name}:-true}}\"\npassword = \"${{{secret_name}}}\"\n\n[tls]\nenabled = \"${{{enabled_name}:-true}}\"\ncertificate = \"/tmp/server-cert.pem\"\nprivate_key = \"/tmp/server-key.pem\"\n\n[persistence]\nmode = \"snapshot\"\nsnapshot_interval_secs = \"${{MISSING_INTERVAL_{unique}:-7}}\"\n"
             ),
         )
         .unwrap();
@@ -444,10 +455,10 @@ mod tests {
             .unwrap()
             .as_nanos();
         let name = format!("NEBULA_MISSING_{unique}");
-        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
+        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
         fs::write(
             &path,
-            format!("admin_console:\n  password: \"${{{name}}}\"\n"),
+            format!("[admin_console]\npassword = \"${{{name}}}\"\n"),
         )
         .unwrap();
 
@@ -462,13 +473,13 @@ mod tests {
     }
 
     #[test]
-    fn loads_yaml_file_from_config_argument() {
+    fn loads_toml_file_from_config_argument() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
-        fs::write(&path, "listen_addr: 127.0.0.1:7003\n").unwrap();
+        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
+        fs::write(&path, "listen_addr = \"127.0.0.1:7003\"\n").unwrap();
 
         let config =
             Config::load(Args::try_parse_from(["nebula-server", path.to_str().unwrap()]).unwrap())
@@ -485,19 +496,19 @@ mod tests {
     #[test]
     fn accepts_no_config_argument_or_one_path_and_rejects_extra_arguments() {
         assert!(Args::try_parse_from(["nebula-server"]).is_ok());
-        assert!(Args::try_parse_from(["nebula-server", "config.yml"]).is_ok());
-        assert!(Args::try_parse_from(["nebula-server", "config.yml", "extra.yml"]).is_err());
-        assert!(Args::try_parse_from(["nebula-server", "--config", "config.yml"]).is_err());
+        assert!(Args::try_parse_from(["nebula-server", "config.toml"]).is_ok());
+        assert!(Args::try_parse_from(["nebula-server", "config.toml", "extra.toml"]).is_err());
+        assert!(Args::try_parse_from(["nebula-server", "--config", "config.toml"]).is_err());
     }
 
     #[test]
-    fn rejects_malformed_yaml() {
+    fn rejects_malformed_toml() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
-        fs::write(&path, "listen_addr: [unterminated\n").unwrap();
+        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
+        fs::write(&path, "listen_addr = [\n").unwrap();
 
         assert!(Config::load(Args {
             config: Some(path.clone())
@@ -508,8 +519,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_yaml_fields() {
-        assert!(serde_yaml::from_str::<Config>("unknown_setting: true\n").is_err());
+    fn rejects_unknown_toml_fields() {
+        assert!(toml::from_str::<Config>("unknown_setting = true\n").is_err());
     }
 
     #[test]
@@ -518,8 +529,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.yml"));
-        fs::write(&path, "admin_console:\n  enabled: true\n").unwrap();
+        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
+        fs::write(&path, "[admin_console]\nenabled = true\n").unwrap();
 
         let error = Config::load(Args {
             config: Some(path.clone()),
@@ -535,7 +546,7 @@ mod tests {
 
     #[test]
     fn rejects_protocol_limit_overrides() {
-        assert!(serde_yaml::from_str::<Config>("max_key_len: 2048\n").is_err());
-        assert!(serde_yaml::from_str::<Config>("max_value_len: 4096\n").is_err());
+        assert!(toml::from_str::<Config>("max_key_len = 2048\n").is_err());
+        assert!(toml::from_str::<Config>("max_value_len = 4096\n").is_err());
     }
 }

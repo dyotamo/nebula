@@ -1,9 +1,7 @@
 services:
-  nebula-1:
+  nebulad:
     build: .
     ports: ["7001:7001"]
-    volumes:
-      - ./data/tls:/data/tls:ro
     healthcheck:
       test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/7001'"]
       interval: 5s
