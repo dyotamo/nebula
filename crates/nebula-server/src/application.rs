@@ -20,7 +20,7 @@ use crate::{
     config::{Config, PersistenceMode, TlsOptions},
     metrics::{self, Metrics},
     persistence::PersistenceManager,
-    server, systemd,
+    server, systemd, ttl_cleanup,
 };
 
 pub struct Application {
@@ -104,6 +104,18 @@ impl Application {
                 "application startup can only be run once",
             )
             .into());
+        }
+
+        if self.config.ttl_cleanup_interval_secs == 0 {
+            return Err(self
+                .fail_startup(
+                    "configure TTL cleanup",
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TTL cleanup interval must be greater than zero",
+                    ),
+                )
+                .await);
         }
 
         if self.config.persistence.mode == PersistenceMode::Snapshot
@@ -345,6 +357,13 @@ impl Application {
                 Ok(())
             });
         }
+        let cleanup_store = Arc::clone(&self.store);
+        let cleanup_lifecycle = self.lifecycle.subscribe();
+        let cleanup_interval = Duration::from_secs(self.config.ttl_cleanup_interval_secs);
+        self.services.spawn(async move {
+            ttl_cleanup::run(cleanup_store, cleanup_interval, cleanup_lifecycle).await;
+            Ok(())
+        });
         let watchdog = self.watchdog.clone();
         let watchdog_lifecycle = self.lifecycle.subscribe();
         self.services.spawn(async move {
@@ -605,6 +624,7 @@ mod tests {
             admin_console: Default::default(),
             tls: Default::default(),
             shutdown_timeout_secs: 1,
+            ttl_cleanup_interval_secs: 3_600,
             persistence: Default::default(),
             metrics: {
                 let mut metrics = crate::config::MetricsOptions::default();

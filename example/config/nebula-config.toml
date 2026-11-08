@@ -1,6 +1,7 @@
 listen_addr = "127.0.0.1:7001"
 log_level = "debug"
 shutdown_timeout_secs = 30
+ttl_cleanup_interval_secs = 10
 
 [admin_console]
 enabled = true
@@ -9,7 +10,7 @@ metrics_dashboard = true
 password = "${NEBULA_ADMIN_PASSWORD:-admin}"
 
 [tls]
-enabled = true
+enabled = false
 certificate = "${NEBULA_TLS_CERTIFICATE:-./example/config/tls/server.pem}"
 private_key = "${NEBULA_TLS_PRIVATE_KEY:-./example/config/tls/server-key.pem}"
 

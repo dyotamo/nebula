@@ -12,6 +12,7 @@ pub struct Config {
     pub admin_console: AdminConsoleOptions,
     pub tls: TlsOptions,
     pub shutdown_timeout_secs: u64,
+    pub ttl_cleanup_interval_secs: u64,
     pub persistence: PersistenceOptions,
     pub metrics: MetricsOptions,
     pub resource_limits: ResourceLimitsOptions,
@@ -74,6 +75,7 @@ impl Default for Config {
             admin_console: AdminConsoleOptions::default(),
             tls: TlsOptions::default(),
             shutdown_timeout_secs: 30,
+            ttl_cleanup_interval_secs: 3_600,
             persistence: PersistenceOptions::default(),
             metrics: MetricsOptions::default(),
             resource_limits: ResourceLimitsOptions::default(),
@@ -185,6 +187,14 @@ impl Config {
             .into());
         }
 
+        if config.ttl_cleanup_interval_secs == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ttl_cleanup_interval_secs must be greater than zero",
+            )
+            .into());
+        }
+
         if config.persistence.mode == PersistenceMode::Snapshot
             && (config.persistence.snapshot_interval_secs == 0
                 || config.persistence.snapshot_retention == 0
@@ -292,6 +302,7 @@ fn coerce_environment_values(value: &mut toml::Value) -> Result<(), Box<dyn Erro
     };
 
     coerce_config_field::<u64>(values, "shutdown_timeout_secs")?;
+    coerce_config_field::<u64>(values, "ttl_cleanup_interval_secs")?;
 
     if let Some(toml::Value::Table(tls)) = values.get_mut("tls") {
         coerce_config_field::<bool>(tls, "enabled")?;
@@ -369,6 +380,7 @@ mod tests {
         assert_eq!(config.tls.certificate, None);
         assert_eq!(config.tls.private_key, None);
         assert_eq!(config.shutdown_timeout_secs, 30);
+        assert_eq!(config.ttl_cleanup_interval_secs, 3_600);
         assert_eq!(config.persistence.mode, PersistenceMode::Volatile);
         assert_eq!(config.persistence.snapshot_interval_secs, 60);
         assert_eq!(config.persistence.snapshot_retention, 3);
@@ -388,6 +400,7 @@ mod tests {
         let config: Config = toml::from_str(
             r#"listen_addr = "127.0.0.1:7003"
 shutdown_timeout_secs = 7
+ttl_cleanup_interval_secs = 120
 
 [admin_console]
 enabled = true
@@ -430,6 +443,7 @@ eviction_policy = "lfu"
             Some(std::path::PathBuf::from("/etc/nebula/server-key.pem"))
         );
         assert_eq!(config.shutdown_timeout_secs, 7);
+        assert_eq!(config.ttl_cleanup_interval_secs, 120);
         assert_eq!(config.persistence.mode, PersistenceMode::Snapshot);
         assert_eq!(
             config.persistence.snapshot_dir,
@@ -440,6 +454,27 @@ eviction_policy = "lfu"
         assert_eq!(config.resource_limits.max_cache_size_bytes, 4096);
         assert_eq!(config.resource_limits.max_connections, 12);
         assert_eq!(config.resource_limits.eviction_policy, EvictionPolicy::Lfu);
+    }
+
+    #[test]
+    fn rejects_zero_ttl_cleanup_interval() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
+        fs::write(&path, "ttl_cleanup_interval_secs = 0\n").unwrap();
+
+        let error = Config::load(Args {
+            config: Some(path.clone()),
+        })
+        .err()
+        .unwrap();
+
+        fs::remove_file(path).unwrap();
+        assert!(error
+            .to_string()
+            .contains("ttl_cleanup_interval_secs must be greater than zero"));
     }
 
     #[test]

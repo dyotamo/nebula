@@ -4,7 +4,7 @@ use nebula_protocol::{read_request, write_response, Opcode, Response, Status};
 use tokio::{net::TcpListener, process::Command};
 
 async fn run_cli(address: &str, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nebula-client"))
+    Command::new(env!("CARGO_BIN_EXE_nebula"))
         .arg("--address")
         .arg(address)
         .args(args)

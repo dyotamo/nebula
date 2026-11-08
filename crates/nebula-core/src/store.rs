@@ -175,6 +175,18 @@ impl CacheStore {
         self.entries.is_empty()
     }
 
+    pub fn cleanup_expired(&self) -> usize {
+        let mut accounting = self
+            .accounting
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _snapshot_guard = self
+            .snapshot_gate
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        Self::remove_expired(&self.entries, &mut accounting)
+    }
+
     pub fn snapshot(&self) -> Vec<(Vec<u8>, Vec<u8>, Option<u64>)> {
         let mut accounting = self
             .accounting
@@ -304,7 +316,10 @@ impl CacheStore {
         removed
     }
 
-    fn remove_expired(entries: &DashMap<Vec<u8>, CacheEntry>, accounting: &mut CacheAccounting) {
+    fn remove_expired(
+        entries: &DashMap<Vec<u8>, CacheEntry>,
+        accounting: &mut CacheAccounting,
+    ) -> usize {
         let expired: Vec<_> = accounting
             .entries
             .keys()
@@ -315,9 +330,11 @@ impl CacheStore {
             })
             .cloned()
             .collect();
+        let removed = expired.len();
         for key in expired {
             Self::remove_key(entries, accounting, &key);
         }
+        removed
     }
 
     fn victim_key(accounting: &CacheAccounting, policy: EvictionPolicy) -> Option<Vec<u8>> {
@@ -352,6 +369,19 @@ mod tests {
         store.set(b"short".to_vec(), b"value".to_vec(), 1);
         thread::sleep(Duration::from_millis(1_100));
         assert_eq!(store.get(b"short"), None);
+    }
+
+    #[test]
+    fn cleanup_removes_expired_values_and_updates_memory_usage() {
+        let store = CacheStore::new();
+        store.set(b"short".to_vec(), b"value".to_vec(), 1);
+        store.set(b"persistent".to_vec(), b"value".to_vec(), 0);
+        thread::sleep(Duration::from_millis(1_100));
+
+        assert_eq!(store.cleanup_expired(), 1);
+        assert_eq!(store.get(b"short"), None);
+        assert_eq!(store.get(b"persistent"), Some(b"value".to_vec()));
+        assert_eq!(store.memory_usage(), b"persistent".len() + b"value".len());
     }
 
     #[test]
