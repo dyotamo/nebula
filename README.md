@@ -6,21 +6,26 @@ This README describes the system as it exists in this repository. It is not a di
 
 ## Contents
 
-- [Architecture and behavior](#architecture-and-behavior)
-- [Repository layout](#repository-layout)
-- [Requirements and checks](#requirements-and-checks)
-- [Run the server](#run-the-server)
-- [Configuration reference](#configuration-reference)
-- [TLS and client authentication](#tls-and-client-authentication)
-- [Admin console](#admin-console)
-- [Snapshots and recovery](#snapshots-and-recovery)
-- [Metrics and health](#metrics-and-health)
-- [Command-line client](#command-line-client)
-- [SDKs](#sdks)
-- [Docker](#docker)
-- [Wire protocol](#wire-protocol)
-- [Ambitions and future direction](#ambitions-and-future-direction)
-- [Operational and security boundaries](#operational-and-security-boundaries)
+- [NebulaCache](#nebulacache)
+  - [Contents](#contents)
+  - [Architecture and behavior](#architecture-and-behavior)
+  - [Repository layout](#repository-layout)
+  - [Requirements and checks](#requirements-and-checks)
+  - [Run the server](#run-the-server)
+  - [Configuration reference](#configuration-reference)
+  - [TLS and client authentication](#tls-and-client-authentication)
+  - [Admin console](#admin-console)
+  - [Snapshots and recovery](#snapshots-and-recovery)
+  - [Metrics and health](#metrics-and-health)
+  - [Command-line client](#command-line-client)
+  - [SDKs](#sdks)
+  - [Docker](#docker)
+  - [Wire protocol](#wire-protocol)
+    - [Request frame](#request-frame)
+    - [Response frame](#response-frame)
+    - [Opcodes and statuses](#opcodes-and-statuses)
+  - [Ambitions and future direction](#ambitions-and-future-direction)
+  - [Operational and security boundaries](#operational-and-security-boundaries)
 
 ## Architecture and behavior
 
@@ -56,15 +61,15 @@ flowchart TD
     click health "./crates/nebula-server/src/metrics.rs#L614"
 ```
 
-| Component | Responsibility |
-| --- | --- |
-| `nebula-protocol` | Protocol v1 request/response types, TCP framing, and frame limits. |
-| `nebula-core` | Concurrent key/value storage, TTL tracking, memory accounting, LRU/LFU/FIFO eviction, and snapshot interfaces. |
-| `nebula-auth` | SQLite-backed users, roles, bootstrap credential, API-token hashing/verification, expiry, and revocation. |
-| `nebula-health` | Application lifecycle and component health state. |
-| `nebula-watchdog` | Background-worker heartbeat monitoring. |
-| `nebula-server` | TCP/TLS listener, optional authentication, HTTP admin console, Prometheus exporter, persistence, and graceful lifecycle management. The package exposes the `nebulad` executable. |
-| `nebula-client` | Rust command-line client for cache operations and local auth database management. |
+| Component         | Responsibility                                                                                                                                                                    |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `nebula-protocol` | Protocol v1 request/response types, TCP framing, and frame limits.                                                                                                                |
+| `nebula-core`     | Concurrent key/value storage, TTL tracking, memory accounting, LRU/LFU/FIFO eviction, and snapshot interfaces.                                                                    |
+| `nebula-auth`     | SQLite-backed users, roles, bootstrap credential, API-token hashing/verification, expiry, and revocation.                                                                         |
+| `nebula-health`   | Application lifecycle and component health state.                                                                                                                                 |
+| `nebula-watchdog` | Background-worker heartbeat monitoring.                                                                                                                                           |
+| `nebula-server`   | TCP/TLS listener, optional authentication, HTTP admin console, Prometheus exporter, persistence, and graceful lifecycle management. The package exposes the `nebulad` executable. |
+| `nebula-client`   | Rust command-line client for cache operations and local auth database management.                                                                                                 |
 
 Each cache key and value is opaque bytes at the protocol level. TTL is an unsigned integer number of seconds: `0` means no expiration. Entries expire on reads and are also removed by the periodic cleanup worker. Keys are limited to 1,024 bytes and values to 8 MiB. By default, total key-plus-value memory is capped at 64 MiB; LRU eviction is used when needed. Cache capacity and connection counts can be configured.
 
@@ -324,47 +329,47 @@ Protocol version 1 is a framed binary protocol over TCP. TCP is a byte stream, s
 
 The fixed request header is 22 bytes, followed by the key bytes and then the value bytes:
 
-| Field | Size | Encoding |
-| --- | ---: | --- |
-| Magic | 4 bytes | ASCII `NEBU` |
-| Version | 1 byte | `u8`, currently `1` |
-| Opcode | 1 byte | `u8`, see opcode table |
-| Key length | 4 bytes | `u32`, big-endian |
-| Value length | 4 bytes | `u32`, big-endian |
-| TTL seconds | 8 bytes | `u64`, big-endian; `0` means no expiration |
-| Key | Declared key length | Opaque bytes |
-| Value | Declared value length | Opaque bytes |
+| Field        |                  Size | Encoding                                   |
+| ------------ | --------------------: | ------------------------------------------ |
+| Magic        |               4 bytes | ASCII `NEBU`                               |
+| Version      |                1 byte | `u8`, currently `1`                        |
+| Opcode       |                1 byte | `u8`, see opcode table                     |
+| Key length   |               4 bytes | `u32`, big-endian                          |
+| Value length |               4 bytes | `u32`, big-endian                          |
+| TTL seconds  |               8 bytes | `u64`, big-endian; `0` means no expiration |
+| Key          |   Declared key length | Opaque bytes                               |
+| Value        | Declared value length | Opaque bytes                               |
 
 ### Response frame
 
 The fixed response header is 10 bytes, followed by the response value:
 
-| Field | Size | Encoding |
-| --- | ---: | --- |
-| Magic | 4 bytes | ASCII `NEBU` |
-| Version | 1 byte | `u8`, currently `1` |
-| Status | 1 byte | `u8`, see status table |
-| Value length | 4 bytes | `u32`, big-endian |
-| Value | Declared value length | Opaque bytes |
+| Field        |                  Size | Encoding               |
+| ------------ | --------------------: | ---------------------- |
+| Magic        |               4 bytes | ASCII `NEBU`           |
+| Version      |                1 byte | `u8`, currently `1`    |
+| Status       |                1 byte | `u8`, see status table |
+| Value length |               4 bytes | `u32`, big-endian      |
+| Value        | Declared value length | Opaque bytes           |
 
 ### Opcodes and statuses
 
-| Opcode | Value | Behavior |
-| --- | ---: | --- |
-| SET | 1 | Store the value for a non-empty key, with the request TTL. |
-| GET | 2 | Return the stored value or `NOT_FOUND`; key is required and request value must be empty. |
-| DELETE | 3 | Delete the key or return `NOT_FOUND`; key is required and request value must be empty. |
-| PING | 4 | Return `OK` with the value `PONG`; request key and value must be empty. |
-| AUTH | 5 | Authenticate a connection when token authentication is enabled; token is carried in the value field. |
+| Opcode   | Value | Behavior                                                                                             |
+| -------- | ----: | ---------------------------------------------------------------------------------------------------- |
+| `SET`    |     1 | Store the value for a non-empty key, with the request TTL.                                           |
+| `GET`    |     2 | Return the stored value or `NOT_FOUND`; key is required and request value must be empty.             |
+| `DELETE` |     3 | Delete the key or return `NOT_FOUND`; key is required and request value must be empty.               |
+| `PING`   |     4 | Return `OK` with the value `PONG`; request key and value must be empty.                              |
+| `AUTH`   |     5 | Authenticate a connection when token authentication is enabled; token is carried in the value field. |
 
-| Status | Value | Meaning |
-| --- | ---: | --- |
-| OK | 0 | Request succeeded. |
-| NOT_FOUND | 1 | GET or DELETE key does not exist. |
-| INVALID_ARGUMENT | 2 | Request arguments are invalid. |
-| INTERNAL_ERROR | 3 | Server-side operation failed, including cache capacity exhaustion. |
-| UNAUTHORIZED | 4 | Authentication failed or is required. |
-| FORBIDDEN | 5 | Authenticated role cannot perform the operation. |
+| Status             | Value | Meaning                                                            |
+| ------------------ | ----: | ------------------------------------------------------------------ |
+| `OK`               |     0 | Request succeeded.                                                 |
+| `NOT_FOUND`        |     1 | GET or DELETE key does not exist.                                  |
+| `INVALID_ARGUMENT` |     2 | Request arguments are invalid.                                     |
+| `INTERNAL_ERROR`   |     3 | Server-side operation failed, including cache capacity exhaustion. |
+| `UNAUTHORIZED`     |     4 | Authentication failed or is required.                              |
+| `FORBIDDEN`        |     5 | Authenticated role cannot perform the operation.                   |
 
 Keys are limited to 1,024 bytes and values to 8 MiB. `SET` requires a non-empty key. `AUTH` requires an empty key, a non-empty UTF-8 token of at most 1,024 bytes in the value field, and TTL `0`. A successful `AUTH` returns `OK` with `AUTH_RESULT`. When authentication is enabled, the server requires `AUTH` before cache operations on every connection; authentication also requires TLS. The store treats keys and values as opaque bytes, and TTL values are unsigned seconds.
 
