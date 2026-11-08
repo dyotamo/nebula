@@ -13,6 +13,8 @@ const STATUS_NAMES = new Map([
   [1, 'NOT_FOUND'],
   [2, 'INVALID_ARGUMENT'],
   [3, 'INTERNAL_ERROR'],
+  [4, 'UNAUTHORIZED'],
+  [5, 'FORBIDDEN'],
 ]);
 
 class NebulaCacheError extends Error {
@@ -185,7 +187,21 @@ class NebulaCache {
         }
       }, this.options.maxLifetime);
       entry.lifetimeTimer.unref();
-      this._release(entry);
+      if (this.options.token !== undefined) {
+        const token = Buffer.from(this.options.token, 'utf8');
+        const header = Buffer.alloc(REQUEST_HEADER_LENGTH);
+        MAGIC.copy(header, 0);
+        header.writeUInt8(VERSION, 4);
+        header.writeUInt8(5, 5);
+        header.writeUInt32BE(token.length, 10);
+        this._exchange(entry, Buffer.concat([header, token]), 5).then(({ status, value }) => {
+          if (status !== 0 || !value.equals(Buffer.from('AUTH_RESULT'))) {
+            this._discard(entry, new CacheResponseError(status, 'authentication failed'));
+          }
+        }).catch((error) => this._discard(entry, error));
+      } else {
+        this._release(entry);
+      }
     });
     socket.on('data', (chunk) => {
       if (entry.active) {
@@ -405,10 +421,19 @@ function parseOptions(options) {
     maxLifetime: 300000,
     maxRetries: 2,
     tls: undefined,
+    token: undefined,
     ...options,
   };
   if (result.tls !== undefined && (!result.tls || typeof result.tls !== 'object' || Array.isArray(result.tls))) {
     throw new TypeError('tls must be a TLS options object when provided');
+  }
+  if (result.token !== undefined) {
+    if (typeof result.token !== 'string' || result.token.length === 0 || Buffer.byteLength(result.token, 'utf8') > 1024) {
+      throw new TypeError('token must be a non-empty string no longer than 1024 bytes');
+    }
+    if (result.tls === undefined || result.tls.rejectUnauthorized === false) {
+      throw new TypeError('token authentication requires TLS with certificate verification enabled');
+    }
   }
   for (const name of ['minPoolSize', 'maxPoolSize', 'maxRetries']) {
     if (!Number.isSafeInteger(result[name]) || result[name] < (name === 'maxPoolSize' ? 1 : 0)) {

@@ -5,6 +5,8 @@ pub enum Status {
     NotFound = 1,
     InvalidArgument = 2,
     InternalError = 3,
+    Unauthorized = 4,
+    Forbidden = 5,
 }
 
 impl TryFrom<u8> for Status {
@@ -16,6 +18,8 @@ impl TryFrom<u8> for Status {
             1 => Ok(Self::NotFound),
             2 => Ok(Self::InvalidArgument),
             3 => Ok(Self::InternalError),
+            4 => Ok(Self::Unauthorized),
+            5 => Ok(Self::Forbidden),
             other => Err(crate::ProtocolError::UnknownStatus(other)),
         }
     }
@@ -53,6 +57,18 @@ impl Response {
         Self {
             status: Status::InternalError,
             value: message.to_vec(),
+        }
+    }
+    pub fn unauthorized() -> Self {
+        Self {
+            status: Status::Unauthorized,
+            value: b"authentication failed".to_vec(),
+        }
+    }
+    pub fn forbidden() -> Self {
+        Self {
+            status: Status::Forbidden,
+            value: b"operation is not permitted".to_vec(),
         }
     }
 }

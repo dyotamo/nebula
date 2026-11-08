@@ -42,6 +42,7 @@ type Config struct {
 	MaxLifetime    time.Duration
 	MaxRetries     int
 	TLSConfig      *tls.Config
+	Token          string
 }
 
 func DefaultConfig() Config {
@@ -121,6 +122,9 @@ func NewWithConfig(config Config) (*NebulaCache, error) {
 	}
 	if config.Address == "" {
 		return nil, fmt.Errorf("address must be a host:port string")
+	}
+	if config.Token != "" && (config.TLSConfig == nil || config.TLSConfig.InsecureSkipVerify) {
+		return nil, fmt.Errorf("token authentication requires TLS with certificate verification enabled")
 	}
 	host, port, err := parseAddress(config.Address)
 	if err != nil {
@@ -226,6 +230,9 @@ func (c *NebulaCache) fill(ctx context.Context, count int) error {
 		} else {
 			tlsDialer := tls.Dialer{NetDialer: &dialer, Config: c.config.TLSConfig.Clone()}
 			connection, err = tlsDialer.DialContext(ctx, "tcp", c.endpoint)
+		}
+		if err == nil && c.config.Token != "" {
+			err = authenticateConnection(connection, c.config.Token, c.config.RequestTimeout)
 		}
 		c.mu.Lock()
 		c.dialing--
@@ -471,6 +478,30 @@ func (c *NebulaCache) requestOnce(opcode byte, key, value []byte, ttlSecs uint64
 	return result, nil
 }
 
+func authenticateConnection(connection net.Conn, token string, timeout time.Duration) error {
+	if err := connection.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	var header [requestHeader]byte
+	copy(header[:4], protocolMagic[:])
+	header[4] = protocolVersion
+	header[5] = 5
+	binary.BigEndian.PutUint32(header[10:14], uint32(len(token)))
+	for _, part := range [][]byte{header[:], []byte(token)} {
+		if err := writeFull(connection, part); err != nil {
+			return err
+		}
+	}
+	result, err := readResponse(connection)
+	if err != nil {
+		return err
+	}
+	if result.status != 0 || string(result.value) != "AUTH_RESULT" {
+		return errors.New("authentication failed")
+	}
+	return connection.SetDeadline(time.Time{})
+}
+
 func readResponse(reader io.Reader) (response, error) {
 	var header [responseHeader]byte
 	if _, err := io.ReadFull(reader, header[:]); err != nil {
@@ -486,7 +517,7 @@ func readResponse(reader io.Reader) (response, error) {
 	}
 
 	status := header[5]
-	if status > 3 {
+	if status > 5 {
 		return response{}, &CacheProtocolError{Message: fmt.Sprintf("unknown response status: %d", status)}
 	}
 
@@ -543,6 +574,8 @@ func responseError(result response) error {
 		1: "NOT_FOUND",
 		2: "INVALID_ARGUMENT",
 		3: "INTERNAL_ERROR",
+		4: "UNAUTHORIZED",
+		5: "FORBIDDEN",
 	}[result.status]
 	message := strings.TrimRightFunc(strings.ToValidUTF8(string(result.value), "\uFFFD"), unicode.IsSpace)
 	return &CacheResponseError{

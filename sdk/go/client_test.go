@@ -885,7 +885,7 @@ func TestGetDoesNotRetryProtocolOrStatusErrors(t *testing.T) {
 				case "version":
 					header[4] = protocolVersion + 1
 				case "unknown status":
-					header[5] = 4
+					header[5] = 6
 				case "oversized":
 					binary.BigEndian.PutUint32(header[6:10], maxValueLength+1)
 				case "not found":

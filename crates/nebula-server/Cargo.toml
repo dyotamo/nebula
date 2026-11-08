@@ -14,6 +14,7 @@ clap = { version = "4", features = ["derive"] }
 rand = "0.8"
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
+nebula-auth = { path = "../nebula-auth" }
 nebula-core = { path = "../nebula-core" }
 nebula-health = { path = "../nebula-health" }
 nebula-protocol = { path = "../nebula-protocol" }

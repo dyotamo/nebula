@@ -49,17 +49,24 @@ public final class NebulaCache implements AutoCloseable {
 
     public record Config(int minPoolSize, int maxPoolSize, Duration connectTimeout,
             Duration requestTimeout, Duration acquireTimeout, Duration idleTimeout,
-            Duration maxLifetime, int maxRetries, boolean tlsEnabled) {
+            Duration maxLifetime, int maxRetries, boolean tlsEnabled, String token) {
         public Config() {
             this(0, 10, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT,
-                    Duration.ofSeconds(60), Duration.ofSeconds(300), 2, false);
+                    Duration.ofSeconds(60), Duration.ofSeconds(300), 2, false, null);
+        }
+
+        public Config(int minPoolSize, int maxPoolSize, Duration connectTimeout,
+                Duration requestTimeout, Duration acquireTimeout, Duration idleTimeout,
+                Duration maxLifetime, int maxRetries, boolean tlsEnabled) {
+            this(minPoolSize, maxPoolSize, connectTimeout, requestTimeout, acquireTimeout,
+                    idleTimeout, maxLifetime, maxRetries, tlsEnabled, null);
         }
 
         public Config(int minPoolSize, int maxPoolSize, Duration connectTimeout,
                 Duration requestTimeout, Duration acquireTimeout, Duration idleTimeout,
                 Duration maxLifetime, int maxRetries) {
             this(minPoolSize, maxPoolSize, connectTimeout, requestTimeout, acquireTimeout,
-                    idleTimeout, maxLifetime, maxRetries, false);
+                    idleTimeout, maxLifetime, maxRetries, false, null);
         }
 
         public Config {
@@ -68,6 +75,12 @@ public final class NebulaCache implements AutoCloseable {
             }
             if (maxRetries < 0) {
                 throw new IllegalArgumentException("maxRetries must be non-negative");
+            }
+            if (token != null && (token.isEmpty() || token.getBytes(StandardCharsets.UTF_8).length > 1024)) {
+                throw new IllegalArgumentException("token must be non-empty and no longer than 1024 bytes");
+            }
+            if (token != null && !tlsEnabled) {
+                throw new IllegalArgumentException("token authentication requires TLS");
             }
             requirePositive(connectTimeout, "connectTimeout");
             requirePositive(requestTimeout, "requestTimeout");
@@ -348,6 +361,14 @@ public final class NebulaCache implements AutoCloseable {
                     tlsSocket.startHandshake();
                     connection.socket = tlsSocket;
                 }
+                if (config.token() != null) {
+                    Response authResponse = exchange(connection, 5,
+                            new byte[0], config.token().getBytes(StandardCharsets.UTF_8), 0L);
+                    if (authResponse.status() != 0
+                            || !java.util.Arrays.equals(authResponse.value(), "AUTH_RESULT".getBytes(StandardCharsets.US_ASCII))) {
+                        throw new CacheResponseException(4, "authentication failed");
+                    }
+                }
                 connection.socket.setTcpNoDelay(true);
                 connection.created = System.nanoTime();
                 connection.lastUsed = connection.created;
@@ -492,7 +513,7 @@ public final class NebulaCache implements AutoCloseable {
             }
 
             int status = input.readUnsignedByte();
-            if (status < 0 || status > 3) {
+            if (status < 0 || status > 5) {
                 throw new CacheProtocolException("unknown response status: " + status);
             }
 
@@ -530,6 +551,8 @@ public final class NebulaCache implements AutoCloseable {
                 case 1 -> "NOT_FOUND";
                 case 2 -> "INVALID_ARGUMENT";
                 case 3 -> "INTERNAL_ERROR";
+                case 4 -> "UNAUTHORIZED";
+                case 5 -> "FORBIDDEN";
                 default -> "UNKNOWN_" + response.status();
             };
             String message = new String(response.value(), StandardCharsets.UTF_8).stripTrailing();

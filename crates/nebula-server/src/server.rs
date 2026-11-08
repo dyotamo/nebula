@@ -1,6 +1,8 @@
 use std::{io, sync::Arc, time::Duration};
 
-use nebula_protocol::{read_request_with_limits, write_response_with_limits, FrameLimits};
+use nebula_protocol::{
+    read_request_with_limits, write_response_with_limits, FrameLimits, Response,
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
@@ -11,6 +13,7 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
 
+use nebula_auth::AuthStore;
 use nebula_core::CacheStore;
 use nebula_health::lifecycle::ApplicationState;
 use nebula_watchdog::WorkerHeartbeat;
@@ -27,11 +30,18 @@ pub(crate) async fn run(
     store: Arc<CacheStore>,
     limits: ServerLimits,
     tls_acceptor: Option<TlsAcceptor>,
+    auth_store: Option<Arc<AuthStore>>,
     mut lifecycle: watch::Receiver<ApplicationState>,
     heartbeat: WorkerHeartbeat,
     metrics: Arc<Metrics>,
     started: oneshot::Sender<()>,
 ) -> io::Result<()> {
+    if auth_store.is_some() && tls_acceptor.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "authentication requires TLS",
+        ));
+    }
     info!(address = %listener.local_addr()?, "NebulaCache node listening");
     let _ = started.send(());
     let ServerLimits {
@@ -84,19 +94,20 @@ pub(crate) async fn run(
                 let store = Arc::clone(&store);
                 let lifecycle = lifecycle.clone();
                 let tls_acceptor = tls_acceptor.clone();
+                let auth_store = auth_store.clone();
                 connections.spawn(async move {
                     let _connection_permit = connection_permit;
                     let _active_connection = ActiveConnection(metrics.clone());
                     if let Some(acceptor) = tls_acceptor {
                         match acceptor.accept(socket).await {
-                            Ok(stream) => serve_connection(stream, store, frame, lifecycle, metrics).await,
+                            Ok(stream) => serve_connection(stream, store, frame, lifecycle, metrics, auth_store).await,
                             Err(err) => {
                                 warn!(error = %err, "TLS handshake failed");
                                 Ok(())
                             }
                         }
                     } else {
-                        serve_connection(socket, store, frame, lifecycle, metrics).await
+                        serve_connection(socket, store, frame, lifecycle, metrics, auth_store).await
                     }
                 });
             }
@@ -117,6 +128,14 @@ pub(crate) async fn run(
     Ok(())
 }
 
+struct AuthenticatedConnection(Arc<Metrics>);
+
+impl Drop for AuthenticatedConnection {
+    fn drop(&mut self) {
+        self.0.authenticated_connection_closed();
+    }
+}
+
 struct ActiveConnection(Arc<Metrics>);
 
 impl Drop for ActiveConnection {
@@ -131,10 +150,13 @@ async fn serve_connection<S>(
     limits: FrameLimits,
     mut lifecycle: watch::Receiver<ApplicationState>,
     metrics: Arc<Metrics>,
+    auth_store: Option<Arc<AuthStore>>,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let mut identity = None;
+    let mut _authenticated_connection = None;
     loop {
         if *lifecycle.borrow() != ApplicationState::Ready {
             return Ok(());
@@ -163,10 +185,76 @@ where
             return Ok(());
         }
 
-        let response =
-            handler::handle_with_metrics(request, Arc::clone(&store), Arc::clone(&metrics)).await;
+        let (response, close_after_response) = if let Some(auth_store) = auth_store.as_ref() {
+            match identity.as_ref() {
+                None => {
+                    if request.opcode != nebula_protocol::Opcode::Auth {
+                        let _ = socket.shutdown().await;
+                        return Ok(());
+                    }
+                    let authentication_started = std::time::Instant::now();
+                    let authentication_result = std::str::from_utf8(&request.value)
+                        .map_err(|_| ())
+                        .and_then(|token| {
+                            auth_store.authenticate(token).map_err(|err| {
+                                warn!(error = %err, "authentication storage lookup failed");
+                            })
+                        });
+                    let authentication_elapsed = authentication_started.elapsed().as_nanos() as u64;
+                    match authentication_result {
+                        Ok(Some(authenticated)) => {
+                            metrics.record_authentication(true, authentication_elapsed);
+                            metrics.authenticated_connection_opened();
+                            _authenticated_connection =
+                                Some(AuthenticatedConnection(Arc::clone(&metrics)));
+                            identity = Some(authenticated);
+                            (Response::ok(b"AUTH_RESULT".to_vec()), false)
+                        }
+                        Ok(None) | Err(()) => {
+                            metrics.record_authentication(false, authentication_elapsed);
+                            warn!("connection authentication failed");
+                            (Response::unauthorized(), true)
+                        }
+                    }
+                }
+                Some(identity) => {
+                    let allowed = match request.opcode {
+                        nebula_protocol::Opcode::Ping => true,
+                        nebula_protocol::Opcode::Get => identity.role.can_read(),
+                        nebula_protocol::Opcode::Set | nebula_protocol::Opcode::Delete => {
+                            identity.role.can_write()
+                        }
+                        nebula_protocol::Opcode::Auth => false,
+                    };
+                    metrics.authorization_check(allowed);
+                    if allowed {
+                        (
+                            handler::handle_with_metrics(
+                                request,
+                                Arc::clone(&store),
+                                Arc::clone(&metrics),
+                            )
+                            .await,
+                            false,
+                        )
+                    } else {
+                        (Response::forbidden(), false)
+                    }
+                }
+            }
+        } else {
+            (
+                handler::handle_with_metrics(request, Arc::clone(&store), Arc::clone(&metrics))
+                    .await,
+                false,
+            )
+        };
         if let Err(err) = write_response_with_limits(&mut socket, &response, limits).await {
             return Err(io::Error::other(err));
+        }
+        if close_after_response {
+            let _ = socket.shutdown().await;
+            return Ok(());
         }
     }
 }
@@ -175,6 +263,7 @@ where
 mod tests {
     use std::sync::Arc;
 
+    use nebula_auth::{AuthStore, Role};
     use nebula_core::CacheStore;
     use nebula_health::{
         lifecycle::{ApplicationState, Lifecycle},
@@ -186,7 +275,7 @@ mod tests {
 
     use crate::metrics::Metrics;
 
-    use super::{run, ServerLimits};
+    use super::{run, serve_connection, ServerLimits};
 
     #[tokio::test]
     async fn tcp_requests_are_not_processed_until_application_is_ready() {
@@ -209,6 +298,7 @@ mod tests {
                 frame: Default::default(),
                 max_connections: 1,
             },
+            None,
             None,
             lifecycle.subscribe(),
             heartbeat,
@@ -257,5 +347,67 @@ mod tests {
 
         lifecycle.transition(ApplicationState::Stopping).unwrap();
         server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn authentication_is_required_and_readonly_roles_cannot_write() {
+        let auth_store = Arc::new(AuthStore::open(":memory:").unwrap());
+        auth_store.create_user("viewer", Role::ReadOnly).unwrap();
+        let token = auth_store.create_token("viewer", None).unwrap();
+        let lifecycle = Lifecycle::new();
+        lifecycle.transition(ApplicationState::Ready).unwrap();
+        let store = Arc::new(CacheStore::new());
+        let metrics = Metrics::new();
+
+        let (mut unauthenticated_client, unauthenticated_server) = tokio::io::duplex(4096);
+        let unauthenticated_connection = tokio::spawn(serve_connection(
+            unauthenticated_server,
+            Arc::clone(&store),
+            Default::default(),
+            lifecycle.subscribe(),
+            Arc::clone(&metrics),
+            Some(Arc::clone(&auth_store)),
+        ));
+        write_request(&mut unauthenticated_client, &Request::ping())
+            .await
+            .unwrap();
+        assert!(read_response(&mut unauthenticated_client).await.is_err());
+        unauthenticated_connection.await.unwrap().unwrap();
+
+        let (mut client, server) = tokio::io::duplex(4096);
+        let connection = tokio::spawn(serve_connection(
+            server,
+            Arc::clone(&store),
+            Default::default(),
+            lifecycle.subscribe(),
+            Arc::clone(&metrics),
+            Some(auth_store),
+        ));
+        write_request(&mut client, &Request::auth(&token.token))
+            .await
+            .unwrap();
+        let auth_response = read_response(&mut client).await.unwrap();
+        assert_eq!(auth_response.status, Status::Ok);
+        assert_eq!(auth_response.value, b"AUTH_RESULT");
+
+        write_request(
+            &mut client,
+            &Request {
+                opcode: Opcode::Set,
+                key: b"key".to_vec(),
+                value: b"value".to_vec(),
+                ttl_secs: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_response(&mut client).await.unwrap().status,
+            Status::Forbidden
+        );
+        assert_eq!(store.get(b"key"), None);
+
+        lifecycle.transition(ApplicationState::Stopping).unwrap();
+        connection.await.unwrap().unwrap();
     }
 }

@@ -37,6 +37,7 @@ async fn cli_sends_cache_operations_over_the_protocol() {
                     assert_eq!(request.key, b"missing");
                     Response::not_found()
                 }
+                Opcode::Auth => Response::invalid_argument(),
             };
             write_response(&mut socket, &response).await.unwrap();
         }

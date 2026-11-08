@@ -26,6 +26,8 @@ _STATUS_NAMES = {
     1: "NOT_FOUND",
     2: "INVALID_ARGUMENT",
     3: "INTERNAL_ERROR",
+    4: "UNAUTHORIZED",
+    5: "FORBIDDEN",
 }
 
 
@@ -53,6 +55,7 @@ class NebulaCache:
         max_lifetime: float = 300.0,
         max_retries: int = 2,
         ssl_context: ssl.SSLContext | None = None,
+        token: str | None = None,
     ) -> None:
         self.host, self.port = self._parse_address(address)
         connect_timeout = timeout if connect_timeout is None else connect_timeout
@@ -93,7 +96,13 @@ class NebulaCache:
         self.max_retries = max_retries
         if ssl_context is not None and not isinstance(ssl_context, ssl.SSLContext):
             raise TypeError("ssl_context must be an ssl.SSLContext or None")
+        if token is not None:
+            if not isinstance(token, str) or not token or len(token.encode("utf-8")) > 1024:
+                raise ValueError("token must be a non-empty string no longer than 1024 bytes")
+            if ssl_context is None or ssl_context.verify_mode == ssl.CERT_NONE or not ssl_context.check_hostname:
+                raise ValueError("token authentication requires TLS with certificate verification enabled")
         self.ssl_context = ssl_context
+        self.token = token
         self._condition = threading.Condition()
         self._closed = threading.Event()
         self._connections: set[_PooledConnection] = set()
@@ -155,6 +164,7 @@ class NebulaCache:
                 else:
                     self._condition.wait(remaining)
                     continue
+            connection_socket = None
             try:
                 connection_socket = socket.create_connection(
                     (self.host, self.port), timeout=min(self.connect_timeout, remaining)
@@ -163,7 +173,11 @@ class NebulaCache:
                     connection_socket = self.ssl_context.wrap_socket(
                         connection_socket, server_hostname=self.host
                     )
+                if self.token is not None:
+                    self._authenticate(connection_socket)
             except BaseException:
+                if connection_socket is not None:
+                    self._close_socket(connection_socket)
                 with self._condition:
                     self._connecting -= 1
                     self._condition.notify_all()
@@ -192,6 +206,16 @@ class NebulaCache:
                 connection.last_used = now
                 self._idle.append(connection)
             self._condition.notify_all()
+
+    def _authenticate(self, connection: socket.socket) -> None:
+        token = self.token.encode("utf-8")
+        header = _REQUEST_HEADER.pack(_MAGIC, _VERSION, 5, 0, len(token), 0)
+        connection.settimeout(self.request_timeout)
+        connection.sendall(header + token)
+        status, value = self._read_response(connection, time.monotonic() + self.request_timeout)
+        if status != 0 or value != b"AUTH_RESULT":
+            raise CacheResponseError(status, "authentication failed")
+        connection.settimeout(None)
 
     def _take_retry_token(self) -> bool:
         with self._condition:

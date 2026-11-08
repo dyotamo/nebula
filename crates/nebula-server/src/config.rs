@@ -1,4 +1,9 @@
-use std::{error::Error, io, net::SocketAddr, path::PathBuf};
+use std::{
+    error::Error,
+    io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 use nebula_core::EvictionPolicy;
@@ -11,6 +16,7 @@ pub struct Config {
     pub listen_addr: SocketAddr,
     pub admin_console: AdminConsoleOptions,
     pub tls: TlsOptions,
+    pub security: SecurityOptions,
     pub shutdown_timeout_secs: u64,
     pub ttl_cleanup_interval_secs: u64,
     pub persistence: PersistenceOptions,
@@ -25,6 +31,19 @@ pub struct ResourceLimitsOptions {
     pub max_cache_size_bytes: usize,
     pub max_connections: usize,
     pub eviction_policy: EvictionPolicy,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SecurityOptions {
+    pub authentication: bool,
+    pub auth: AuthStorageOptions,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthStorageOptions {
+    pub database_path: PathBuf,
 }
 
 #[derive(Clone, Deserialize)]
@@ -74,6 +93,7 @@ impl Default for Config {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 7001)),
             admin_console: AdminConsoleOptions::default(),
             tls: TlsOptions::default(),
+            security: SecurityOptions::default(),
             shutdown_timeout_secs: 30,
             ttl_cleanup_interval_secs: 3_600,
             persistence: PersistenceOptions::default(),
@@ -94,6 +114,23 @@ impl Default for ResourceLimitsOptions {
     }
 }
 
+impl Default for SecurityOptions {
+    fn default() -> Self {
+        Self {
+            authentication: false,
+            auth: AuthStorageOptions::default(),
+        }
+    }
+}
+
+impl Default for AuthStorageOptions {
+    fn default() -> Self {
+        Self {
+            database_path: PathBuf::from("nebulad.db"),
+        }
+    }
+}
+
 impl Default for TlsOptions {
     fn default() -> Self {
         Self {
@@ -108,7 +145,7 @@ impl Default for PersistenceOptions {
     fn default() -> Self {
         Self {
             mode: PersistenceMode::Volatile,
-            snapshot_dir: PathBuf::from("data/snapshots"),
+            snapshot_dir: PathBuf::from("snapshots"),
             snapshot_interval_secs: 60,
             snapshot_retention: 3,
         }
@@ -141,18 +178,26 @@ impl Config {
     }
 
     fn load(args: Args) -> Result<Self, Box<dyn Error>> {
-        let config = if let Some(path) = args.config {
-            let contents = std::fs::read_to_string(path)?;
-            if contents.trim().is_empty() {
-                Self::default()
-            } else {
-                let mut value = toml::from_str::<toml::Value>(&contents)?;
-                expand_environment_variables(&mut value)?;
-                coerce_environment_values(&mut value)?;
-                value.try_into()?
-            }
-        } else {
+        Self::load_with_default(args, Path::new("nebulad.toml"))
+    }
+
+    fn load_with_default(args: Args, default_config_path: &Path) -> Result<Self, Box<dyn Error>> {
+        let path = args
+            .config
+            .unwrap_or_else(|| default_config_path.to_path_buf());
+        let contents = std::fs::read_to_string(&path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to read config file {}: {error}", path.display()),
+            )
+        })?;
+        let config = if contents.trim().is_empty() {
             Self::default()
+        } else {
+            let mut value = toml::from_str::<toml::Value>(&contents)?;
+            expand_environment_variables(&mut value)?;
+            coerce_environment_values(&mut value)?;
+            value.try_into()?
         };
 
         if config.resource_limits.max_connections > tokio::sync::Semaphore::MAX_PERMITS {
@@ -164,6 +209,7 @@ impl Config {
         }
 
         if config.admin_console.enabled
+            && !config.security.authentication
             && config
                 .admin_console
                 .password
@@ -173,6 +219,24 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "admin_console.password is required and must not be empty when admin_console.enabled is true",
+            )
+            .into());
+        }
+
+        if config.security.authentication && !config.tls.enabled {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tls.enabled must be true when security.authentication is enabled",
+            )
+            .into());
+        }
+
+        if config.security.authentication
+            && config.security.auth.database_path.as_os_str().is_empty()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "security.auth.database_path must not be empty when authentication is enabled",
             )
             .into());
         }
@@ -308,6 +372,10 @@ fn coerce_environment_values(value: &mut toml::Value) -> Result<(), Box<dyn Erro
         coerce_config_field::<bool>(tls, "enabled")?;
     }
 
+    if let Some(toml::Value::Table(security)) = values.get_mut("security") {
+        coerce_config_field::<bool>(security, "authentication")?;
+    }
+
     if let Some(toml::Value::Table(admin_console)) = values.get_mut("admin_console") {
         coerce_config_field::<bool>(admin_console, "enabled")?;
         coerce_config_field::<bool>(admin_console, "metrics_dashboard")?;
@@ -366,9 +434,16 @@ mod tests {
     use super::{Args, Config, EvictionPolicy, PersistenceMode};
 
     #[test]
-    fn defaults_are_applied_without_a_config_file() {
+    fn defaults_are_applied_with_an_empty_config_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let config_path = std::env::temp_dir().join(format!("nebulad-config-{unique}.toml"));
+        fs::write(&config_path, "").unwrap();
         let args = Args::try_parse_from(["nebula-server"]).unwrap();
-        let config = Config::load(args).unwrap();
+        let config = Config::load_with_default(args, &config_path).unwrap();
+        fs::remove_file(config_path).unwrap();
         assert_eq!(config.listen_addr.to_string(), "0.0.0.0:7001");
         assert_eq!(
             config.admin_console.listen_addr.to_string(),
@@ -393,6 +468,41 @@ mod tests {
         let frame_limits = config.frame_limits();
         assert_eq!(frame_limits.max_key_len, 1_024);
         assert_eq!(frame_limits.max_value_len, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn errors_when_default_config_file_is_missing() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let missing_config = std::env::temp_dir().join(format!("nebulad-missing-{unique}.toml"));
+        let args = Args::try_parse_from(["nebula-server"]).unwrap();
+
+        let error = Config::load_with_default(args, &missing_config)
+            .err()
+            .unwrap();
+
+        assert!(error.to_string().contains(missing_config.to_str().unwrap()));
+    }
+
+    #[test]
+    fn loads_nebulad_toml_when_no_config_argument_is_provided() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("nebulad-config-{unique}"));
+        fs::create_dir(&directory).unwrap();
+        let default_config = directory.join("nebulad.toml");
+        fs::write(&default_config, r#"listen_addr = "127.0.0.1:7003""#).unwrap();
+
+        let args = Args::try_parse_from(["nebula-server"]).unwrap();
+        let config = Config::load_with_default(args, &default_config).unwrap();
+
+        fs::remove_file(default_config).unwrap();
+        fs::remove_dir(directory).unwrap();
+        assert_eq!(config.listen_addr.to_string(), "127.0.0.1:7003");
     }
 
     #[test]

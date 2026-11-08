@@ -30,12 +30,14 @@ pub(super) struct Client {
     address: String,
     server_name: String,
     tls_connector: Option<TlsConnector>,
+    token: Option<String>,
 }
 
 impl Client {
     pub(super) fn new(
         address: impl Into<String>,
         tls_ca: Option<impl AsRef<Path>>,
+        token: Option<String>,
     ) -> Result<Self, ClientError> {
         let address = address.into();
         let server_name = address
@@ -43,12 +45,20 @@ impl Client {
             .map(|(host, _)| host.trim_start_matches('[').trim_end_matches(']'))
             .unwrap_or(&address)
             .to_owned();
+        if token.is_some() && tls_ca.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a trusted TLS CA is required when token authentication is enabled",
+            )
+            .into());
+        }
         let tls_connector = tls_ca.map(load_tls_connector).transpose()?;
 
         Ok(Self {
             address,
             server_name,
             tls_connector,
+            token,
         })
     }
 
@@ -112,19 +122,32 @@ impl Client {
             let server_name = ServerName::try_from(self.server_name.clone())
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
             let stream = connector.connect(server_name, stream).await?;
-            Self::send_on(stream, &request).await
+            Self::send_on(stream, &request, self.token.as_deref()).await
         } else {
-            Self::send_on(stream, &request).await
+            Self::send_on(stream, &request, self.token.as_deref()).await
         }
     }
 
     async fn send_on<S>(
         mut stream: S,
         request: &Request,
+        token: Option<&str>,
     ) -> Result<nebula_protocol::Response, ClientError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
+        if let Some(token) = token {
+            write_request(&mut stream, &Request::auth(token)).await?;
+            let response = read_response(&mut stream).await?;
+            if response.status != Status::Ok {
+                return Err(Self::server_error(response.status, response.value));
+            }
+            if response.value != b"AUTH_RESULT" {
+                return Err(ClientError::Protocol(ProtocolError::InvalidFrame(
+                    "invalid AUTH_RESULT response",
+                )));
+            }
+        }
         write_request(&mut stream, request).await?;
         Ok(read_response(&mut stream).await?)
     }

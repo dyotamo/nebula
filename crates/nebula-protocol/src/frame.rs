@@ -66,6 +66,14 @@ where
         ));
     }
 
+    if opcode == Opcode::Auth
+        && (key_len != 0 || value_len == 0 || value_len > 1_024 || ttl_secs != 0)
+    {
+        return Err(ProtocolError::InvalidFrame(
+            "AUTH requires a token and no key or TTL",
+        ));
+    }
+
     if matches!(opcode, Opcode::Get | Opcode::Delete) && value_len != 0 {
         return Err(ProtocolError::InvalidFrame(
             "GET/DELETE must not contain a value",
@@ -117,6 +125,17 @@ where
         && request.key.is_empty()
     {
         return Err(ProtocolError::InvalidFrame("operation requires a key"));
+    }
+
+    if request.opcode == Opcode::Auth
+        && (!request.key.is_empty()
+            || request.value.is_empty()
+            || request.value.len() > 1_024
+            || request.ttl_secs != 0)
+    {
+        return Err(ProtocolError::InvalidFrame(
+            "AUTH requires a token and no key or TTL",
+        ));
     }
 
     if matches!(request.opcode, Opcode::Get | Opcode::Delete | Opcode::Ping)

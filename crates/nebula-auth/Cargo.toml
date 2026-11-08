@@ -1,0 +1,11 @@
+[package]
+name = "nebula-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+thiserror.workspace = true

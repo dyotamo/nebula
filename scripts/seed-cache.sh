@@ -9,7 +9,7 @@ target_dir=${CARGO_TARGET_DIR:-target}
 
 cd "$project_root"
 cargo build --quiet -p nebula-client
-client=$target_dir/debug/nebula-client
+client=$target_dir/debug/nebula
 
 index=1
 while [ "$index" -le 1000 ]; do

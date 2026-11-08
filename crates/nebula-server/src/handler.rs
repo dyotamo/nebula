@@ -30,6 +30,7 @@ async fn handle_observed(
         Opcode::Set => "set",
         Opcode::Get => "get",
         Opcode::Delete => "delete",
+        Opcode::Auth => "auth",
     };
     let response = match request.opcode {
         Opcode::Ping => Response::ok(b"PONG".to_vec()),
@@ -58,6 +59,7 @@ async fn handle_observed(
                 Response::not_found()
             }
         }
+        Opcode::Auth => Response::invalid_argument(),
     };
     if let Some(metrics) = metrics {
         metrics.record_request(

@@ -93,6 +93,15 @@ pub struct Metrics {
     started: Instant,
     operations: [OperationMetrics; 4],
     active_connections: AtomicU64,
+    auth_success: AtomicU64,
+    auth_failure: AtomicU64,
+    auth_duration_ns: AtomicU64,
+    auth_duration_count: AtomicU64,
+    auth_duration_buckets: [AtomicU64; 8],
+    authz_checks: AtomicU64,
+    authz_denied: AtomicU64,
+    auth_active_connections: AtomicU64,
+    auth_revocations: AtomicU64,
     persistence: PersistenceMetrics,
     history: Mutex<VecDeque<HistoryPoint>>,
     last_history_sample: Mutex<Option<Instant>>,
@@ -104,6 +113,15 @@ impl Metrics {
             started: Instant::now(),
             operations: std::array::from_fn(|_| OperationMetrics::default()),
             active_connections: AtomicU64::new(0),
+            auth_success: AtomicU64::new(0),
+            auth_failure: AtomicU64::new(0),
+            auth_duration_ns: AtomicU64::new(0),
+            auth_duration_count: AtomicU64::new(0),
+            auth_duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            authz_checks: AtomicU64::new(0),
+            authz_denied: AtomicU64::new(0),
+            auth_active_connections: AtomicU64::new(0),
+            auth_revocations: AtomicU64::new(0),
             persistence: PersistenceMetrics::default(),
             history: Mutex::new(VecDeque::new()),
             last_history_sample: Mutex::new(None),
@@ -139,6 +157,37 @@ impl Metrics {
 
     pub fn connection_closed(&self) {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn record_authentication(&self, success: bool, elapsed_ns: u64) {
+        if success {
+            self.auth_success.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.auth_failure.fetch_add(1, Ordering::Relaxed);
+        }
+        self.auth_duration_ns
+            .fetch_add(elapsed_ns, Ordering::Relaxed);
+        self.auth_duration_count.fetch_add(1, Ordering::Relaxed);
+        record_buckets(&self.auth_duration_buckets, elapsed_ns);
+    }
+
+    pub fn authorization_check(&self, allowed: bool) {
+        self.authz_checks.fetch_add(1, Ordering::Relaxed);
+        if !allowed {
+            self.authz_denied.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn authenticated_connection_opened(&self) {
+        self.auth_active_connections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn authenticated_connection_closed(&self) {
+        self.auth_active_connections.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn record_revocation(&self) {
+        self.auth_revocations.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_snapshot(&self, elapsed_ns: u64, success: bool) {
@@ -347,6 +396,34 @@ impl Metrics {
         }
         let active = self.active_connections.load(Ordering::Relaxed);
         let _ = writeln!(output, "# HELP nebula_active_connections Current active TCP connections.\n# TYPE nebula_active_connections gauge\nnebula_active_connections {active}");
+        let auth_success = self.auth_success.load(Ordering::Relaxed);
+        let auth_failure = self.auth_failure.load(Ordering::Relaxed);
+        let auth_duration_sum =
+            self.auth_duration_ns.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
+        let auth_duration_count = self.auth_duration_count.load(Ordering::Relaxed);
+        let authz_checks = self.authz_checks.load(Ordering::Relaxed);
+        let authz_denied = self.authz_denied.load(Ordering::Relaxed);
+        let auth_active = self.auth_active_connections.load(Ordering::Relaxed);
+        let auth_revocations = self.auth_revocations.load(Ordering::Relaxed);
+        let _ = writeln!(output, "# HELP nebula_auth_success_total Successful authentications.\n# TYPE nebula_auth_success_total counter\nnebula_auth_success_total {auth_success}");
+        let _ = writeln!(output, "# HELP nebula_auth_failure_total Failed authentications.\n# TYPE nebula_auth_failure_total counter\nnebula_auth_failure_total {auth_failure}");
+        let _ = writeln!(output, "# HELP nebula_auth_duration_seconds Authentication duration in seconds.\n# TYPE nebula_auth_duration_seconds histogram");
+        let _ = writeln!(output, "nebula_auth_duration_seconds_sum {auth_duration_sum}\nnebula_auth_duration_seconds_count {auth_duration_count}");
+        for (bucket, bound) in self.auth_duration_buckets.iter().zip(LATENCY_BUCKETS) {
+            let count = bucket.load(Ordering::Relaxed);
+            let _ = writeln!(
+                output,
+                "nebula_auth_duration_seconds_bucket{{le=\"{bound}\"}} {count}"
+            );
+        }
+        let _ = writeln!(
+            output,
+            "nebula_auth_duration_seconds_bucket{{le=\"+Inf\"}} {auth_duration_count}"
+        );
+        let _ = writeln!(output, "# HELP nebula_authz_checks_total Authorization checks.\n# TYPE nebula_authz_checks_total counter\nnebula_authz_checks_total {authz_checks}");
+        let _ = writeln!(output, "# HELP nebula_authz_denied_total Denied authorization checks.\n# TYPE nebula_authz_denied_total counter\nnebula_authz_denied_total {authz_denied}");
+        let _ = writeln!(output, "# HELP nebula_auth_active_connections Authenticated TCP connections.\n# TYPE nebula_auth_active_connections gauge\nnebula_auth_active_connections {auth_active}");
+        let _ = writeln!(output, "# HELP nebula_auth_revocations_total Token revocations.\n# TYPE nebula_auth_revocations_total counter\nnebula_auth_revocations_total {auth_revocations}");
         let entries = store.len();
         let memory = store.memory_usage();
         let _ = writeln!(output, "# HELP nebula_cache_entries Current cache entry count.\n# TYPE nebula_cache_entries gauge\nnebula_cache_entries {entries}");
@@ -658,6 +735,11 @@ mod tests {
         metrics.record_request("get", true, 2_000_000);
         metrics.record_request("get", false, 8_000_000);
         metrics.record_snapshot(10_000_000, true);
+        metrics.record_authentication(true, 2_000_000);
+        metrics.record_authentication(false, 8_000_000);
+        metrics.authorization_check(false);
+        metrics.authenticated_connection_opened();
+        metrics.record_revocation();
         let lifecycle = Lifecycle::new();
         let health = HealthManager::new(lifecycle.clone(), false);
         let output =
@@ -668,6 +750,12 @@ mod tests {
             .contains("nebula_request_duration_seconds_bucket{operation=\"get\",le=\"0.01\"} 2"));
         assert!(output.contains("nebula_lifecycle_state{state=\"initializing\"} 1"));
         assert!(output.contains("nebula_snapshot_last_success_timestamp_seconds "));
+        assert!(output.contains("nebula_auth_success_total 1"));
+        assert!(output.contains("nebula_auth_failure_total 1"));
+        assert!(output.contains("nebula_authz_checks_total 1"));
+        assert!(output.contains("nebula_authz_denied_total 1"));
+        assert!(output.contains("nebula_auth_active_connections 1"));
+        assert!(output.contains("nebula_auth_revocations_total 1"));
         assert!(!output.contains("cache_key"));
     }
 

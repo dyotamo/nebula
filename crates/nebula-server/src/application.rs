@@ -1,5 +1,6 @@
 use std::{error::Error, fs::File, io, io::BufReader, sync::Arc, time::Duration};
 
+use nebula_auth::AuthStore;
 use nebula_core::CacheStore;
 use nebula_health::{
     lifecycle::{ApplicationState, Lifecycle},
@@ -134,6 +135,42 @@ impl Application {
                 .await);
         }
 
+        if self.config.security.authentication && !self.config.tls.enabled {
+            return Err(self
+                .fail_startup(
+                    "configure authentication",
+                    io::Error::new(io::ErrorKind::InvalidInput, "authentication requires TLS"),
+                )
+                .await);
+        }
+
+        let auth_store = if self.config.security.authentication {
+            let store = match AuthStore::open(&self.config.security.auth.database_path) {
+                Ok(store) => Arc::new(store),
+                Err(err) => {
+                    return Err(self
+                        .fail_startup("initialize authentication storage", io::Error::other(err))
+                        .await);
+                }
+            };
+            match store.ensure_bootstrap_credential() {
+                Ok(Some(credential)) => {
+                    eprintln!(
+                        "NebulaCache one-time administrator bootstrap credential: {credential}"
+                    );
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(self
+                        .fail_startup("initialize administrator bootstrap", io::Error::other(err))
+                        .await);
+                }
+            }
+            Some(store)
+        } else {
+            None
+        };
+
         let tls_acceptor = match load_tls_acceptor(&self.config.tls) {
             Ok(acceptor) => acceptor,
             Err(err) => return Err(self.fail_startup("configure TCP TLS", err).await),
@@ -172,8 +209,10 @@ impl Application {
             frame: frame_limits,
             max_connections: self.config.resource_limits.max_connections,
         };
+        let admin_tls_acceptor = tls_acceptor.clone();
         let (tcp_started_tx, tcp_started_rx) = oneshot::channel();
         let tcp_store = self.store.clone();
+        let tcp_auth_store = auth_store.clone();
         let tcp_lifecycle = self.lifecycle.subscribe();
         let tcp_heartbeat = self.watchdog.register_worker(
             "tcp-server",
@@ -189,6 +228,7 @@ impl Application {
                 tcp_store,
                 limits,
                 tls_acceptor,
+                tcp_auth_store,
                 tcp_lifecycle,
                 tcp_heartbeat,
                 tcp_metrics,
@@ -215,22 +255,18 @@ impl Application {
         });
 
         let admin_started = if let Some(listener) = admin_listener {
-            let Some(password) = self.config.admin_console.password.clone() else {
-                return Err(self
-                    .fail_startup(
-                        "start admin console",
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "admin console password is required when the console is enabled",
-                        ),
-                    )
-                    .await);
-            };
+            let password = self
+                .config
+                .admin_console
+                .password
+                .clone()
+                .unwrap_or_default();
             let admin_lifecycle = self.lifecycle.subscribe();
             let admin_lifecycle_state = self.lifecycle.clone();
             let admin_health = self.health.clone();
             let admin_metrics = Arc::clone(&self.metrics);
             let dashboard_enabled = self.config.admin_console.metrics_dashboard;
+            let admin_auth_store = auth_store.clone();
             let admin_heartbeat = self.watchdog.register_worker(
                 "admin-console",
                 HealthComponent::AdminConsole,
@@ -244,6 +280,8 @@ impl Application {
                     store,
                     frame_limits,
                     password,
+                    admin_auth_store,
+                    admin_tls_acceptor,
                     admin_lifecycle,
                     admin_heartbeat,
                     admin_metrics,
@@ -623,6 +661,7 @@ mod tests {
             listen_addr: address,
             admin_console: Default::default(),
             tls: Default::default(),
+            security: Default::default(),
             shutdown_timeout_secs: 1,
             ttl_cleanup_interval_secs: 3_600,
             persistence: Default::default(),

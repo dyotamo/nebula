@@ -1775,6 +1775,7 @@
     let searchTimer;
     let runtimeRefreshTimer;
     let modalReturnFocus = null;
+    let csrfToken = null;
 
     function hex(bytes) {
       return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
@@ -1801,6 +1802,7 @@
         ...options,
         headers: {
           'Content-Type': 'application/json',
+          ...(csrfToken ? { 'X-Nebula-CSRF': csrfToken } : {}),
           ...options.headers,
         },
       });
@@ -1816,6 +1818,7 @@
       $('rail').setAttribute('aria-hidden', 'true');
       $('topbar').inert = true;
       $('topbar').setAttribute('aria-hidden', 'true');
+      csrfToken = null;
       $('login-screen').style.display = 'grid';
       $('password').focus();
     }
@@ -2061,12 +2064,15 @@
         method: 'POST',
         body: JSON.stringify({
           password: $('password').value,
+          token: $('password').value,
         }),
       });
       if (!response.ok) {
         $('login-error').textContent = 'The password was not accepted.';
         return;
       }
+      const credentials = await response.json();
+      csrfToken = credentials.csrf_token;
       showDashboard();
       refresh();
     };
