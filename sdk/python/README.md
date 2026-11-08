@@ -1,20 +1,14 @@
 # NebulaCache Python SDK
 
-A synchronous, dependency-free Python client for managing entries through a NebulaCache node's binary TCP protocol. Requires Python 3.10 or newer and uses the Python standard library.
+A synchronous, dependency-free Python 3.10+ client for the NebulaCache v1 binary TCP protocol. The package uses only the standard library and supports cache operations, TTLs, TLS, token authentication, connection pooling, and bounded GET retries.
 
-## Start a node
+## Before you start
 
-Start a node listening on the default TCP address:
-
-```bash
-cargo run -p nebula-node -- --listen 127.0.0.1:7001
-```
-
-TCP client authentication is not provided. TLS is optional on the server and disabled by default; expose plaintext nodes only on trusted interfaces and apply suitable network controls. The optional password-protected web admin console is separate from this TCP SDK. See the [node setup and console instructions](../../README.md#use-the-web-admin-console).
+Start the server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. If server token authentication is enabled, a client must use TLS with certificate and hostname verification and provide an API token.
 
 ## Install
 
-From this directory, install the package into your environment:
+From this directory, install the package in the active environment:
 
 ```bash
 python -m pip install .
@@ -25,85 +19,82 @@ python -m pip install .
 ```python
 from nebulacache import NebulaCache
 
-cache = NebulaCache(
-    "127.0.0.1:7001",
-    min_pool_size=1,
-    max_pool_size=10,
-    connect_timeout=5.0,
-    request_timeout=5.0,
-    acquire_timeout=5.0,
-    idle_timeout=60.0,
-    max_lifetime=300.0,
-    max_retries=2,
-)
+cache = NebulaCache("127.0.0.1:7001")
 try:
+    cache.ping()
     cache.set("greeting", "hello", ttl_secs=60)
+
     value = cache.get("greeting")
     print(value.decode("utf-8") if value is not None else "missing")
-
-    if cache.delete("greeting"):
-        print("entry deleted")
-
-    print(cache.ping())
+    print("deleted:", cache.delete("greeting"))
 finally:
     cache.close()
 ```
 
-`set` accepts text or bytes-like values. Text is encoded as UTF-8; `get` always returns raw `bytes` so arbitrary binary values are preserved. A TTL of `0` (the default) means the entry does not expire.
+`set` accepts text and bytes-like values (`bytes`, `bytearray`, or `memoryview`). Text uses UTF-8. `get` always returns raw `bytes` or `None` for a missing/expired key. TTL `0` means the value does not expire.
 
-## API
+## API and behavior
 
-- `NebulaCache(address="127.0.0.1:7001", timeout=5.0, ...)`: create a client with a `host:port` node address and optional pool/timeout/retry settings in seconds. Pass `ssl_context` to enable TLS. IPv6 addresses use the `[host]:port` format.
-- `close()`: close idle and active sockets; later operations raise `CacheConnectionError`.
-- `ping() -> bool`: returns `True` if the node responds with `PONG`; otherwise raises an SDK exception.
-- `set(key, value, ttl_secs=0) -> None`: store a non-empty string key and a text or bytes-like value.
-- `get(key) -> bytes | None`: return the raw value bytes, or `None` if the key is missing or expired.
-- `delete(key) -> bool`: return `True` if an entry was deleted, or `False` if it did not exist.
+- `NebulaCache(address="127.0.0.1:7001", timeout=5.0, ...)`: create a client. `address` is `host:port`; bracket IPv6 literals as `[host]:port`.
+- `ping() -> bool`: return `True` when the server replies with `PONG`.
+- `set(key, value, ttl_secs=0) -> None`: store a non-empty string key and text or binary value.
+- `get(key) -> bytes | None`: return raw bytes or `None` when missing/expired.
+- `delete(key) -> bool`: return true if an entry was deleted, false if absent.
+- `close()`: close the connection pool. Calls after close raise `CacheConnectionError`.
 
-Keys are UTF-8 encoded and limited to 1 KiB. Values are limited to 8 MiB by the protocol. Each node has its own volatile cache; nodes do not share entries.
+Keys must be non-empty UTF-8 strings up to 1,024 encoded bytes. Values may be up to 8 MiB. TTL is a non-negative unsigned 64-bit integer count of seconds. The server's cache memory limit can reject SET independently of the protocol's value limit.
 
-## TLS
+## TLS and token authentication
 
-When the server's TCP TLS listener is enabled, pass a standard-library `ssl.SSLContext` to the client. Use a context configured with your private CA when needed; hostname and certificate verification follow the context's settings.
+Pass a standard-library `ssl.SSLContext` using `ssl_context`. For a private CA, create a verifying context with `ssl.create_default_context(cafile=...)`. If server authentication is enabled, also pass `token`; the SDK authenticates each newly opened connection before issuing cache requests. Tokens require TLS with certificate and hostname verification enabled. Do not use an unverified context for authenticated connections.
 
 ```python
+import os
 import ssl
 from nebulacache import NebulaCache
 
 cache = NebulaCache(
     "cache.example:7001",
     ssl_context=ssl.create_default_context(cafile="ca.pem"),
+    token=os.environ["NEBULA_TOKEN"],
 )
+try:
+    cache.ping()
+finally:
+    cache.close()
 ```
 
-Omit `ssl_context` to use plaintext TCP.
+Omit `ssl_context` and `token` only when connecting to a trusted plaintext node with authentication disabled.
 
-## CLI example
+## Pooling, timeouts, and retries
 
-The example CLI accepts `--tls-ca` or the `NEBULA_TLS_CA` environment variable to load a private CA certificate and enable TLS:
+Durations are expressed in seconds. Constructor options include `min_pool_size`, `max_pool_size`, `connect_timeout`, `request_timeout`, `acquire_timeout`, `idle_timeout`, `max_lifetime`, `max_retries`, `ssl_context`, and `token`. Defaults are pool size 0–10, five-second connect/request/acquire timeouts, 60-second idle timeout, 300-second maximum lifetime, and two retries. `timeout` is the legacy convenience setting for connect and request timeouts.
+
+Connections are opened lazily, reused, and owned by the client until `close()`. One connection carries one request at a time; concurrent calls use separate pool connections. Idle, expired, and failed sockets are retired. Only GET is retried after transient transport failures, with bounded exponential full jitter and a shared retry budget. SET and DELETE are not retried because a timeout may happen after a mutation has been applied.
+
+## Example CLI
+
+The included CLI supports `ping`, `set`, `get`, and `delete`. It defaults to `NEBULA_ADDR` or `127.0.0.1:7001`. Use `--tls-ca` or `NEBULA_TLS_CA` to load a CA PEM and enable verified TLS:
 
 ```bash
-python examples/cache_cli.py --tls-ca "$(mkcert -CAROOT)/rootCA.pem" ping
-NEBULA_TLS_CA="$(mkcert -CAROOT)/rootCA.pem" python examples/cache_cli.py set greeting hello --ttl 60
+python ./examples/cache_cli.py ping
+python ./examples/cache_cli.py set greeting hello --ttl 60
+python ./examples/cache_cli.py get greeting
+python ./examples/cache_cli.py delete greeting
+python ./examples/cache_cli.py --address 127.0.0.1:7001 ping
+python ./examples/cache_cli.py --tls-ca /path/to/ca.pem ping
+NEBULA_TLS_CA=/path/to/ca.pem python ./examples/cache_cli.py ping
 ```
 
-Without a CA option, the example uses plaintext TCP.
+The example CLI currently does not accept a token option. Use the `NebulaCache` API for authenticated connections.
 
-## Connection pooling and resilience
+## Errors
 
-Connections are reused for sequential requests. Each socket carries one request at a time; concurrent calls use separate pooled sockets. The pool opens connections lazily, keeps at least `min_pool_size` once initialized, and is owned by the client until `close()`.
-
-Options default to `min_pool_size=0`, `max_pool_size=10`, `connect_timeout=5.0`, `request_timeout=5.0`, `acquire_timeout=5.0`, `idle_timeout=60.0`, `max_lifetime=300.0`, and `max_retries=2`. The legacy `timeout` argument sets the connect and request timeouts; acquisition has its own default.
-
-Only GET is retried, with bounded exponential full jitter and a shared per-client retry budget. SET and DELETE are never automatically replayed because a timeout after sending can leave their outcome ambiguous. Broken and expired connections are discarded and replaced as needed.
-
-## Exceptions
-
-- `CacheConnectionError`: the node could not be reached or the request timed out.
-- `CacheProtocolError`: the node returned a malformed or incomplete protocol response.
-- `CacheResponseError`: the node returned an unsuccessful protocol status; `status` contains its numeric status.
+- `CacheConnectionError`: connection, acquisition, or request timeout failure.
+- `CacheProtocolError`: malformed or incomplete response.
+- `CacheResponseError`: unsuccessful server status; inspect its `status` attribute.
 - `NebulaCacheError`: common base class for SDK errors.
-- `TypeError` and `ValueError`: invalid key, value, TTL, or client configuration.
+- `TypeError` / `ValueError`: invalid arguments, key/value/TTL, options, or TLS/auth configuration.
 
 ## Test
 

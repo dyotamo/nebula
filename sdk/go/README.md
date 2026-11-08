@@ -1,24 +1,20 @@
 # NebulaCache Go SDK
 
-A dependency-free Go client for the NebulaCache binary TCP protocol. The module targets Go 1.22 and newer and uses only the standard library.
+A dependency-free Go 1.22+ client for the NebulaCache v1 binary TCP protocol. The package uses only the Go standard library and supports cache operations, TTLs, TLS, token authentication, a connection pool, and bounded GET retries.
 
-## Start a node
+## Before you start
 
-Start a node listening on the default TCP address:
-
-```bash
-cargo run -p nebula-node -- --listen 127.0.0.1:7001
-```
-
-TCP client authentication is not provided. TLS is optional on the server and disabled by default; expose plaintext nodes only on trusted interfaces and apply suitable network controls. The optional password-protected web admin console is separate from this TCP SDK. See the [node setup and console instructions](../../README.md#use-the-web-admin-console).
+Start a NebulaCache server using the repository-root setup and configuration instructions in [the main README](./../../README.md#run-the-server). The default client address is `127.0.0.1:7001`. If the server enables TLS authentication, the client needs a trusted certificate authority and an API token. The TCP protocol does not support user/password login.
 
 ## Install
 
-Add the SDK module to a Go project:
+From a Go project, install the module:
 
 ```bash
 go get github.com/dyotamo/nebula/sdk/go
 ```
+
+The SDK has no third-party module dependencies.
 
 ## Quick start
 
@@ -29,104 +25,130 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/dyotamo/nebula/sdk/go"
+	nebulacache "github.com/dyotamo/nebula/sdk/go"
 )
 
 func main() {
-	config := nebulacache.DefaultConfig()
-	config.Address = "127.0.0.1:7001"
-	cache, err := nebulacache.NewWithConfig(config)
+	cache, err := nebulacache.New()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer cache.Close()
 
+	if err := cache.Ping(); err != nil {
+		log.Fatal(err)
+	}
 	if err := cache.SetStringWithTTL("greeting", "hello", 60); err != nil {
 		log.Fatal(err)
 	}
+
 	value, found, err := cache.Get("greeting")
 	if err != nil {
 		log.Fatal(err)
 	}
 	if found {
 		fmt.Println(string(value))
-	} else {
-		fmt.Println("missing")
 	}
 
 	deleted, err := cache.Delete("greeting")
 	if err != nil {
 		log.Fatal(err)
 	}
-	if deleted {
-		fmt.Println("entry deleted")
-	}
-
-	if err := cache.Ping(); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("PONG")
+	fmt.Println("deleted:", deleted)
 }
 ```
 
-`Set` accepts `[]byte`, while `SetString` accepts text; both use a TTL of zero (no expiration) by default. Use `SetWithTTL` or `SetStringWithTTL` to specify a TTL in seconds as a `uint64`. Keys and strings are encoded as UTF-8. `Get` returns the raw value, a `found` flag, and an error, so an empty value is distinct from a missing key.
+Keys and string values use UTF-8. `Set` accepts `[]byte`; `SetString` accepts text. Both default to TTL `0` (no expiration); use `SetWithTTL` or `SetStringWithTTL` for a TTL in seconds. `Get` returns raw bytes and a separate `found` flag, so an empty stored value is distinct from a missing/expired key.
 
-## TLS
+## API and behavior
 
-When the server's TCP TLS listener is enabled, configure the client with a standard Go `tls.Config`. Certificate verification remains enabled by default; configure `RootCAs` when using a private CA.
+- `New()` and `New(address)`: create a client for `127.0.0.1:7001` or the supplied `host:port`, with a five-second default timeout.
+- `NewWithTimeout(address, timeout)`: use a custom positive `time.Duration` for connect and request timeouts.
+- `NewWithConfig(config)`: configure address, pool sizes, timeouts, retry count, optional TLS, and optional auth token.
+- `Ping() error`: succeeds when the server replies with `PONG`.
+- `Set(key, value []byte) error` / `SetString(key, value string) error`: store a value without expiration.
+- `SetWithTTL(key, value []byte, ttlSecs uint64) error` / `SetStringWithTTL(...)`: store with a TTL in seconds.
+- `Get(key) ([]byte, bool, error)`: return raw value, found status, and error.
+- `Delete(key) (bool, error)`: report whether a key was removed.
+- `Close() error`: close active and idle sockets. Operations after close return `ErrClosed`.
+
+Keys must be non-empty UTF-8 strings no longer than 1,024 encoded bytes. Values may be arbitrary bytes up to 8 MiB. TTL is an unsigned 64-bit integer in seconds, where zero means no expiration. The server may also reject SET when configured cache capacity cannot accommodate it.
+
+## TLS and token authentication
+
+For a TLS-enabled server, provide a standard Go `tls.Config`. Add a private CA to the trusted root pool; do not disable certificate or hostname verification. Set `Config.Token` to an API token when server authentication is enabled. The SDK sends AUTH after establishing TLS on each new pooled connection.
 
 ```go
-config := nebulacache.DefaultConfig()
-config.Address = "cache.example:7001"
-config.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-cache, err := nebulacache.NewWithConfig(config)
+package main
+
+import (
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"os"
+
+	nebulacache "github.com/dyotamo/nebula/sdk/go"
+)
+
+func connect() (*nebulacache.NebulaCache, error) {
+	pem, err := os.ReadFile("./ca.pem")
+	if err != nil {
+		return nil, err
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	if !roots.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("CA file contains no certificates")
+	}
+
+	config := nebulacache.DefaultConfig()
+	config.Address = "cache.example:7001"
+	config.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	config.Token = os.Getenv("NEBULA_TOKEN")
+	return nebulacache.NewWithConfig(config)
+}
 ```
 
-Import `crypto/tls` for the `tls.Config` type. Leave `TLSConfig` nil to use plaintext TCP.
+Import `fmt` if using the error formatting shown. Leave `TLSConfig` nil for plaintext connections only when authentication is disabled. Supplying a token without verified TLS is rejected by the SDK.
 
-## API
+## Pooling, timeouts, and retries
 
-- `New()` / `New(address)`: create a client for `127.0.0.1:7001` or the provided `host:port` address, using a five-second timeout. IPv6 addresses use the `[host]:port` format.
-- `NewWithTimeout(address, timeout)`: create a client with a custom positive `time.Duration` for connection and request timeouts.
-- `NewWithConfig(config)`: create a client with configured pool sizes, timeouts, retry limits, and optional TLS via `Config.TLSConfig`.
-- `Close() error`: close idle and active sockets; later operations return `ErrClosed`. Call it when the client is no longer needed.
-- `Ping() error`: returns `nil` if the node responds with `PONG`.
-- `Set(key, value) error` and `SetString(key, value) error`: store a binary or text value without expiration.
-- `SetWithTTL(key, value, ttlSecs) error` and `SetStringWithTTL(key, value, ttlSecs) error`: store a binary or text value with a TTL in seconds.
-- `Get(key) ([]byte, bool, error)`: return the raw value, whether the key exists, and any error.
-- `Delete(key) (bool, error)`: return whether an entry was deleted and any error.
+`NewWithConfig` accepts `Address`, `MinPoolSize`, `MaxPoolSize`, `ConnectTimeout`, `RequestTimeout`, `AcquireTimeout`, `IdleTimeout`, `MaxLifetime`, `MaxRetries`, `TLSConfig`, and `Token`. `DefaultConfig()` uses `127.0.0.1:7001`, min pool 0, max pool 10, five-second connect/request/acquire timeouts, 60-second idle timeout, 300-second maximum lifetime, and two retries.
 
-Keys are limited to 1024 UTF-8 bytes and values to 8 MiB. Each node has its own volatile cache; nodes do not share entries.
+Connections are opened lazily, reused, and owned by the client until `Close()`. A connection processes one request at a time; concurrent calls use separate pooled connections. Idle/old/broken connections are retired. Only GET is retried after transient transport failures, with bounded exponential full jitter and a shared retry budget. SET and DELETE are not replayed because a timeout may occur after the server has applied a mutation.
 
-## Usage example
+## Included example
 
-Run the included example against the default address or supply another address:
+From this directory, run the example against the default server address:
 
 ```bash
 go run ./examples
-go run ./examples --address 127.0.0.1:7002
 ```
 
-The example pings the node, stores and retrieves a short-lived value, then deletes it. To connect to a TLS-enabled node using a private CA, pass its PEM file with `--tls-ca` or set `NEBULA_TLS_CA`:
+Use another address or a private CA when needed:
 
 ```bash
-go run ./examples --tls-ca "$(mkcert -CAROOT)/rootCA.pem"
-NEBULA_TLS_CA="$(mkcert -CAROOT)/rootCA.pem" go run ./examples
+go run ./examples --address 127.0.0.1:7001
+go run ./examples --tls-ca /path/to/ca.pem
+NEBULA_TLS_CA=/path/to/ca.pem go run ./examples
 ```
 
-Supplying a CA file enables TLS; without it, the example uses plaintext TCP.
+The example accepts `--address` and `--tls-ca`; the latter enables TLS and extends the system root set with the PEM CA certificate.
 
 ## Errors
 
-- `CacheConnectionError`: the node could not be reached or the operation timed out.
-- `CacheProtocolError`: the node returned a malformed or incomplete protocol response.
-- `CacheResponseError`: the node returned an unsuccessful protocol status; its `Status` field contains the numeric status.
+- `CacheConnectionError`: connection, timeout, or transport failure. Inspect its fields and wrapped cause for context.
+- `CacheProtocolError`: malformed/incomplete protocol response.
+- `CacheResponseError`: server returned a non-success status; the error's `Status` records its numeric protocol code.
+- `ErrClosed`: operation attempted after closing the client.
 
-The SDK errors implement Go's `error` interface and can be inspected with `errors.As`.
+SDK errors implement Go's `error` interface and may be inspected with `errors.As`.
 
 ## Test and build
 
-Run the SDK tests and build from this directory:
+Run from this directory:
 
 ```bash
 go test ./...

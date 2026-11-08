@@ -1,33 +1,27 @@
 # NebulaCache Java SDK
 
-A synchronous, dependency-free Java client for the NebulaCache binary TCP protocol. Requires Java 17 or newer. Maven is used to build and test the SDK.
+A synchronous Java 17+ client for the NebulaCache v1 binary TCP protocol. The SDK has no runtime dependencies and provides cache operations, TLS, token authentication, connection pooling, and bounded GET retries. Maven is used for building and tests.
 
-## Start a node
+## Before you start
 
-Start a node listening on the default TCP address:
-
-```bash
-cargo run -p nebula-node -- --listen 127.0.0.1:7001
-```
-
-TCP client authentication is not provided. TLS is optional on the server and disabled by default; expose plaintext nodes only on trusted interfaces and apply suitable network controls. The optional password-protected web admin console is separate from this TCP SDK. See the [node setup and console instructions](../../README.md#use-the-web-admin-console).
+Start a server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. Token authentication is available only when the server has authentication and TLS enabled; the client must trust the server certificate.
 
 ## Build and install
 
-Build and test the SDK from this directory:
+Run tests and build a JAR from this directory:
 
 ```bash
 mvn test
 mvn package
 ```
 
-Install it into your local Maven repository:
+Install the artifact into your local Maven repository:
 
 ```bash
 mvn install
 ```
 
-Then add it to a Maven project:
+Then add the dependency to a Maven project:
 
 ```xml
 <dependency>
@@ -37,81 +31,108 @@ Then add it to a Maven project:
 </dependency>
 ```
 
+This project does not publish or configure a remote Maven repository; `mvn install` makes the artifact available locally.
+
 ## Quick start
 
 ```java
 import io.nebulacache.NebulaCache;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 
-NebulaCache.Config config = new NebulaCache.Config(
-        0, 10, Duration.ofSeconds(5), Duration.ofSeconds(5), Duration.ofSeconds(5),
-        Duration.ofSeconds(60), Duration.ofSeconds(300), 2);
-try (NebulaCache cache = new NebulaCache("127.0.0.1:7001", config)) {
-    cache.set("greeting", "hello", 60L);
-    cache.get("greeting").ifPresentOrElse(
-            value -> System.out.println(new String(value, StandardCharsets.UTF_8)),
-            () -> System.out.println("missing"));
+public class Example {
+    public static void main(String[] args) {
+        try (NebulaCache cache = new NebulaCache("127.0.0.1:7001")) {
+            if (cache.ping()) {
+                System.out.println("PONG");
+            }
 
-    if (cache.delete("greeting")) {
-        System.out.println("entry deleted");
+            cache.set("greeting", "hello", 60L);
+            cache.get("greeting").ifPresentOrElse(
+                    value -> System.out.println(new String(value, StandardCharsets.UTF_8)),
+                    () -> System.out.println("missing"));
+
+            System.out.println("deleted: " + cache.delete("greeting"));
+        }
     }
-
-    System.out.println(cache.ping());
 }
 ```
 
-`set` accepts `String` or `byte[]` values. Strings and keys are encoded as UTF-8. `get` returns an `Optional<byte[]>` containing the raw value bytes, or an empty `Optional` if the key is missing or expired. A TTL of `0` (the default) means the entry does not expire. TTLs can be supplied as a non-negative `long` or as a `BigInteger` from `0` through `2^64 - 1`.
+`set` accepts `String` or `byte[]` values. Keys and strings use UTF-8. `get` returns `Optional<byte[]>`; an empty optional means missing/expired, and the contained value remains raw bytes. TTL `0` means no expiration. TTLs can be a non-negative `long` or `BigInteger` in the unsigned 64-bit range.
 
-## API
+## API and behavior
 
-- `new NebulaCache()`: connect to `127.0.0.1:7001` with a five-second timeout.
-- `new NebulaCache(address)`: connect to a `host:port` address with a five-second timeout. IPv6 addresses use the `[host]:port` format.
-- `new NebulaCache(address, timeout)`: configure connect and request timeouts with a positive `java.time.Duration`.
-- `new NebulaCache(address, config)`: configure connection pooling, timeouts, GET retry limits, and optional TLS with `config.tlsEnabled()`.
-- `close()`: close idle and active sockets; the client rejects operations after shutdown. Use try-with-resources.
-- `ping() -> boolean`: returns `true` if the node responds with `PONG`; otherwise throws an SDK exception.
-- `set(key, value[, ttlSecs])`: store a non-empty string key and a string or binary value.
-- `get(key) -> Optional<byte[]>`: return the raw value, or an empty `Optional` if it does not exist.
-- `delete(key) -> boolean`: return `true` if an entry was deleted, or `false` if it did not exist.
+- `new NebulaCache()`: connect to `127.0.0.1:7001` with default settings.
+- `new NebulaCache(address)`: connect to the given `host:port` using default settings. IPv6 addresses use `[host]:port`.
+- `new NebulaCache(address, timeout)`: use one positive `Duration` for connect and request timeouts.
+- `new NebulaCache(address, config)`: configure pool sizes, connect/request/acquire/idle/lifetime timeouts, retry count, TLS, and token.
+- `ping() -> boolean`: return true when the server replies with `PONG`; otherwise throw an SDK exception.
+- `set(key, value[, ttlSecs])`: store text or binary value, optionally with TTL seconds.
+- `get(key) -> Optional<byte[]>`: return raw bytes or empty when missing/expired.
+- `delete(key) -> boolean`: report whether an entry was deleted.
+- `close()`: close active and idle sockets. Use try-with-resources; later requests are rejected.
 
-Keys are UTF-8 encoded and limited to 1 KiB. Values are limited to 8 MiB by the protocol. Each node has its own volatile cache; nodes do not share entries.
+Keys must be non-empty and no longer than 1,024 UTF-8 bytes; values may be up to 8 MiB. The server's configured cache capacity can additionally reject a SET if the entry cannot fit.
 
-## TLS
+## TLS and token authentication
 
-When the server's TCP TLS listener is enabled, set `tlsEnabled` to `true` in `NebulaCache.Config`. The SDK uses the JVM's default trust store and validates the server certificate and hostname. Add a private CA to the JVM trust store when required. TLS is disabled by default.
+The TLS client uses the JVM's default trust store, validates the certificate and hostname, and negotiates TLS for the TCP connection. Import a private CA into a trust store used by the JVM when necessary. For token authentication, set both `tlsEnabled` and `token` in the `NebulaCache.Config`; the SDK sends AUTH over each new TLS connection. A token without TLS is rejected.
 
 ```java
+import io.nebulacache.NebulaCache;
+import java.time.Duration;
+
 NebulaCache.Config config = new NebulaCache.Config(
-        0, 10, Duration.ofSeconds(5), Duration.ofSeconds(5), Duration.ofSeconds(5),
-        Duration.ofSeconds(60), Duration.ofSeconds(300), 2, true);
+        0, 10,
+        Duration.ofSeconds(5), Duration.ofSeconds(5), Duration.ofSeconds(5),
+        Duration.ofSeconds(60), Duration.ofSeconds(300),
+        2, true, System.getenv("NEBULA_TOKEN"));
+try (NebulaCache cache = new NebulaCache("cache.example:7001", config)) {
+    cache.ping();
+}
 ```
 
-## Connection pooling and resilience
+`Config` fields in order are `minPoolSize`, `maxPoolSize`, `connectTimeout`, `requestTimeout`, `acquireTimeout`, `idleTimeout`, `maxLifetime`, `maxRetries`, `tlsEnabled`, and `token`. To use a private CA, add it to a JVM trust store and supply that store when starting the application:
 
-Connections are reused for sequential requests. Each socket carries one request at a time; concurrent calls use separate pooled sockets. The client lazily opens connections and owns them until `close()`.
+```bash
+keytool -importcert -noprompt -alias nebula-ca -file ./ca.pem \
+  -keystore ./nebula-truststore.p12 -storetype PKCS12
+java -Djavax.net.ssl.trustStore=./nebula-truststore.p12 \
+  -Djavax.net.ssl.trustStorePassword="$TRUSTSTORE_PASSWORD" YourApplication
+```
 
-`NebulaCache.Config` fields are `minPoolSize` (0), `maxPoolSize` (10), `connectTimeout` (5 seconds), `requestTimeout` (5 seconds), `acquireTimeout` (5 seconds), `idleTimeout` (60 seconds), `maxLifetime` (300 seconds), `maxRetries` (2), and `tlsEnabled` (false). Durations must be positive. The legacy timeout constructor sets connect and request timeouts; acquisition retains its own default.
+Keep trust-store passwords and API tokens out of source control. TLS is not enabled by default.
 
-Only GET is retried, with bounded exponential full jitter and a per-client retry budget. SET and DELETE are not automatically retried because a timeout after sending can leave their outcome ambiguous. Expired or failed sockets are discarded and replaced on later acquisition.
+## Pooling, timeouts, and retries
+
+`NebulaCache.Config()` defaults to min pool size 0, max pool size 10, five-second connect/request/acquire timeouts, 60-second idle timeout, 300-second maximum connection lifetime, two GET retries, TLS disabled, and no token. Pool sizes must satisfy `0 <= minPoolSize <= maxPoolSize`, with a positive maximum; durations must be positive.
+
+Connections are opened lazily and reused for sequential calls. A socket carries one request at a time, while simultaneous calls obtain separate pool connections. The client owns its pool until `close()`. Only GET retries transient transport errors, using bounded exponential full jitter and a per-client retry budget. SET and DELETE are not retried because a timeout can happen after the mutation has reached the server.
 
 ## Smoke test
 
-The `NebulaCache` main method exercises ping, set, get, and delete. Build the SDK, then run it from this directory with the default node address or provide an address. Add `--tls` to connect to a TLS-enabled node; for a private CA, configure it in the JVM trust store as described above:
+The SDK main method exercises ping, set, get, and delete. Build first, then run with the default address or supply a different one:
 
 ```bash
 mvn package
-java -cp target/classes io.nebulacache.NebulaCache
-java -cp target/classes io.nebulacache.NebulaCache 127.0.0.1:7001
-keytool -importcert -noprompt -alias mkcert -file "$(mkcert -CAROOT)/rootCA.pem" -keystore /tmp/nebula-truststore.p12 -storetype PKCS12 -storepass changeit
-java -Djavax.net.ssl.trustStore=/tmp/nebula-truststore.p12 -Djavax.net.ssl.trustStorePassword=changeit -cp target/classes io.nebulacache.NebulaCache --tls
-java -Djavax.net.ssl.trustStore=/tmp/nebula-truststore.p12 -Djavax.net.ssl.trustStorePassword=changeit -cp target/classes io.nebulacache.NebulaCache --tls 127.0.0.1:7001
+java -cp ./target/classes io.nebulacache.NebulaCache
+java -cp ./target/classes io.nebulacache.NebulaCache 127.0.0.1:7001
+java -cp ./target/classes io.nebulacache.NebulaCache --tls 127.0.0.1:7001
 ```
+
+For TLS with a private CA, start Java with the trust-store system properties shown in [TLS and token authentication](#tls-and-token-authentication). The smoke-test main currently supports the `--tls` flag but not a token argument; use the SDK `Config` API for authenticated calls.
 
 ## Exceptions
 
-- `CacheConnectionException`: the node could not be reached or the request timed out.
-- `CacheProtocolException`: the node returned a malformed or incomplete protocol response.
-- `CacheResponseException`: the node returned an unsuccessful protocol status; `getStatus()` returns its numeric status.
-- `NebulaCacheException`: common unchecked base class for SDK errors.
-- `NullPointerException` and `IllegalArgumentException`: null or invalid key, value, TTL, timeout, or client configuration.
+- `CacheConnectionException`: connection or timeout failure.
+- `CacheProtocolException`: invalid or incomplete protocol response.
+- `CacheResponseException`: the server returned an unsuccessful status; `getStatus()` returns its numeric status.
+- `NebulaCacheException`: unchecked common base for SDK exceptions.
+- `IllegalArgumentException` / `NullPointerException`: invalid or null arguments/configuration.
+
+## Test
+
+Run the unit tests from this directory:
+
+```bash
+mvn test
+```

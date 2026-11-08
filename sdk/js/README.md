@@ -1,24 +1,20 @@
 # NebulaCache JavaScript SDK
 
-A dependency-free Node.js client for the NebulaCache binary TCP protocol. Requires Node.js 18 or newer and uses the built-in `net` module.
+A dependency-free Node.js 18+ client for the NebulaCache v1 binary TCP protocol. The SDK uses built-in `net` and `tls` modules and provides async cache operations, TTLs, TLS, token authentication, a connection pool, and bounded GET retries. The package uses CommonJS.
 
-## Start a node
+## Before you start
 
-Start a node listening on the default TCP address:
-
-```bash
-cargo run -p nebula-node -- --listen 127.0.0.1:7001
-```
-
-TCP client authentication is not provided. TLS is optional on the server and disabled by default; expose plaintext nodes only on trusted interfaces and apply suitable network controls. The optional password-protected web admin console is separate from this TCP SDK. See the [node setup and console instructions](../../README.md#use-the-web-admin-console).
+Start a server using [the repository's server instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. A server configured for token authentication requires TLS and a trusted server certificate; set a token when constructing the client.
 
 ## Install
 
-Install the local SDK package into a Node.js project:
+From a Node.js project, install the local package using its repository path:
 
 ```bash
 npm install /path/to/nebulacache/sdk/js
 ```
+
+No external runtime packages are required.
 
 ## Quick start
 
@@ -27,16 +23,16 @@ const { NebulaCache } = require('nebulacache');
 
 async function main() {
   const cache = new NebulaCache('127.0.0.1:7001');
+  try {
+    await cache.ping();
+    await cache.set('greeting', 'hello', 60);
 
-  await cache.set('greeting', 'hello', 60);
-  const value = await cache.get('greeting');
-  console.log(value === null ? 'missing' : value.toString('utf8'));
-
-  if (await cache.delete('greeting')) {
-    console.log('entry deleted');
+    const value = await cache.get('greeting');
+    console.log(value === null ? 'missing' : value.toString('utf8'));
+    console.log('deleted:', await cache.delete('greeting'));
+  } finally {
+    await cache.close();
   }
-
-  console.log(await cache.ping());
 }
 
 main().catch((error) => {
@@ -45,58 +41,68 @@ main().catch((error) => {
 });
 ```
 
-`set` accepts strings, `Buffer` instances, or `Uint8Array` values. Strings and keys are encoded as UTF-8. `get` returns a `Buffer` so binary values are preserved, or `null` if the key is missing or expired. A TTL of `0` (the default) means the entry does not expire. TTLs can be provided as safe integer numbers or `BigInt` values up to the protocol's unsigned 64-bit maximum.
+`set` accepts strings, `Buffer`, or `Uint8Array`; strings and keys use UTF-8. `get` returns a `Buffer` or `null` for a missing/expired key. TTL `0` means no expiration. TTLs may be safe integer numbers or `BigInt` values up to the unsigned 64-bit maximum.
 
-## API
+## API and behavior
 
-- `new NebulaCache(address = '127.0.0.1:7001', timeoutOrOptions = 5000)`: create a client with a `host:port` address and either a per-operation timeout in milliseconds or an options object. Set `options.tls` to standard Node.js TLS options to enable TLS. IPv6 addresses use the `[host]:port` format.
-- `await ping()`: returns `true` if the node responds with `PONG`; otherwise rejects with an SDK exception.
-- `await set(key, value, ttlSecs = 0)`: store a non-empty string key and a string or binary value.
-- `await get(key)`: return the raw value as a `Buffer`, or `null` if it does not exist.
-- `await delete(key)`: return `true` if an entry was deleted, or `false` if it did not exist.
+- `new NebulaCache(address = '127.0.0.1:7001', timeoutOrOptions = 5000)`: create a client. A numeric second argument sets connect and request timeout milliseconds; an options object allows more control.
+- `await ping()`: return true when the server responds with `PONG`.
+- `await set(key, value, ttlSecs = 0)`: store text or binary data, optionally with a TTL in seconds.
+- `await get(key)`: return raw `Buffer` bytes or `null` if absent/expired.
+- `await delete(key)`: return true if an entry was deleted, otherwise false.
+- `await close()`: stop pool activity and close active sockets. Requests after close reject.
 
-Keys are UTF-8 encoded and limited to 1 KiB. Values are limited to 8 MiB by the protocol. Each node has its own volatile cache; nodes do not share entries.
+Keys must be non-empty strings no longer than 1,024 UTF-8 bytes. Values may be up to 8 MiB. The server's memory limit may reject a SET independently of the protocol value limit.
 
-## TLS
+The options object accepts `minPoolSize`, `maxPoolSize`, `connectTimeout`, `requestTimeout`, `acquireTimeout`, `idleTimeout`, `maxLifetime`, `maxRetries`, `tls`, and `token`. Timeout values are milliseconds; pool and retry counts are non-negative safe integers (the maximum pool size must be positive). Defaults are pool size 0–10, five-second connect/request/acquire timeouts, 60-second idle timeout, 300-second max lifetime, and two GET retries.
 
-When the server's TCP TLS listener is enabled, pass standard Node.js `tls.connect` options in the client's `tls` option. For a private CA, supply its certificate as `ca`; certificate verification is enabled by default.
+## TLS and token authentication
+
+Pass normal Node.js TLS connection options in `tls`. Certificate verification is enabled unless explicitly disabled. To add a private CA, supply its PEM bytes as `ca`. When authentication is enabled on the server, also pass the API token in `token`; each new TLS pool connection authenticates before use. Supplying a token without TLS, or with `rejectUnauthorized: false`, is rejected.
 
 ```js
 const fs = require('node:fs');
 const { NebulaCache } = require('nebulacache');
 
 const cache = new NebulaCache('cache.example:7001', {
-  tls: { ca: fs.readFileSync('ca.pem') },
+  tls: { ca: fs.readFileSync('./ca.pem') },
+  token: process.env.NEBULA_TOKEN,
 });
 ```
 
-Omit `tls` to use plaintext TCP.
+Do not disable certificate validation or commit tokens/CA private keys. Omit `tls` only for a plaintext server with authentication disabled.
 
-## CLI example
+## Pooling and retries
 
-The example supports `ping`, `set`, `get`, and `delete` commands. It uses `NEBULA_ADDR` if set, or defaults to `127.0.0.1:7001`. To use TLS with a private CA, pass `--tls-ca` or set `NEBULA_TLS_CA`:
+Connections are created lazily, reused for requests, and closed by `close()`. Each socket handles one request at a time, so simultaneous operations require separate pool connections. Idle and old sockets are retired. The SDK retries only GET requests after transient transport errors, using bounded exponential full jitter and a per-client retry budget. SET and DELETE are not automatically repeated because their outcome can be ambiguous after a timeout.
+
+## Example CLI
+
+The included CLI supports `ping`, `set`, `get`, and `delete`. It uses `NEBULA_ADDR` or `127.0.0.1:7001`; `--tls-ca` or `NEBULA_TLS_CA` loads a private CA and enables TLS.
 
 ```bash
-node examples/cache_cli.js ping
-node examples/cache_cli.js set greeting hello --ttl 60
-node examples/cache_cli.js get greeting
-node examples/cache_cli.js delete greeting
-node examples/cache_cli.js --address 127.0.0.1:7002 ping
-node examples/cache_cli.js --tls-ca "$(mkcert -CAROOT)/rootCA.pem" ping
-NEBULA_TLS_CA="$(mkcert -CAROOT)/rootCA.pem" node examples/cache_cli.js ping
+node ./examples/cache_cli.js ping
+node ./examples/cache_cli.js set greeting hello --ttl 60
+node ./examples/cache_cli.js get greeting
+node ./examples/cache_cli.js delete greeting
+node ./examples/cache_cli.js --address 127.0.0.1:7001 ping
+node ./examples/cache_cli.js --tls-ca /path/to/ca.pem ping
+NEBULA_TLS_CA=/path/to/ca.pem node ./examples/cache_cli.js ping
 ```
 
-## Exceptions
+The example CLI does not currently accept a token option. Use the SDK client with its `token` option for an authenticated connection.
 
-- `CacheConnectionError`: the node could not be reached or the request timed out.
-- `CacheProtocolError`: the node returned a malformed or incomplete protocol response.
-- `CacheResponseError`: the node returned an unsuccessful protocol status; `status` contains its numeric status.
-- `NebulaCacheError`: common base class for SDK errors.
-- `TypeError` and `RangeError`: invalid key, value, TTL, timeout, or client configuration.
+## Errors
+
+- `CacheConnectionError`: connection, timeout, or transport failure.
+- `CacheProtocolError`: malformed or incomplete protocol response.
+- `CacheResponseError`: unsuccessful server status; the error's `status` property contains the numeric protocol status.
+- `NebulaCacheError`: common base class for SDK-specific errors.
+- `TypeError` / `RangeError`: invalid key, value, TTL, timeout, pool size, or options.
 
 ## Test
 
-Run the SDK tests from this directory:
+Run the unit tests from this directory:
 
 ```bash
 npm test
