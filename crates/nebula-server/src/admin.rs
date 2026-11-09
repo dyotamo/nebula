@@ -49,7 +49,6 @@ struct ConsoleSession {
 struct ConsoleState {
     store: Arc<CacheStore>,
     limits: FrameLimits,
-    password: Arc<str>,
     auth_store: Option<Arc<AuthStore>>,
     sessions: Arc<dashmap::DashMap<String, ConsoleSession>>,
     metrics: Arc<Metrics>,
@@ -62,10 +61,7 @@ struct ConsoleState {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LoginRequest {
-    #[serde(default)]
-    password: Option<String>,
-    #[serde(default)]
-    token: Option<String>,
+    token: String,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +104,13 @@ struct EntriesPage {
     matching: usize,
     page: usize,
     page_size: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapAdminRequest {
+    credential: String,
+    username: String,
 }
 
 #[derive(Deserialize)]
@@ -208,7 +211,6 @@ pub(crate) async fn run(
     listener: TcpListener,
     store: Arc<CacheStore>,
     limits: FrameLimits,
-    password: String,
     auth_store: Option<Arc<AuthStore>>,
     tls_acceptor: Option<TlsAcceptor>,
     lifecycle: watch::Receiver<ApplicationState>,
@@ -223,7 +225,6 @@ pub(crate) async fn run(
     let app = router(
         store,
         limits,
-        password,
         auth_store,
         secure_cookies,
         lifecycle.clone(),
@@ -267,7 +268,6 @@ pub(crate) async fn run(
 fn router(
     store: Arc<CacheStore>,
     limits: FrameLimits,
-    password: String,
     auth_store: Option<Arc<AuthStore>>,
     secure_cookies: bool,
     lifecycle: watch::Receiver<ApplicationState>,
@@ -279,7 +279,6 @@ fn router(
     let state = Arc::new(ConsoleState {
         store,
         limits,
-        password: password.into(),
         auth_store,
         sessions: Arc::new(dashmap::DashMap::new()),
         metrics,
@@ -293,9 +292,11 @@ fn router(
         .route("/", get(index))
         .route("/api/metrics", get(dashboard_metrics))
         .route("/api/login", post(login))
+        .route("/api/session", get(session))
         .route("/api/logout", post(logout))
+        .route("/api/bootstrap-admin", post(bootstrap_admin))
         .route("/api/users", get(list_users).post(create_user))
-        .route("/api/users/{username}", delete(delete_user))
+        .route("/api/users/{username}", get(show_user).delete(delete_user))
         .route("/api/users/{username}/role", put(change_user_role))
         .route("/api/users/{username}/enabled", put(change_user_enabled))
         .route(
@@ -314,7 +315,7 @@ fn router(
 }
 
 async fn dashboard_metrics(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
-    if !authorized(&state, &headers, false) {
+    if !admin_authorized(&state, &headers, false) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if !state.dashboard_enabled {
@@ -366,33 +367,23 @@ async fn login(
     Json(credentials): Json<LoginRequest>,
 ) -> Response {
     let authentication_started = Instant::now();
-    let role = if let Some(auth_store) = state.auth_store.as_ref() {
-        match credentials
-            .token
-            .as_deref()
-            .map(|token| auth_store.authenticate(token))
-        {
-            Some(Ok(Some(identity))) => Some(identity.role),
-            Some(Ok(None)) | None => None,
-            Some(Err(error)) => {
+    let role = match state.auth_store.as_ref() {
+        Some(auth_store) => match auth_store.authenticate(&credentials.token) {
+            Ok(Some(identity)) => Some(identity.role),
+            Ok(None) => None,
+            Err(error) => {
                 tracing::warn!(error = %error, "admin console authentication lookup failed");
                 None
             }
-        }
-    } else if credentials
-        .password
-        .as_deref()
-        .is_some_and(|password| constant_time_eq(password, &state.password))
-    {
-        Some(Role::Admin)
-    } else {
-        None
+        },
+        None => None,
     };
+    let admin_role = role.as_ref().is_some_and(|role| role.is_admin());
     state.metrics.record_authentication(
-        role.is_some(),
+        admin_role,
         authentication_started.elapsed().as_nanos() as u64,
     );
-    let Some(role) = role else {
+    let Some(role) = role.filter(|role| role.is_admin()) else {
         tracing::warn!("admin console authentication failed");
         return (
             StatusCode::UNAUTHORIZED,
@@ -425,6 +416,26 @@ async fn login(
         .into_response()
 }
 
+async fn session(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
+    let Some(token) = session_token(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(session) = state.sessions.get(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if Instant::now() >= session.expires_at || !session.role.is_admin() {
+        drop(session);
+        state.sessions.remove(&token);
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(json!({
+        "ok": true,
+        "csrf_token": session.csrf_token,
+        "role": session.role.as_str()
+    }))
+    .into_response()
+}
+
 async fn logout(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
     let Some(token) = session_token(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -451,6 +462,43 @@ async fn logout(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> R
         .into_response()
 }
 
+async fn bootstrap_admin(
+    State(state): State<Arc<ConsoleState>>,
+    Json(request): Json<BootstrapAdminRequest>,
+) -> Response {
+    let Some(auth_store) = state.auth_store.as_deref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match auth_store.bootstrap_admin(&request.credential, &request.username) {
+        Ok((user, token)) => {
+            tracing::info!(action = "admin_bootstrapped", username = %user.username);
+            Json(json!({
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "role": user.role.as_str(),
+                    "enabled": user.enabled,
+                    "created_at": user.created_at
+                },
+                "token": {
+                    "id": token.metadata.id,
+                    "token": token.token,
+                    "expires_at": token.metadata.expires_at
+                }
+            }))
+            .into_response()
+        }
+        Err(nebula_auth::AuthError::InvalidBootstrapCredential)
+        | Err(nebula_auth::AuthError::BootstrapUnavailable) => {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(nebula_auth::AuthError::UsernameExists | nebula_auth::AuthError::InvalidUsername) => {
+            StatusCode::BAD_REQUEST.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 async fn list_users(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
     if !admin_authorized(&state, &headers, false) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -472,6 +520,31 @@ async fn list_users(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) 
                 .collect::<Vec<_>>(),
         )
         .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn show_user(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+) -> Response {
+    if !admin_authorized(&state, &headers, false) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(auth_store) = state.auth_store.as_deref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match auth_store.get_user(&username) {
+        Ok(Some(user)) => Json(UserView {
+            id: user.id,
+            username: user.username,
+            role: user.role.as_str(),
+            enabled: user.enabled,
+            created_at: user.created_at,
+        })
+        .into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -658,7 +731,7 @@ async fn list_entries(
     headers: HeaderMap,
     Query(query): Query<ListEntriesQuery>,
 ) -> Response {
-    if !authorized(&state, &headers, false) {
+    if !admin_authorized(&state, &headers, false) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -703,7 +776,7 @@ async fn list_entries(
 }
 
 async fn clear_entries(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
-    if !authorized(&state, &headers, true) {
+    if !admin_authorized(&state, &headers, true) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -716,7 +789,7 @@ async fn set_entry(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !authorized(&state, &headers, true) {
+    if !admin_authorized(&state, &headers, true) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -742,7 +815,7 @@ async fn delete_entry(
     headers: HeaderMap,
     Path(key): Path<String>,
 ) -> Response {
-    if !authorized(&state, &headers, true) {
+    if !admin_authorized(&state, &headers, true) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -754,31 +827,6 @@ async fn delete_entry(
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
-}
-
-fn authorized(state: &ConsoleState, headers: &HeaderMap, write: bool) -> bool {
-    let Some(token) = session_token(headers) else {
-        return false;
-    };
-    let Some(session) = state.sessions.get(&token) else {
-        return false;
-    };
-    if Instant::now() >= session.expires_at {
-        drop(session);
-        state.sessions.remove(&token);
-        return false;
-    }
-    let role_allowed = if write {
-        session.role.can_write()
-    } else {
-        session.role.can_read()
-    };
-    let csrf_valid = !write
-        || headers
-            .get("x-nebula-csrf")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| constant_time_eq(value, &session.csrf_token));
-    role_allowed && csrf_valid
 }
 
 fn admin_authorized(state: &ConsoleState, headers: &HeaderMap, write: bool) -> bool {
@@ -858,10 +906,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        clear_entries, constant_time_eq, create_token, create_user, dashboard_metrics, decode_hex,
-        delete_entry, encode_hex, list_entries, list_tokens, login, revoke_token, router,
-        set_entry, wait_for_shutdown, ConsoleState, CreateTokenRequest, CreateUserRequest,
-        ListEntriesQuery, LoginRequest,
+        bootstrap_admin, clear_entries, constant_time_eq, create_token, create_user,
+        dashboard_metrics, decode_hex, delete_entry, encode_hex, list_entries, list_tokens, login,
+        revoke_token, router, session, set_entry, show_user, wait_for_shutdown,
+        BootstrapAdminRequest, ConsoleSession, ConsoleState, CreateTokenRequest, CreateUserRequest,
+        ListEntriesQuery, LoginRequest, SESSION_COOKIE,
     };
     use crate::metrics::Metrics;
     use axum::{
@@ -894,7 +943,6 @@ mod tests {
                 router(
                     Arc::new(CacheStore::new()),
                     FrameLimits::default(),
-                    "secret".to_owned(),
                     None,
                     false,
                     receiver.clone(),
@@ -923,12 +971,14 @@ mod tests {
 
     #[tokio::test]
     async fn login_session_can_manage_entries_and_rejects_anonymous_access() {
+        let auth_store = Arc::new(AuthStore::open(":memory:").unwrap());
+        auth_store.create_user("root", Role::Admin).unwrap();
+        let api_token = auth_store.create_token("root", None).unwrap();
         let lifecycle = Lifecycle::new();
         let state = Arc::new(ConsoleState {
             store: Arc::new(CacheStore::new()),
             limits: FrameLimits::default(),
-            password: Arc::from("secret"),
-            auth_store: None,
+            auth_store: Some(auth_store),
             sessions: Arc::new(dashmap::DashMap::new()),
             metrics: Metrics::new(),
             health: HealthManager::new(lifecycle.clone(), false),
@@ -950,8 +1000,7 @@ mod tests {
         let invalid_login = login(
             State(Arc::clone(&state)),
             Json(LoginRequest {
-                password: Some("wrong".to_owned()),
-                token: None,
+                token: "invalid-token".to_owned(),
             }),
         )
         .await;
@@ -960,8 +1009,7 @@ mod tests {
         let authenticated = login(
             State(Arc::clone(&state)),
             Json(LoginRequest {
-                password: Some("secret".to_owned()),
-                token: None,
+                token: api_token.token,
             }),
         )
         .await;
@@ -984,6 +1032,13 @@ mod tests {
             "x-nebula-csrf",
             HeaderValue::from_str(response["csrf_token"].as_str().unwrap()).unwrap(),
         );
+
+        let restored_session = session(State(Arc::clone(&state)), headers.clone()).await;
+        assert_eq!(restored_session.status(), StatusCode::OK);
+        let body = to_bytes(restored_session.into_body(), 1024).await.unwrap();
+        let restored: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(restored["csrf_token"], response["csrf_token"]);
+        assert_eq!(restored["role"], "admin");
 
         state.metrics.record_request("set", true, 1_000_000);
         let dashboard = dashboard_metrics(State(Arc::clone(&state)), headers.clone()).await;
@@ -1057,7 +1112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_store_login_shares_roles_and_requires_csrf_for_writes() {
+    async fn non_admin_roles_cannot_access_admin_console() {
         let auth_store = Arc::new(AuthStore::open(":memory:").unwrap());
         auth_store.create_user("viewer", Role::ReadOnly).unwrap();
         let api_token = auth_store.create_token("viewer", None).unwrap();
@@ -1065,7 +1120,6 @@ mod tests {
         let state = Arc::new(ConsoleState {
             store: Arc::new(CacheStore::new()),
             limits: FrameLimits::default(),
-            password: Arc::from("unused"),
             auth_store: Some(auth_store),
             sessions: Arc::new(dashmap::DashMap::new()),
             metrics: Metrics::new(),
@@ -1075,48 +1129,99 @@ mod tests {
             secure_cookies: true,
         });
 
-        let authenticated = login(
+        let denied_login = login(
             State(Arc::clone(&state)),
             Json(LoginRequest {
-                password: None,
-                token: Some(api_token.token),
+                token: api_token.token,
             }),
         )
         .await;
-        assert_eq!(authenticated.status(), StatusCode::OK);
-        assert!(authenticated.headers()[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .contains("; Secure"));
-        let cookie = authenticated.headers()[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
-        let response = to_bytes(authenticated.into_body(), 1024).await.unwrap();
-        let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
-        headers.insert(
-            "x-nebula-csrf",
-            HeaderValue::from_str(response["csrf_token"].as_str().unwrap()).unwrap(),
-        );
+        assert_eq!(denied_login.status(), StatusCode::UNAUTHORIZED);
+        assert!(state.sessions.is_empty());
 
-        let visible = list_entries(
+        state.sessions.insert(
+            "read-only-session".to_owned(),
+            ConsoleSession {
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                role: Role::ReadOnly,
+                csrf_token: "csrf".to_owned(),
+            },
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}=read-only-session")).unwrap(),
+        );
+        headers.insert("x-nebula-csrf", HeaderValue::from_static("csrf"));
+
+        let denied_read = list_entries(
             State(Arc::clone(&state)),
             headers.clone(),
             Query(ListEntriesQuery::default()),
         )
         .await;
-        assert_eq!(visible.status(), StatusCode::OK);
-        let denied_write = clear_entries(State(state), headers).await;
+        assert_eq!(denied_read.status(), StatusCode::UNAUTHORIZED);
+
+        let denied_dashboard = dashboard_metrics(State(Arc::clone(&state)), headers.clone()).await;
+        assert_eq!(denied_dashboard.status(), StatusCode::UNAUTHORIZED);
+
+        let denied_write = clear_entries(State(Arc::clone(&state)), headers.clone()).await;
         assert_eq!(denied_write.status(), StatusCode::UNAUTHORIZED);
+        assert!(state.store.is_empty());
+
+        let denied_session = session(State(Arc::clone(&state)), headers).await;
+        assert_eq!(denied_session.status(), StatusCode::UNAUTHORIZED);
+        assert!(state.sessions.is_empty());
     }
 
     #[tokio::test]
-    async fn admin_console_manages_users_and_token_revocation() {
+    async fn bootstrap_admin_api_creates_the_first_admin_and_token() {
+        let auth_store = Arc::new(AuthStore::open(":memory:").unwrap());
+        let credential = auth_store.ensure_bootstrap_credential().unwrap().unwrap();
+        let lifecycle = Lifecycle::new();
+        let state = Arc::new(ConsoleState {
+            store: Arc::new(CacheStore::new()),
+            limits: FrameLimits::default(),
+            auth_store: Some(Arc::clone(&auth_store)),
+            sessions: Arc::new(dashmap::DashMap::new()),
+            metrics: Metrics::new(),
+            health: HealthManager::new(lifecycle.clone(), false),
+            lifecycle: lifecycle.subscribe(),
+            dashboard_enabled: true,
+            secure_cookies: true,
+        });
+
+        let response = bootstrap_admin(
+            State(Arc::clone(&state)),
+            Json(BootstrapAdminRequest {
+                credential: credential.clone(),
+                username: "root".to_owned(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 2048).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["user"]["username"], "root");
+        assert_eq!(result["user"]["role"], "admin");
+        assert!(auth_store
+            .authenticate(result["token"]["token"].as_str().unwrap())
+            .unwrap()
+            .is_some_and(|identity| identity.role.is_admin()));
+
+        let unavailable = bootstrap_admin(
+            State(state),
+            Json(BootstrapAdminRequest {
+                credential,
+                username: "another-root".to_owned(),
+            }),
+        )
+        .await;
+        assert_eq!(unavailable.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_manages_users_and_token_revocation() {
         let auth_store = Arc::new(AuthStore::open(":memory:").unwrap());
         auth_store.create_user("root", Role::Admin).unwrap();
         let admin_token = auth_store.create_token("root", None).unwrap();
@@ -1124,7 +1229,6 @@ mod tests {
         let state = Arc::new(ConsoleState {
             store: Arc::new(CacheStore::new()),
             limits: FrameLimits::default(),
-            password: Arc::from("unused"),
             auth_store: Some(Arc::clone(&auth_store)),
             sessions: Arc::new(dashmap::DashMap::new()),
             metrics: Metrics::new(),
@@ -1136,8 +1240,7 @@ mod tests {
         let authenticated = login(
             State(Arc::clone(&state)),
             Json(LoginRequest {
-                password: None,
-                token: Some(admin_token.token),
+                token: admin_token.token,
             }),
         )
         .await;
@@ -1167,6 +1270,18 @@ mod tests {
         )
         .await;
         assert_eq!(created_user.status(), StatusCode::OK);
+
+        let shown_user = show_user(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Path("service".to_owned()),
+        )
+        .await;
+        assert_eq!(shown_user.status(), StatusCode::OK);
+        let shown_user = to_bytes(shown_user.into_body(), 1024).await.unwrap();
+        let shown_user: serde_json::Value = serde_json::from_slice(&shown_user).unwrap();
+        assert_eq!(shown_user["username"], "service");
+        assert_eq!(shown_user["role"], "readwrite");
 
         let created_token = create_token(
             State(Arc::clone(&state)),

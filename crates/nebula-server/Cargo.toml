@@ -13,7 +13,7 @@ axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 rand = "0.8"
 rustls-pemfile = "2"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 nebula-auth = { path = "../nebula-auth" }
 nebula-core = { path = "../nebula-core" }
 nebula-health = { path = "../nebula-health" }

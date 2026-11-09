@@ -171,6 +171,10 @@
       transition: color .15s, background .15s, border-color .15s
     }
 
+    .rail-nav a[hidden] {
+      display: none
+    }
+
     .rail-nav a:hover,
     .rail-nav a[aria-current="location"] {
       border-color: var(--line);
@@ -649,6 +653,82 @@
       border-bottom: 1px solid var(--line)
     }
 
+    .admin-form {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+      align-items: end;
+      gap: 12px;
+      padding: 14px 17px;
+      border-bottom: 1px solid var(--line)
+    }
+
+    .admin-form .field {
+      margin: 0
+    }
+
+    .admin-form .field input,
+    .admin-form .field select {
+      min-height: 38px
+    }
+
+    .admin-list {
+      display: grid;
+      gap: 0;
+      padding: 0 17px
+    }
+
+    .admin-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 1.3fr) minmax(100px, 1fr) minmax(120px, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      min-height: 54px;
+      border-bottom: 1px solid var(--line);
+      color: var(--secondary);
+      font-size: 11px
+    }
+
+    .admin-row:last-child {
+      border-bottom: 0
+    }
+
+    .admin-row select {
+      width: 100%;
+      min-height: 34px;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      color: var(--text);
+      background: var(--input)
+    }
+
+    .admin-row-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 4px
+    }
+
+    .token-output {
+      display: none;
+      margin: 14px 17px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      color: var(--text);
+      background: var(--elevated);
+      overflow-wrap: anywhere
+    }
+
+    .token-output strong,
+    .token-output code {
+      display: block
+    }
+
+    .token-output code {
+      margin-top: 7px;
+      font-size: 11px
+    }
+
     .search-input {
       width: min(380px, 100%);
       min-height: 38px;
@@ -668,7 +748,9 @@
 
     .search-input:focus,
     .field input:focus,
-    .field textarea:focus {
+    .field textarea:focus,
+    .field select:focus,
+    .admin-row select:focus {
       border-color: var(--primary);
       box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent)
     }
@@ -936,7 +1018,8 @@
     }
 
     .field input,
-    .field textarea {
+    .field textarea,
+    .field select {
       width: 100%;
       padding: 10px 11px;
       border: 1px solid var(--line);
@@ -1215,6 +1298,21 @@
         padding: 11px 13px
       }
 
+      .admin-form {
+        grid-template-columns: 1fr;
+        padding: 13px
+      }
+
+      .admin-row {
+        grid-template-columns: minmax(0, 1fr) minmax(90px, 1fr);
+        padding: 10px 0
+      }
+
+      .admin-row-actions {
+        grid-column: 1 / -1;
+        justify-content: flex-start
+      }
+
       .search-input {
         width: 100%
       }
@@ -1278,6 +1376,7 @@
         <a href="#runtime"><span class="nav-mark">02</span>Runtime metrics</a>
         <a href="#health"><span class="nav-mark">03</span>Component health</a>
         <a href="#entries-section"><span class="nav-mark">04</span>Entries</a>
+        <a href="#users-section" id="users-nav" hidden><span class="nav-mark">05</span>Users &amp; tokens</a>
       </nav>
       <div class="rail-meta"><span class="rail-meta-mark"></span><span>Embedded admin console</span></div>
     </aside>
@@ -1350,6 +1449,28 @@
         <div class="health-list" id="component-health"></div>
         <div class="health-list" id="recent-failures"></div>
       </section>
+      <section class="panel" id="users-section" style="display:none; margin-bottom:20px">
+        <div class="panel-head">
+          <div><div class="panel-title">Users</div><div class="panel-sub">Create accounts and update their access roles or status.</div></div>
+          <button class="button" id="refresh-users" type="button">Refresh users</button>
+        </div>
+        <form class="admin-form" id="user-form">
+          <div class="field"><label for="new-username">Username</label><input id="new-username" required autocomplete="off" maxlength="64"></div>
+          <div class="field"><label for="new-user-role">Role</label><select id="new-user-role"><option value="readonly">Read only</option><option value="readwrite">Read and write</option><option value="admin">Administrator</option></select></div>
+          <button class="button primary" type="submit">Create user</button>
+        </form>
+        <div class="admin-list" id="user-list" aria-live="polite"></div>
+        <div class="panel-head">
+          <div><div class="panel-title">API tokens</div><div class="panel-sub">Tokens are displayed only once when created.</div></div>
+        </div>
+        <form class="admin-form" id="token-form">
+          <div class="field"><label for="token-user">User</label><select id="token-user" required></select></div>
+          <div class="field"><label for="token-ttl">Expires in hours</label><input id="token-ttl" type="number" min="1" step="1" placeholder="Never"></div>
+          <button class="button primary" type="submit">Create token</button>
+        </form>
+        <div class="token-output" id="token-output" role="status"></div>
+        <div class="admin-list" id="token-list" aria-live="polite"></div>
+      </section>
       <section class="panel entries-panel" id="entries-section">
         <div class="panel-head">
           <div>
@@ -1401,13 +1522,23 @@
         </div>
         <div class="eyebrow">Secure console access</div>
         <h1 id="login-title">Welcome back</h1>
-        <p>Enter the admin password to manage this node's cache entries.</p>
+        <p>Sign in with an administrator API token to manage this node.</p>
         <form id="login-form">
-          <div class="field"><label for="password">Password</label><input id="password" type="password"
-              autocomplete="current-password" required></div><button class="button primary wide">Sign in to
+          <div class="field"><label for="admin-token">Administrator API token</label><input id="admin-token" type="password"
+              autocomplete="off" required></div><button class="button primary wide">Sign in to
             console</button>
           <div class="error" id="login-error"></div>
         </form>
+        <details style="margin-top:18px">
+          <summary>Bootstrap the first administrator</summary>
+          <form id="bootstrap-form" style="margin-top:12px">
+            <div class="field"><label for="bootstrap-username">Username</label><input id="bootstrap-username" required autocomplete="username" maxlength="64"></div>
+            <div class="field"><label for="bootstrap-credential">One-time bootstrap credential</label><input id="bootstrap-credential" type="password" required autocomplete="off"></div>
+            <button class="button primary wide" type="submit">Create administrator</button>
+            <div class="error" id="bootstrap-error" aria-live="polite"></div>
+            <div class="token-output" id="bootstrap-output" role="status"></div>
+          </form>
+        </details>
       </section>
     </div>
   </div>
@@ -1475,6 +1606,7 @@
     let runtimeRefreshTimer;
     let modalReturnFocus = null;
     let csrfToken = null;
+    let currentRole = null;
 
     function hex(bytes) {
       return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
@@ -1518,8 +1650,11 @@
       $('topbar').inert = true;
       $('topbar').setAttribute('aria-hidden', 'true');
       csrfToken = null;
+      currentRole = null;
+      $('users-section').style.display = 'none';
+      $('users-nav').hidden = true;
       $('login-screen').style.display = 'grid';
-      $('password').focus();
+      $('admin-token').focus();
     }
 
     function showDashboard() {
@@ -1529,6 +1664,10 @@
       $('topbar').inert = false;
       $('topbar').removeAttribute('aria-hidden');
       $('dashboard').style.display = 'block';
+      const canManageUsers = currentRole === 'admin';
+      $('users-section').style.display = canManageUsers ? 'block' : 'none';
+      $('users-nav').hidden = !canManageUsers;
+      if (canManageUsers) refreshUsers();
       if (!runtimeRefreshTimer) runtimeRefreshTimer = setInterval(refreshRuntimeMetrics, 5000);
     }
 
@@ -1724,6 +1863,126 @@
       setTimeout(() => $('toast').classList.remove('show'), 2400);
     }
 
+    async function refreshUsers() {
+      const response = await api('/api/users');
+      if (!response.ok) {
+        if (response.status !== 401) toast('Unable to load users');
+        return;
+      }
+      const users = await response.json();
+      const previousSelection = $('token-user').value;
+      $('user-list').replaceChildren();
+      $('token-user').replaceChildren();
+      for (const user of users) {
+        const row = document.createElement('div');
+        row.className = 'admin-row';
+        const username = document.createElement('strong');
+        username.className = 'mono';
+        username.textContent = user.username;
+        const role = document.createElement('select');
+        role.setAttribute('aria-label', `Role for ${user.username}`);
+        for (const [value, label] of [['readonly', 'Read only'], ['readwrite', 'Read and write'], ['admin', 'Administrator']]) {
+          const option = new Option(label, value, false, user.role === value);
+          role.add(option);
+        }
+        role.onchange = async () => {
+          const result = await api(`/api/users/${encodeURIComponent(user.username)}/role`, {
+            method: 'PUT',
+            body: JSON.stringify({ role: role.value }),
+          });
+          if (!result.ok) toast('Unable to update user role');
+          else toast('User role updated');
+        };
+        const status = document.createElement('span');
+        status.textContent = user.enabled ? 'Enabled' : 'Disabled';
+        const actions = document.createElement('div');
+        actions.className = 'admin-row-actions';
+        const enabled = document.createElement('button');
+        enabled.className = 'icon-button';
+        enabled.textContent = user.enabled ? 'Disable' : 'Enable';
+        enabled.onclick = async () => {
+          const result = await api(`/api/users/${encodeURIComponent(user.username)}/enabled`, {
+            method: 'PUT',
+            body: JSON.stringify({ enabled: !user.enabled }),
+          });
+          if (!result.ok) toast('Unable to update user status');
+          else {
+            toast(user.enabled ? 'User disabled' : 'User enabled');
+            refreshUsers();
+          }
+        };
+        const remove = document.createElement('button');
+        remove.className = 'icon-button icon-button-danger';
+        remove.textContent = 'Delete';
+        remove.onclick = async () => {
+          if (!confirm(`Delete user ${user.username} and all their tokens?`)) return;
+          const result = await api(`/api/users/${encodeURIComponent(user.username)}`, { method: 'DELETE' });
+          if (!result.ok) toast('Unable to delete user');
+          else {
+            toast('User deleted');
+            refreshUsers();
+          }
+        };
+        actions.append(enabled, remove);
+        row.append(username, role, status, actions);
+        $('user-list').append(row);
+        $('token-user').add(new Option(user.username, user.username));
+      }
+      if (users.some(user => user.username === previousSelection)) $('token-user').value = previousSelection;
+      await refreshTokens();
+    }
+
+    async function refreshTokens() {
+      const username = $('token-user').value;
+      $('token-list').replaceChildren();
+      if (!username) return;
+      const response = await api(`/api/users/${encodeURIComponent(username)}/tokens`);
+      if (!response.ok) {
+        if (response.status !== 401) toast('Unable to load tokens');
+        return;
+      }
+      for (const token of await response.json()) {
+        const row = document.createElement('div');
+        row.className = 'admin-row';
+        const id = document.createElement('code');
+        id.className = 'mono';
+        id.textContent = token.id;
+        const created = document.createElement('span');
+        created.textContent = `Created ${new Date(token.created_at * 1000).toLocaleString()}`;
+        const state = document.createElement('span');
+        state.textContent = token.revoked ? 'Revoked' : `Expires ${token.expires_at ? new Date(token.expires_at * 1000).toLocaleString() : 'never'}`;
+        const actions = document.createElement('div');
+        actions.className = 'admin-row-actions';
+        if (!token.revoked) {
+          const revoke = document.createElement('button');
+          revoke.className = 'icon-button icon-button-danger';
+          revoke.textContent = 'Revoke';
+          revoke.onclick = async () => {
+            if (!confirm(`Revoke token ${token.id}?`)) return;
+            const result = await api(`/api/tokens/${encodeURIComponent(token.id)}`, { method: 'DELETE' });
+            if (!result.ok) toast('Unable to revoke token');
+            else {
+              toast('Token revoked');
+              refreshTokens();
+            }
+          };
+          actions.append(revoke);
+        }
+        row.append(id, created, state, actions);
+        $('token-list').append(row);
+      }
+    }
+
+    function showSecret(container, title, secret) {
+      container.replaceChildren();
+      const label = document.createElement('strong');
+      label.textContent = title;
+      const value = document.createElement('code');
+      value.textContent = secret;
+      container.append(label, value);
+      container.style.display = 'block';
+    }
+
     function openEntry(entry = null) {
       modalReturnFocus = document.activeElement;
       editing = entry;
@@ -1762,19 +2021,84 @@
       const response = await api('/api/login', {
         method: 'POST',
         body: JSON.stringify({
-          password: $('password').value,
-          token: $('password').value,
+          token: $('admin-token').value,
         }),
       });
       if (!response.ok) {
-        $('login-error').textContent = 'The password was not accepted.';
+        $('login-error').textContent = 'The API token was not accepted.';
         return;
       }
       const credentials = await response.json();
       csrfToken = credentials.csrf_token;
+      currentRole = credentials.role;
       showDashboard();
       refresh();
     };
+
+    $('bootstrap-form').onsubmit = async event => {
+      event.preventDefault();
+      $('bootstrap-error').textContent = '';
+      $('bootstrap-output').style.display = 'none';
+      const response = await api('/api/bootstrap-admin', {
+        method: 'POST',
+        body: JSON.stringify({
+          username: $('bootstrap-username').value,
+          credential: $('bootstrap-credential').value,
+        }),
+      });
+      if (!response.ok) {
+        $('bootstrap-error').textContent = response.status === 401
+          ? 'The credential is invalid or administrator bootstrap is unavailable.'
+          : 'Unable to create the administrator.';
+        return;
+      }
+      const result = await response.json();
+      showSecret($('bootstrap-output'), 'Administrator API token (shown once)', result.token.token);
+      $('admin-token').value = result.token.token;
+      $('bootstrap-credential').value = '';
+      $('bootstrap-error').textContent = 'Copy the token and sign in with it above.';
+    };
+
+    $('user-form').onsubmit = async event => {
+      event.preventDefault();
+      const response = await api('/api/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          username: $('new-username').value,
+          role: $('new-user-role').value,
+        }),
+      });
+      if (!response.ok) {
+        toast(response.status === 409 ? 'That username already exists' : 'Unable to create user');
+        return;
+      }
+      $('new-username').value = '';
+      toast('User created');
+      refreshUsers();
+    };
+
+    $('token-form').onsubmit = async event => {
+      event.preventDefault();
+      const username = $('token-user').value;
+      if (!username) return;
+      const ttlHours = Number($('token-ttl').value);
+      const expiresAt = ttlHours > 0 ? Math.floor(Date.now() / 1000) + ttlHours * 3600 : null;
+      const response = await api(`/api/users/${encodeURIComponent(username)}/tokens`, {
+        method: 'POST',
+        body: JSON.stringify({ expires_at: expiresAt }),
+      });
+      if (!response.ok) {
+        toast('Unable to create token');
+        return;
+      }
+      const token = await response.json();
+      showSecret($('token-output'), 'API token (shown once)', token.token);
+      $('token-ttl').value = '';
+      toast('Token created');
+      refreshTokens();
+    };
+    $('token-user').onchange = refreshTokens;
+    $('refresh-users').onclick = refreshUsers;
 
     $('entry-form').onsubmit = async event => {
       event.preventDefault();
@@ -1868,13 +2192,16 @@
     window.addEventListener('hashchange', updateActiveSection);
     updateActiveSection();
 
-    api('/api/entries').then(response => {
-      if (response.ok) {
-        showDashboard();
-        refresh();
-      } else {
+    api('/api/session').then(async response => {
+      if (!response.ok) {
         showLogin();
+        return;
       }
+      const session = await response.json();
+      csrfToken = session.csrf_token;
+      currentRole = session.role;
+      showDashboard();
+      refresh();
     });
   </script>
 </body>

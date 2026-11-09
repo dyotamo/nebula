@@ -7,10 +7,11 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use nebula_auth::{AuthStore, Role};
 
+mod admin;
 mod client;
 
+use admin::AdminClient;
 use client::Client;
 use tokio::io::{self as tokio_io, AsyncWriteExt};
 
@@ -30,10 +31,16 @@ struct Cli {
         value_name = "HOST:PORT"
     )]
     address: String,
+    #[arg(
+        long,
+        global = true,
+        env = "NEBULA_ADMIN_ADDR",
+        default_value = "https://127.0.0.1:7002",
+        value_name = "URL"
+    )]
+    admin_address: String,
     #[arg(long, global = true, env = "NEBULA_TLS_CA", value_name = "PEM")]
     tls_ca: Option<PathBuf>,
-    #[arg(long, global = true, env = "NEBULA_AUTH_DB", value_name = "PATH")]
-    auth_db: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -111,6 +118,7 @@ enum TokenCommand {
 
 #[tokio::main]
 async fn main() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     if let Err(error) = run().await {
         eprintln!("nebula: {error}");
         process::exit(1);
@@ -120,14 +128,36 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn Error>> {
     let Cli {
         address,
+        admin_address,
         tls_ca,
-        auth_db,
         command,
     } = Cli::parse();
     match command {
-        Command::BootstrapAdmin { username } => bootstrap_admin(auth_db, &username),
-        Command::User { command } => manage_user(auth_db, command),
-        Command::Token { command } => manage_token(auth_db, command),
+        Command::BootstrapAdmin { username } => {
+            let credential = std::env::var("NEBULA_BOOTSTRAP_TOKEN")
+                .map_err(|_| invalid_input("NEBULA_BOOTSTRAP_TOKEN is required"))?;
+            let client = AdminClient::new(&admin_address, tls_ca.as_deref())?;
+            let result = client.bootstrap_admin(&credential, &username).await?;
+            println!("Created administrator {}", result.user.username);
+            println!("API token (shown once): {}", result.token.token);
+            Ok(())
+        }
+        Command::User { command } => {
+            let client = authenticated_admin_client(&admin_address, tls_ca.as_deref()).await?;
+            let result = manage_user(&client, command).await;
+            let logout = client.logout().await;
+            result?;
+            logout?;
+            Ok(())
+        }
+        Command::Token { command } => {
+            let client = authenticated_admin_client(&admin_address, tls_ca.as_deref()).await?;
+            let result = manage_token(&client, command).await;
+            let logout = client.logout().await;
+            result?;
+            logout?;
+            Ok(())
+        }
         command => {
             let client = Client::new(address, tls_ca, std::env::var("NEBULA_TOKEN").ok())?;
             match command {
@@ -169,95 +199,70 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn bootstrap_admin(database: Option<PathBuf>, username: &str) -> Result<(), Box<dyn Error>> {
-    let credential = std::env::var("NEBULA_BOOTSTRAP_TOKEN")
-        .map_err(|_| invalid_input("NEBULA_BOOTSTRAP_TOKEN is required"))?;
-    let store = open_auth_store(database)?;
-    let (user, token) = store.bootstrap_admin(&credential, username)?;
-    println!("Created administrator {}", user.username);
-    println!("API token (shown once): {}", token.token);
-    Ok(())
+async fn authenticated_admin_client(
+    address: &str,
+    tls_ca: Option<&std::path::Path>,
+) -> Result<AdminClient, Box<dyn Error>> {
+    let token = std::env::var("NEBULA_TOKEN")
+        .map_err(|_| invalid_input("NEBULA_TOKEN must contain an administrator API token"))?;
+    let mut client = AdminClient::new(address, tls_ca)?;
+    client.authenticate(&token).await?;
+    Ok(client)
 }
 
-fn manage_user(database: Option<PathBuf>, command: UserCommand) -> Result<(), Box<dyn Error>> {
-    let store = open_auth_store(database)?;
-    require_admin(&store)?;
+async fn manage_user(client: &AdminClient, command: UserCommand) -> Result<(), Box<dyn Error>> {
     match command {
         UserCommand::Create { username, role } => {
-            let user = store.create_user(&username, Role::try_from(role.as_str())?)?;
-            print_user(&user);
+            print_user(&client.create_user(&username, &role).await?);
         }
         UserCommand::List => {
-            for user in store.list_users()? {
+            for user in client.list_users().await? {
                 print_user(&user);
             }
         }
-        UserCommand::Show { username } => {
-            let user = store
-                .get_user(&username)?
-                .ok_or_else(|| invalid_input("user not found"))?;
-            print_user(&user);
-        }
+        UserCommand::Show { username } => print_user(&client.show_user(&username).await?),
         UserCommand::SetRole { username, role } => {
-            store.set_role(&username, Role::try_from(role.as_str())?)?;
+            client.set_user_role(&username, &role).await?;
         }
-        UserCommand::Disable { username } => store.set_enabled(&username, false)?,
-        UserCommand::Enable { username } => store.set_enabled(&username, true)?,
-        UserCommand::Delete { username } => store.delete_user(&username)?,
+        UserCommand::Disable { username } => {
+            client.set_user_enabled(&username, false).await?;
+        }
+        UserCommand::Enable { username } => {
+            client.set_user_enabled(&username, true).await?;
+        }
+        UserCommand::Delete { username } => client.delete_user(&username).await?,
     }
     Ok(())
 }
 
-fn manage_token(database: Option<PathBuf>, command: TokenCommand) -> Result<(), Box<dyn Error>> {
-    let store = open_auth_store(database)?;
-    require_admin(&store)?;
+async fn manage_token(client: &AdminClient, command: TokenCommand) -> Result<(), Box<dyn Error>> {
     match command {
         TokenCommand::Create {
             username,
             expires_in,
         } => {
             let expires_at = expires_in.as_deref().map(expiration_time).transpose()?;
-            let token = store.create_token(&username, expires_at)?;
-            println!("Token ID: {}", token.metadata.id);
+            let token = client.create_token(&username, expires_at).await?;
+            println!("Token ID: {}", token.id);
             println!("Token (shown once): {}", token.token);
         }
         TokenCommand::List { username } => {
-            for token in store.list_tokens(&username)? {
+            for token in client.list_tokens(&username).await? {
                 println!(
                     "{} created_at={} expires_at={:?} revoked={}",
                     token.id, token.created_at, token.expires_at, token.revoked
                 );
             }
         }
-        TokenCommand::Revoke { token_id } => store.revoke_token(&token_id)?,
+        TokenCommand::Revoke { token_id } => client.revoke_token(&token_id).await?,
     }
     Ok(())
 }
 
-fn open_auth_store(database: Option<PathBuf>) -> Result<AuthStore, Box<dyn Error>> {
-    let path = database.unwrap_or_else(|| PathBuf::from("nebulad.db"));
-    Ok(AuthStore::open(path)?)
-}
-
-fn require_admin(store: &AuthStore) -> Result<(), Box<dyn Error>> {
-    let token = std::env::var("NEBULA_TOKEN")
-        .map_err(|_| invalid_input("NEBULA_TOKEN must contain an administrator API token"))?;
-    if !store
-        .authenticate(&token)?
-        .is_some_and(|identity| identity.role.is_admin())
-    {
-        return Err(invalid_input("an authenticated administrator token is required").into());
-    }
-    Ok(())
-}
-
-fn print_user(user: &nebula_auth::User) {
+fn print_user(user: &admin::User) {
     println!(
         "{} role={} enabled={} created_at={}",
-        user.username,
-        user.role.as_str(),
-        user.enabled,
-        user.created_at
+        user.username, user.role, user.enabled, user.created_at
     );
 }
 

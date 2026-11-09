@@ -14,7 +14,7 @@ use serde::Deserialize;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub listen_addr: SocketAddr,
-    pub admin_console: AdminConsoleOptions,
+    pub admin: AdminOptions,
     pub tls: TlsOptions,
     pub security: SecurityOptions,
     pub shutdown_timeout_secs: u64,
@@ -80,9 +80,8 @@ pub struct MetricsOptions {
 
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct AdminConsoleOptions {
+pub struct AdminOptions {
     pub enabled: bool,
-    pub password: Option<String>,
     pub listen_addr: SocketAddr,
     pub metrics_dashboard: bool,
 }
@@ -91,7 +90,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 7001)),
-            admin_console: AdminConsoleOptions::default(),
+            admin: AdminOptions::default(),
             tls: TlsOptions::default(),
             security: SecurityOptions::default(),
             shutdown_timeout_secs: 30,
@@ -161,11 +160,10 @@ impl Default for MetricsOptions {
     }
 }
 
-impl Default for AdminConsoleOptions {
+impl Default for AdminOptions {
     fn default() -> Self {
         Self {
             enabled: false,
-            password: None,
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 7002)),
             metrics_dashboard: true,
         }
@@ -208,17 +206,10 @@ impl Config {
             .into());
         }
 
-        if config.admin_console.enabled
-            && !config.security.authentication
-            && config
-                .admin_console
-                .password
-                .as_deref()
-                .is_none_or(str::is_empty)
-        {
+        if config.admin.enabled && !config.security.authentication {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "admin_console.password is required and must not be empty when admin_console.enabled is true",
+                "security.authentication must be enabled when admin.enabled is true",
             )
             .into());
         }
@@ -376,9 +367,9 @@ fn coerce_environment_values(value: &mut toml::Value) -> Result<(), Box<dyn Erro
         coerce_config_field::<bool>(security, "authentication")?;
     }
 
-    if let Some(toml::Value::Table(admin_console)) = values.get_mut("admin_console") {
-        coerce_config_field::<bool>(admin_console, "enabled")?;
-        coerce_config_field::<bool>(admin_console, "metrics_dashboard")?;
+    if let Some(toml::Value::Table(admin)) = values.get_mut("admin") {
+        coerce_config_field::<bool>(admin, "enabled")?;
+        coerce_config_field::<bool>(admin, "metrics_dashboard")?;
     }
 
     if let Some(toml::Value::Table(metrics)) = values.get_mut("metrics") {
@@ -445,12 +436,8 @@ mod tests {
         let config = Config::load_with_default(args, &config_path).unwrap();
         fs::remove_file(config_path).unwrap();
         assert_eq!(config.listen_addr.to_string(), "0.0.0.0:7001");
-        assert_eq!(
-            config.admin_console.listen_addr.to_string(),
-            "127.0.0.1:7002"
-        );
-        assert!(!config.admin_console.enabled);
-        assert_eq!(config.admin_console.password, None);
+        assert_eq!(config.admin.listen_addr.to_string(), "127.0.0.1:7002");
+        assert!(!config.admin.enabled);
         assert!(!config.tls.enabled);
         assert_eq!(config.tls.certificate, None);
         assert_eq!(config.tls.private_key, None);
@@ -512,10 +499,12 @@ mod tests {
 shutdown_timeout_secs = 7
 ttl_cleanup_interval_secs = 120
 
-[admin_console]
+[admin]
 enabled = true
-password = "secret"
 listen_addr = "127.0.0.1:7004"
+
+[security]
+authentication = true
 
 [tls]
 enabled = true
@@ -537,12 +526,9 @@ eviction_policy = "lfu"
         .unwrap();
 
         assert_eq!(config.listen_addr.to_string(), "127.0.0.1:7003");
-        assert_eq!(
-            config.admin_console.listen_addr.to_string(),
-            "127.0.0.1:7004"
-        );
-        assert!(config.admin_console.enabled);
-        assert_eq!(config.admin_console.password.as_deref(), Some("secret"));
+        assert_eq!(config.admin.listen_addr.to_string(), "127.0.0.1:7004");
+        assert!(config.admin.enabled);
+        assert!(config.security.authentication);
         assert!(config.tls.enabled);
         assert_eq!(
             config.tls.certificate,
@@ -615,15 +601,12 @@ eviction_policy = "lfu"
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let secret_name = format!("NEBULA_TEST_SECRET_{unique}");
         let enabled_name = format!("NEBULA_TEST_ENABLED_{unique}");
         let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
-        let secret = "p@ss: value #1";
-        std::env::set_var(&secret_name, secret);
         fs::write(
             &path,
             format!(
-                "[admin_console]\nenabled = \"${{{enabled_name}:-true}}\"\npassword = \"${{{secret_name}}}\"\n\n[tls]\nenabled = \"${{{enabled_name}:-true}}\"\ncertificate = \"/tmp/server-cert.pem\"\nprivate_key = \"/tmp/server-key.pem\"\n\n[persistence]\nmode = \"snapshot\"\nsnapshot_interval_secs = \"${{MISSING_INTERVAL_{unique}:-7}}\"\n"
+                "[admin]\nenabled = \"${{{enabled_name}:-true}}\"\n\n[security]\nauthentication = \"${{{enabled_name}:-true}}\"\n\n[tls]\nenabled = \"${{{enabled_name}:-true}}\"\ncertificate = \"/tmp/server-cert.pem\"\nprivate_key = \"/tmp/server-key.pem\"\n\n[persistence]\nmode = \"snapshot\"\nsnapshot_interval_secs = \"${{MISSING_INTERVAL_{unique}:-7}}\"\n"
             ),
         )
         .unwrap();
@@ -633,10 +616,9 @@ eviction_policy = "lfu"
         })
         .unwrap();
 
-        std::env::remove_var(secret_name);
         fs::remove_file(path).unwrap();
-        assert!(config.admin_console.enabled);
-        assert_eq!(config.admin_console.password.as_deref(), Some(secret));
+        assert!(config.admin.enabled);
+        assert!(config.security.authentication);
         assert!(config.tls.enabled);
         assert_eq!(config.persistence.snapshot_interval_secs, 7);
     }
@@ -649,11 +631,7 @@ eviction_policy = "lfu"
             .as_nanos();
         let name = format!("NEBULA_MISSING_{unique}");
         let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
-        fs::write(
-            &path,
-            format!("[admin_console]\npassword = \"${{{name}}}\"\n"),
-        )
-        .unwrap();
+        fs::write(&path, format!("listen_addr = \"${{{name}}}\"\n")).unwrap();
 
         let error = Config::load(Args {
             config: Some(path.clone()),
@@ -680,7 +658,7 @@ eviction_policy = "lfu"
 
         fs::remove_file(path).unwrap();
         assert_eq!(config.listen_addr.to_string(), "127.0.0.1:7003");
-        assert!(!config.admin_console.enabled);
+        assert!(!config.admin.enabled);
         assert_eq!(config.shutdown_timeout_secs, 30);
         assert_eq!(config.frame_limits().max_key_len, 1_024);
         assert_eq!(config.frame_limits().max_value_len, 8 * 1024 * 1024);
@@ -714,16 +692,17 @@ eviction_policy = "lfu"
     #[test]
     fn rejects_unknown_toml_fields() {
         assert!(toml::from_str::<Config>("unknown_setting = true\n").is_err());
+        assert!(toml::from_str::<Config>("[admin]\npassword = 'secret'\n").is_err());
     }
 
     #[test]
-    fn admin_console_requires_a_non_empty_password() {
+    fn admin_requires_token_authentication() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
-        fs::write(&path, "[admin_console]\nenabled = true\n").unwrap();
+        fs::write(&path, "[admin]\nenabled = true\n").unwrap();
 
         let error = Config::load(Args {
             config: Some(path.clone()),
@@ -734,7 +713,7 @@ eviction_policy = "lfu"
         fs::remove_file(path).unwrap();
         assert!(error
             .to_string()
-            .contains("admin_console.password is required"));
+            .contains("security.authentication must be enabled"));
     }
 
     #[test]

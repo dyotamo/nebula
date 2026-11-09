@@ -1,0 +1,762 @@
+openapi: 3.1.0
+info:
+  title: NebulaCache Admin API
+  version: 0.1.0
+  description: >-
+    Administrative API served by the optional admin component. Enable
+    `security.authentication`, TLS, and `admin.enabled` to use this API.
+    Bootstrap the first administrator with the one-time credential printed at
+    server startup, then sign in with the returned API token. Token secrets are
+    returned only when a token is created and must be stored securely.
+servers:
+  - url: /
+tags:
+  - name: Authentication
+    description: Bootstrap accounts and create or restore browser console sessions.
+  - name: Users
+    description: Create, inspect, update, enable, disable, and delete user accounts.
+  - name: Tokens
+    description: Create, inspect, and revoke user API tokens.
+  - name: Cache
+    description: Inspect and manage cache entries through the admin console.
+  - name: Observability
+    description: Read console dashboard metrics and component health.
+paths:
+  /api/login:
+    post:
+      operationId: login
+      tags: [Authentication]
+      summary: Create an admin console session
+      description: Validate an administrator API token and issue a secure, HttpOnly session cookie plus a CSRF token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              administratorToken:
+                summary: Sign in using a bootstrap-generated administrator token
+                value:
+                  token: neb_live_0123456789abcdef0123456789abcdef
+      responses:
+        '200':
+          description: Session created. The session cookie is HttpOnly and the CSRF token is returned in the body.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+              example:
+                ok: true
+                csrf_token: 0123456789abcdef0123456789abcdef
+                role: admin
+        '401':
+          description: Invalid or disabled API token
+  /api/session:
+    get:
+      operationId: getSession
+      tags: [Authentication]
+      summary: Restore the current console session and CSRF token
+      description: Use the HttpOnly session cookie to restore the role and CSRF token after a page reload.
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: Active session details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          description: Missing, invalid, or expired session
+  /api/logout:
+    post:
+      operationId: logout
+      tags: [Authentication]
+      summary: End the current console session
+      description: Requires the session cookie and matching CSRF header; clears the session cookie on success.
+      security:
+        - AdminSession: []
+          CsrfToken: []
+      responses:
+        '200':
+          description: Session ended and cookie cleared
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+        '401':
+          description: Missing session or invalid CSRF token
+  /api/bootstrap-admin:
+    post:
+      operationId: bootstrapAdmin
+      tags: [Authentication]
+      summary: Create the first administrator and API token
+      description: Exchange the one-time server-generated bootstrap credential for the first admin account and a token secret shown only in this response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [credential, username]
+              properties:
+                credential:
+                  type: string
+                  description: One-time bootstrap credential printed by the server at startup.
+                  example: neb_boot_0123456789abcdef0123456789abcdef
+                username:
+                  type: string
+                  description: Username for the first administrator account.
+                  example: admin
+            example:
+              credential: neb_boot_0123456789abcdef0123456789abcdef
+              username: admin
+      responses:
+        '200':
+          description: Administrator and one-time token created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BootstrapResult'
+              example:
+                user:
+                  id: usr_0123456789abcdef
+                  username: admin
+                  role: admin
+                  enabled: true
+                  created_at: 1735689600
+                token:
+                  id: tok_0123456789abcdef
+                  token: neb_live_0123456789abcdef0123456789abcdef
+                  expires_at: null
+        '400':
+          description: Invalid or duplicate username
+        '401':
+          description: Invalid credential or bootstrap is unavailable
+        '503':
+          description: Authentication storage is unavailable
+  /api/metrics:
+    get:
+      operationId: getDashboardMetrics
+      tags: [Observability]
+      summary: Read dashboard metrics
+      description: Returns runtime metrics, persistence activity, component health, and a bounded history window. Requires any active console session.
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: Dashboard snapshot, or availability marker when the dashboard is disabled
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/DashboardMetrics'
+                  - type: object
+                    properties:
+                      available:
+                        const: false
+        '401':
+          description: Missing or invalid session
+  /api/users:
+    get:
+      operationId: listUsers
+      tags: [Users]
+      summary: List users
+      description: Returns account metadata for all users. This operation is restricted to administrator sessions.
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+              example:
+                - id: usr_0123456789abcdef
+                  username: admin
+                  role: admin
+                  enabled: true
+                  created_at: 1735689600
+        '401':
+          description: Admin session required
+        '503':
+          description: Authentication storage is unavailable
+    post:
+      operationId: createUser
+      tags: [Users]
+      summary: Create a user
+      description: Creates a user with the requested authorization role. A CSRF header is required for this state-changing operation.
+      security:
+        - AdminSession: []
+          CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, role]
+              properties:
+                username:
+                  type: string
+                  description: Unique username for the new account.
+                  example: operator
+                role:
+                  $ref: '#/components/schemas/Role'
+            example:
+              username: operator
+              role: readwrite
+      responses:
+        '200':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              example:
+                id: usr_abcdef0123456789
+                username: operator
+                role: readwrite
+                enabled: true
+                created_at: 1735689600
+        '400':
+          description: Invalid username or role
+        '401':
+          description: Admin session or valid CSRF token required
+        '409':
+          description: Username already exists
+        '503':
+          description: Authentication storage is unavailable
+  /api/users/{username}:
+    parameters:
+      - $ref: '#/components/parameters/Username'
+    get:
+      operationId: getUser
+      tags: [Users]
+      summary: Get a user
+      description: Returns account metadata for a username. This operation is restricted to administrator sessions.
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: User details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Admin session required
+        '404':
+          description: User not found
+    delete:
+      operationId: deleteUser
+      tags: [Users]
+      summary: Delete a user and the user's tokens
+      description: Permanently deletes the account and revokes its tokens. This cannot be undone.
+      security:
+        - AdminSession: []
+          CsrfToken: []
+      responses:
+        '204':
+          description: User deleted
+        '401':
+          description: Admin session or valid CSRF token required
+        '404':
+          description: User not found
+  /api/users/{username}/role:
+    parameters:
+      - $ref: '#/components/parameters/Username'
+    put:
+      operationId: setUserRole
+      tags: [Users]
+      summary: Change a user's role
+      description: Changes authorization permissions for an account. Existing console sessions retain their issued role until they expire.
+      security:
+        - AdminSession: []
+          CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [role]
+              properties:
+                role:
+                  $ref: '#/components/schemas/Role'
+                  description: New role to assign to the user.
+                  example: readwrite
+            example:
+              role: readwrite
+      responses:
+        '204':
+          description: Role updated
+        '400':
+          description: Invalid role
+        '401':
+          description: Admin session or valid CSRF token required
+        '404':
+          description: User not found
+  /api/users/{username}/enabled:
+    parameters:
+      - $ref: '#/components/parameters/Username'
+    put:
+      operationId: setUserEnabled
+      tags: [Users]
+      summary: Enable or disable a user
+      description: Toggles whether the user can authenticate. Disabling an account invalidates the user's credentials.
+      security:
+        - AdminSession: []
+          CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
+                  description: Set to false to prevent the user from authenticating.
+                  example: false
+            example:
+              enabled: false
+      responses:
+        '204':
+          description: User status updated
+        '401':
+          description: Admin session or valid CSRF token required
+        '404':
+          description: User not found
+  /api/users/{username}/tokens:
+    parameters:
+      - $ref: '#/components/parameters/Username'
+    get:
+      operationId: listUserTokens
+      tags: [Tokens]
+      summary: List a user's tokens
+      description: Lists token metadata, never token secrets. Restricted to administrator sessions.
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: Tokens (token secrets are never returned)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Token'
+              example:
+                - id: tok_0123456789abcdef
+                  created_at: 1735689600
+                  expires_at: null
+                  revoked: false
+        '401':
+          description: Admin session required
+        '503':
+          description: Authentication storage is unavailable
+    post:
+      operationId: createUserToken
+      tags: [Tokens]
+      summary: Create a token for a user
+      description: Creates a bearer token. Its secret is returned only once; copy it into a secure credential store immediately.
+      security:
+        - AdminSession: []
+          CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                expires_at:
+                  type: [integer, 'null']
+                  format: int64
+                  description: Optional expiration time as Unix seconds. Use null or omit this field for a token that does not expire.
+                  example: 1767225600
+            example:
+              expires_at: 1767225600
+      responses:
+        '200':
+          description: Token created. The secret is returned only once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedToken'
+              example:
+                id: tok_0123456789abcdef
+                token: neb_live_0123456789abcdef0123456789abcdef
+                expires_at: 1767225600
+        '400':
+          description: Invalid expiration
+        '401':
+          description: Admin session or valid CSRF token required
+        '404':
+          description: User not found
+  /api/tokens/{token_id}:
+    delete:
+      operationId: revokeToken
+      tags: [Tokens]
+      summary: Revoke a token
+      description: Immediately prevents future authentication using the specified token.
+      security:
+        - AdminSession: []
+          CsrfToken: []
+      parameters:
+        - name: token_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Token revoked
+        '401':
+          description: Admin session or valid CSRF token required
+        '404':
+          description: Token not found
+  /api/entries:
+    get:
+      operationId: listCacheEntries
+      tags: [Cache]
+      summary: List and search cache entries
+      description: Returns a stable, sorted page of cache entries. Search matches UTF-8-decoded keys and values case-insensitively.
+      security:
+        - AdminSession: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: search
+          in: query
+          schema:
+            type: string
+            default: ''
+      responses:
+        '200':
+          description: Paginated cache entries. Keys and values are lowercase hexadecimal bytes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntriesPage'
+              example:
+                entries:
+                  - key: 757365723a313233
+                    value: 416c696365
+                    ttl_secs: 300
+                total: 1
+                matching: 1
+                page: 1
+                page_size: 50
+        '401':
+          description: Session required
+    put:
+      operationId: setCacheEntry
+      tags: [Cache]
+      summary: Create or replace a cache entry
+      description: Keys and values are encoded as hexadecimal bytes. A TTL of zero stores the entry without expiration.
+      security:
+        - AdminSession: []
+          CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetEntryRequest'
+            example:
+              key: 757365723a313233
+              value: 416c696365
+              ttl_secs: 300
+      responses:
+        '204':
+          description: Entry stored
+        '400':
+          description: Invalid request or hexadecimal key/value
+        '401':
+          description: Session or valid CSRF token required
+        '413':
+          description: Key or value exceeds configured limits
+    delete:
+      operationId: clearCache
+      tags: [Cache]
+      summary: Delete all cache entries
+      description: Removes every cache entry. This operation cannot be undone.
+      security:
+        - AdminSession: []
+          CsrfToken: []
+      responses:
+        '204':
+          description: Cache cleared
+        '401':
+          description: Session or valid CSRF token required
+  /api/entries/{key}:
+    delete:
+      operationId: deleteCacheEntry
+      tags: [Cache]
+      summary: Delete a cache entry by hexadecimal key
+      description: Deletes the entry whose key bytes match the decoded hexadecimal path parameter.
+      security:
+        - AdminSession: []
+          CsrfToken: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Lowercase or uppercase hexadecimal bytes
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Entry deleted
+        '400':
+          description: Invalid hexadecimal key
+        '401':
+          description: Session or valid CSRF token required
+        '404':
+          description: Entry not found
+components:
+  securitySchemes:
+    AdminSession:
+      type: apiKey
+      in: cookie
+      name: nebula_admin_session
+    CsrfToken:
+      type: apiKey
+      in: header
+      name: X-Nebula-CSRF
+  parameters:
+    Username:
+      name: username
+      in: path
+      required: true
+      description: Username to identify.
+      schema:
+        type: string
+        example: operator
+  schemas:
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: Administrator API token issued during bootstrap or by an administrator.
+          example: neb_live_0123456789abcdef0123456789abcdef
+      description: Supply the administrator API token used to create the console session.
+    Session:
+      type: object
+      required: [ok, csrf_token, role]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        csrf_token:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+    Role:
+      type: string
+      enum: [readonly, readwrite, admin]
+    User:
+      type: object
+      required: [id, username, role, enabled, created_at]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+        enabled:
+          type: boolean
+        created_at:
+          type: integer
+          format: int64
+    Token:
+      type: object
+      required: [id, created_at, expires_at, revoked]
+      properties:
+        id:
+          type: string
+        created_at:
+          type: integer
+          format: int64
+        expires_at:
+          type: [integer, 'null']
+          format: int64
+        revoked:
+          type: boolean
+    CreatedToken:
+      type: object
+      required: [id, token, expires_at]
+      properties:
+        id:
+          type: string
+        token:
+          type: string
+        expires_at:
+          type: [integer, 'null']
+          format: int64
+    BootstrapResult:
+      type: object
+      required: [user, token]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        token:
+          $ref: '#/components/schemas/CreatedToken'
+    SetEntryRequest:
+      type: object
+      additionalProperties: false
+      required: [key, value]
+      properties:
+        key:
+          type: string
+          description: Hexadecimal bytes
+        value:
+          type: string
+          description: Hexadecimal bytes
+        ttl_secs:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+    CacheEntry:
+      type: object
+      required: [key, value, ttl_secs]
+      properties:
+        key:
+          type: string
+          description: Hexadecimal bytes
+        value:
+          type: string
+          description: Hexadecimal bytes
+        ttl_secs:
+          type: [integer, 'null']
+          format: int64
+    EntriesPage:
+      type: object
+      required: [entries, total, matching, page, page_size]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/CacheEntry'
+        total:
+          type: integer
+        matching:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+    DashboardMetrics:
+      type: object
+      required: [available, uptime_secs, state, health, requests_total, errors_total, requests_per_second, errors_per_second, avg_latency_ms, active_connections, cache_entries, cache_memory_bytes, snapshot_count, snapshot_failures, snapshot_duration_ms, last_snapshot_success_timestamp_secs, recovery_count, recovery_failures, recovery_duration_ms, components, recent_failures, history]
+      properties:
+        available:
+          type: boolean
+        uptime_secs:
+          type: integer
+        state:
+          type: string
+        health:
+          type: string
+        requests_total:
+          type: integer
+        errors_total:
+          type: integer
+        requests_per_second:
+          type: number
+        errors_per_second:
+          type: number
+        avg_latency_ms:
+          type: number
+        active_connections:
+          type: integer
+        cache_entries:
+          type: integer
+        cache_memory_bytes:
+          type: integer
+        snapshot_count:
+          type: integer
+        snapshot_failures:
+          type: integer
+        snapshot_duration_ms:
+          type: number
+        last_snapshot_success_timestamp_secs:
+          type: [integer, 'null']
+        recovery_count:
+          type: integer
+        recovery_failures:
+          type: integer
+        recovery_duration_ms:
+          type: number
+        components:
+          type: array
+          items:
+            type: object
+            required: [name, status]
+            properties:
+              name:
+                type: string
+              status:
+                type: string
+        recent_failures:
+          type: array
+          items:
+            type: string
+        history:
+          type: array
+          items:
+            type: object
+            required: [elapsed_secs, requests_total, errors_total, active_connections, cache_entries, latency_ms]
+            properties:
+              elapsed_secs:
+                type: integer
+              requests_total:
+                type: integer
+              errors_total:
+                type: integer
+              active_connections:
+                type: integer
+              cache_entries:
+                type: integer
+              latency_ms:
+                type: number

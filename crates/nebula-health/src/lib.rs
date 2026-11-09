@@ -14,7 +14,7 @@ pub mod lifecycle;
 pub enum HealthComponent {
     TcpServer,
     CacheEngine,
-    AdminConsole,
+    Admin,
     MetricsEndpoint,
     BackgroundWorker(String),
     Persistence(String),
@@ -60,7 +60,7 @@ impl HealthManager {
             (HealthComponent::CacheEngine, ComponentHealth::Healthy),
         ]);
         if admin_enabled {
-            components.insert(HealthComponent::AdminConsole, ComponentHealth::Healthy);
+            components.insert(HealthComponent::Admin, ComponentHealth::Healthy);
         }
         let initial = snapshot(&components, &VecDeque::new());
         let (updates, _) = watch::channel(initial);

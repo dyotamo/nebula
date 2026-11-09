@@ -673,7 +673,7 @@ fn component_name(component: &HealthComponent) -> &'static str {
     match component {
         HealthComponent::TcpServer => "tcp_server",
         HealthComponent::CacheEngine => "cache_engine",
-        HealthComponent::AdminConsole => "admin_console",
+        HealthComponent::Admin => "admin",
         HealthComponent::MetricsEndpoint => "metrics_endpoint",
         HealthComponent::BackgroundWorker(_) => "background_worker",
         HealthComponent::Persistence(_) => "persistence",

@@ -17,7 +17,7 @@ use tokio_rustls::{rustls, TlsAcceptor};
 use tracing::{error, info, warn};
 
 use crate::{
-    admin_console,
+    admin,
     config::{Config, PersistenceMode, TlsOptions},
     metrics::{self, Metrics},
     persistence::PersistenceManager,
@@ -39,7 +39,7 @@ pub struct Application {
 impl Application {
     pub fn new(config: Config) -> Self {
         let lifecycle = Lifecycle::new();
-        let health = HealthManager::new(lifecycle.clone(), config.admin_console.enabled);
+        let health = HealthManager::new(lifecycle.clone(), config.admin.enabled);
         let watchdog = Watchdog::new(health.clone());
         let metrics = Metrics::new();
         let store = Arc::new(CacheStore::with_limits(
@@ -135,6 +135,18 @@ impl Application {
                 .await);
         }
 
+        if self.config.admin.enabled && !self.config.security.authentication {
+            return Err(self
+                .fail_startup(
+                    "configure admin component",
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "security.authentication must be enabled when admin.enabled is true",
+                    ),
+                )
+                .await);
+        }
+
         if self.config.security.authentication && !self.config.tls.enabled {
             return Err(self
                 .fail_startup(
@@ -187,8 +199,8 @@ impl Application {
             Err(err) => return Err(self.fail_startup("bind TCP listener", err).await),
         };
 
-        let admin_listener = if self.config.admin_console.enabled {
-            match TcpListener::bind(self.config.admin_console.listen_addr).await {
+        let admin_listener = if self.config.admin.enabled {
+            match TcpListener::bind(self.config.admin.listen_addr).await {
                 Ok(listener) => Some(listener),
                 Err(err) => return Err(self.fail_startup("bind admin listener", err).await),
             }
@@ -255,31 +267,24 @@ impl Application {
         });
 
         let admin_started = if let Some(listener) = admin_listener {
-            let password = self
-                .config
-                .admin_console
-                .password
-                .clone()
-                .unwrap_or_default();
             let admin_lifecycle = self.lifecycle.subscribe();
             let admin_lifecycle_state = self.lifecycle.clone();
             let admin_health = self.health.clone();
             let admin_metrics = Arc::clone(&self.metrics);
-            let dashboard_enabled = self.config.admin_console.metrics_dashboard;
+            let dashboard_enabled = self.config.admin.metrics_dashboard;
             let admin_auth_store = auth_store.clone();
             let admin_heartbeat = self.watchdog.register_worker(
-                "admin-console",
-                HealthComponent::AdminConsole,
+                "admin",
+                HealthComponent::Admin,
                 Duration::from_secs(3),
             );
             let store = self.store.clone();
             let (started_tx, started_rx) = oneshot::channel();
             self.services.spawn(async move {
-                let result = admin_console::run(
+                let result = admin::run(
                     listener,
                     store,
                     frame_limits,
-                    password,
                     admin_auth_store,
                     admin_tls_acceptor,
                     admin_lifecycle,
@@ -295,7 +300,7 @@ impl Application {
                     ApplicationState::Ready | ApplicationState::Degraded
                 ) {
                     admin_health.report(
-                        HealthComponent::AdminConsole,
+                        HealthComponent::Admin,
                         ComponentHealth::Unhealthy(
                             result
                                 .as_ref()
@@ -504,7 +509,7 @@ impl Application {
         let component = if context.contains("persistence") || context.contains("snapshot") {
             HealthComponent::Persistence("snapshots".to_owned())
         } else if context.contains("admin") {
-            HealthComponent::AdminConsole
+            HealthComponent::Admin
         } else {
             HealthComponent::TcpServer
         };
@@ -589,10 +594,14 @@ fn load_tls_acceptor(options: &TlsOptions) -> io::Result<Option<TlsAcceptor>> {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "TLS private key file is empty")
             })?;
-    let server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certificates, private_key)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?
+    .with_no_client_auth()
+    .with_single_cert(certificates, private_key)
+    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     Ok(Some(TlsAcceptor::from(Arc::new(server_config))))
 }
 
@@ -659,7 +668,7 @@ mod tests {
     fn test_config(address: SocketAddr) -> Config {
         Config {
             listen_addr: address,
-            admin_console: Default::default(),
+            admin: Default::default(),
             tls: Default::default(),
             security: Default::default(),
             shutdown_timeout_secs: 1,
@@ -785,9 +794,15 @@ mod tests {
         drop(tcp_reservation);
 
         let mut config = test_config(tcp_address);
-        config.admin_console.enabled = true;
-        config.admin_console.password = Some("secret".to_owned());
-        config.admin_console.listen_addr = admin_address;
+        config.admin.enabled = true;
+        config.admin.listen_addr = admin_address;
+        config.security.authentication = true;
+        config.security.auth.database_path = ":memory:".into();
+        config.tls.enabled = true;
+        config.tls.certificate =
+            Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../server.pem"));
+        config.tls.private_key =
+            Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../server-key.pem"));
         let mut app = Application::new(config);
 
         assert!(app.start().await.is_err());
