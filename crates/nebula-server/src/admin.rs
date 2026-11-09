@@ -1,7 +1,5 @@
 use std::{
-    future::Future,
     io,
-    pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -20,7 +18,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::{oneshot, watch},
     time::{interval, MissedTickBehavior},
 };
@@ -28,7 +26,6 @@ use tokio::{
 use nebula_auth::{AuthStore, Role};
 use nebula_health::{lifecycle::ApplicationState, HealthManager};
 use nebula_watchdog::WorkerHeartbeat;
-use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tracing::info;
 
 use nebula_core::CacheStore;
@@ -55,7 +52,6 @@ struct ConsoleState {
     health: HealthManager,
     lifecycle: watch::Receiver<ApplicationState>,
     dashboard_enabled: bool,
-    secure_cookies: bool,
 }
 
 #[derive(Deserialize)]
@@ -155,64 +151,11 @@ struct TokenView {
     revoked: bool,
 }
 
-struct TlsListener {
-    listener: TcpListener,
-    acceptor: TlsAcceptor,
-    handshakes: tokio::task::JoinSet<(
-        Result<TlsStream<TcpStream>, io::Error>,
-        std::net::SocketAddr,
-    )>,
-}
-
-impl axum::serve::Listener for TlsListener {
-    type Io = TlsStream<TcpStream>;
-    type Addr = std::net::SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            tokio::select! {
-                accepted = self.listener.accept() => match accepted {
-                    Ok((stream, address)) => {
-                        let acceptor = self.acceptor.clone();
-                        self.handshakes.spawn(async move {
-                            let result = match tokio::time::timeout(
-                                Duration::from_secs(10),
-                                acceptor.accept(stream),
-                            ).await {
-                                Ok(result) => result,
-                                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out")),
-                            };
-                            (result, address)
-                        });
-                    }
-                    Err(error) => {
-                        tracing::warn!(error = %error, "admin TLS listener accept failed");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                },
-                completed = self.handshakes.join_next(), if !self.handshakes.is_empty() => {
-                    match completed {
-                        Some(Ok((Ok(stream), address))) => return (stream, address),
-                        Some(Ok((Err(error), address))) => tracing::warn!(%address, error = %error, "admin TLS handshake failed"),
-                        Some(Err(error)) => tracing::warn!(error = %error, "admin TLS handshake task failed"),
-                        None => {}
-                    }
-                }
-            }
-        }
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.listener.local_addr()
-    }
-}
-
 pub(crate) async fn run(
     listener: TcpListener,
     store: Arc<CacheStore>,
     limits: FrameLimits,
     auth_store: Option<Arc<AuthStore>>,
-    tls_acceptor: Option<TlsAcceptor>,
     lifecycle: watch::Receiver<ApplicationState>,
     heartbeat: WorkerHeartbeat,
     metrics: Arc<Metrics>,
@@ -221,39 +164,21 @@ pub(crate) async fn run(
     started: oneshot::Sender<()>,
 ) -> io::Result<()> {
     info!(address = %listener.local_addr()?, "NebulaCache admin console listening");
-    let secure_cookies = tls_acceptor.is_some();
     let app = router(
         store,
         limits,
         auth_store,
-        secure_cookies,
         lifecycle.clone(),
         metrics,
         health,
         dashboard_enabled,
     );
     let shutdown = wait_for_shutdown(lifecycle);
-    let mut server: Pin<Box<dyn Future<Output = io::Result<()>> + Send>> =
-        if let Some(acceptor) = tls_acceptor {
-            Box::pin(async move {
-                axum::serve(
-                    TlsListener {
-                        listener,
-                        acceptor,
-                        handshakes: tokio::task::JoinSet::new(),
-                    },
-                    app,
-                )
-                .with_graceful_shutdown(shutdown)
-                .await
-            })
-        } else {
-            Box::pin(async move {
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(shutdown)
-                    .await
-            })
-        };
+    let mut server = Box::pin(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
+    });
     let _ = started.send(());
     let mut heartbeat_interval = interval(Duration::from_secs(1));
     heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -269,7 +194,6 @@ fn router(
     store: Arc<CacheStore>,
     limits: FrameLimits,
     auth_store: Option<Arc<AuthStore>>,
-    secure_cookies: bool,
     lifecycle: watch::Receiver<ApplicationState>,
     metrics: Arc<Metrics>,
     health: HealthManager,
@@ -285,7 +209,6 @@ fn router(
         health,
         lifecycle: lifecycle.clone(),
         dashboard_enabled,
-        secure_cookies,
     });
 
     Router::new()
@@ -407,10 +330,9 @@ async fn login(
         },
     );
 
-    let secure_flag = if state.secure_cookies { "; Secure" } else { "" };
     (
         StatusCode::OK,
-        [(header::SET_COOKIE, format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_TTL_SECS}{secure_flag}"))],
+        [(header::SET_COOKIE, format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_TTL_SECS}"))],
         Json(json!({"ok": true, "csrf_token": csrf_token, "role": role.as_str()})),
     )
         .into_response()
@@ -450,12 +372,11 @@ async fn logout(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> R
         return StatusCode::UNAUTHORIZED.into_response();
     }
     state.sessions.remove(&token);
-    let secure_flag = if state.secure_cookies { "; Secure" } else { "" };
     (
         StatusCode::OK,
         [(
             header::SET_COOKIE,
-            format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure_flag}"),
+            format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"),
         )],
         Json(json!({"ok": true})),
     )
@@ -944,7 +865,6 @@ mod tests {
                     Arc::new(CacheStore::new()),
                     FrameLimits::default(),
                     None,
-                    false,
                     receiver.clone(),
                     Metrics::new(),
                     HealthManager::new(health_lifecycle, false),
@@ -984,7 +904,6 @@ mod tests {
             health: HealthManager::new(lifecycle.clone(), false),
             lifecycle: lifecycle.subscribe(),
             dashboard_enabled: true,
-            secure_cookies: false,
         });
 
         let anonymous = list_entries(
@@ -1014,16 +933,14 @@ mod tests {
         )
         .await;
         assert_eq!(authenticated.status(), StatusCode::OK);
-        let cookie = authenticated
+        let set_cookie = authenticated
             .headers()
             .get(header::SET_COOKIE)
             .unwrap()
             .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
+            .unwrap();
+        assert!(!set_cookie.contains("Secure"));
+        let cookie = set_cookie.split(';').next().unwrap().to_owned();
         let body = to_bytes(authenticated.into_body(), 1024).await.unwrap();
         let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let mut headers = HeaderMap::new();
@@ -1126,7 +1043,6 @@ mod tests {
             health: HealthManager::new(lifecycle.clone(), false),
             lifecycle: lifecycle.subscribe(),
             dashboard_enabled: true,
-            secure_cookies: true,
         });
 
         let denied_login = login(
@@ -1188,7 +1104,6 @@ mod tests {
             health: HealthManager::new(lifecycle.clone(), false),
             lifecycle: lifecycle.subscribe(),
             dashboard_enabled: true,
-            secure_cookies: true,
         });
 
         let response = bootstrap_admin(
@@ -1235,7 +1150,6 @@ mod tests {
             health: HealthManager::new(lifecycle.clone(), false),
             lifecycle: lifecycle.subscribe(),
             dashboard_enabled: true,
-            secure_cookies: true,
         });
         let authenticated = login(
             State(Arc::clone(&state)),

@@ -1,9 +1,44 @@
 services:
-  nebulad:
-    build: .
-    ports: ["7001:7001"]
+  localstack:
+    image: localstack/localstack:3.8
+    environment:
+      SERVICES: s3
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - "4566:4566"
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/7001'"]
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 5s
       timeout: 2s
-      retries: 5
+      retries: 10
+
+  localstack-init:
+    image: amazon/aws-cli:2.39.6
+    depends_on:
+      localstack:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - >-
+        until aws --endpoint-url=http://localstack:4566 s3api list-buckets >/dev/null 2>&1; do sleep 2; done;
+        aws --endpoint-url=http://localstack:4566 s3api head-bucket --bucket nebula-cache >/dev/null 2>&1 ||
+        aws --endpoint-url=http://localstack:4566 s3api create-bucket --bucket nebula-cache
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: nebula
+      POSTGRES_PASSWORD: nebula
+      POSTGRES_DB: nebulacache
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 2s
+      retries: 10

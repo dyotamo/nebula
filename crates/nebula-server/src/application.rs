@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     admin,
-    config::{AuthStorageBackend, Config, PersistenceMode, TlsOptions},
+    config::{AuthStorageBackend, Config, PersistenceMode, SnapshotBackend, TlsOptions},
     metrics::{self, Metrics},
     persistence::PersistenceManager,
     server, systemd, ttl_cleanup,
@@ -52,7 +52,7 @@ impl Application {
                 ComponentHealth::Healthy,
             );
             Some(PersistenceManager::new(
-                config.persistence.snapshot_dir.clone(),
+                config.persistence.clone(),
                 Duration::from_secs(config.persistence.snapshot_interval_secs),
                 config.persistence.snapshot_retention,
                 health.clone(),
@@ -122,7 +122,15 @@ impl Application {
         if self.config.persistence.mode == PersistenceMode::Snapshot
             && (self.config.persistence.snapshot_interval_secs == 0
                 || self.config.persistence.snapshot_retention == 0
-                || self.config.persistence.snapshot_dir.as_os_str().is_empty())
+                || (self.config.persistence.snapshot_backend == SnapshotBackend::Filesystem
+                    && self.config.persistence.snapshot_dir.as_os_str().is_empty())
+                || (self.config.persistence.snapshot_backend == SnapshotBackend::S3
+                    && self
+                        .config
+                        .persistence
+                        .snapshot_s3_bucket
+                        .as_deref()
+                        .is_none_or(str::is_empty)))
         {
             return Err(self
                 .fail_startup(
@@ -241,7 +249,6 @@ impl Application {
             frame: frame_limits,
             max_connections: self.config.resource_limits.max_connections,
         };
-        let admin_tls_acceptor = tls_acceptor.clone();
         let (tcp_started_tx, tcp_started_rx) = oneshot::channel();
         let tcp_store = self.store.clone();
         let tcp_auth_store = auth_store.clone();
@@ -306,7 +313,6 @@ impl Application {
                     store,
                     frame_limits,
                     admin_auth_store,
-                    admin_tls_acceptor,
                     admin_lifecycle,
                     admin_heartbeat,
                     admin_metrics,
@@ -352,6 +358,7 @@ impl Application {
             let persistence_directory = self
                 .persistence
                 .as_ref()
+                .filter(|_| self.config.persistence.snapshot_backend == SnapshotBackend::Filesystem)
                 .map(|_| self.config.persistence.snapshot_dir.clone());
             let (started_tx, started_rx) = oneshot::channel();
             self.services.spawn(async move {

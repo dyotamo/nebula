@@ -10,6 +10,7 @@ use rand::{rngs::OsRng, RngCore};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::runtime::{Handle, RuntimeFlavor};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
@@ -115,10 +116,14 @@ pub enum AuthError {
 }
 
 pub struct AuthStore {
-    backend: Box<dyn AuthBackend>,
+    backend: Option<Box<dyn AuthBackend>>,
 }
 
 trait AuthBackend: Send + Sync {
+    fn requires_runtime_isolation(&self) -> bool {
+        false
+    }
+
     fn ensure_bootstrap_credential(&self) -> Result<Option<String>, AuthError>;
     fn bootstrap_admin(
         &self,
@@ -148,18 +153,31 @@ struct SqliteAuthStore {
 impl AuthStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuthError> {
         Ok(Self {
-            backend: Box::new(SqliteAuthStore::open(path)?),
+            backend: Some(Box::new(SqliteAuthStore::open(path)?)),
         })
     }
 
     pub fn open_postgres(connection_string: &str) -> Result<Self, AuthError> {
+        let backend = run_blocking(|| PostgresAuthStore::open(connection_string))?;
         Ok(Self {
-            backend: Box::new(PostgresAuthStore::open(connection_string)?),
+            backend: Some(Box::new(backend)),
         })
     }
 
+    fn with_backend<T: Send>(&self, operation: impl FnOnce(&dyn AuthBackend) -> T + Send) -> T {
+        let backend = self
+            .backend
+            .as_deref()
+            .expect("auth backend is available until AuthStore is dropped");
+        if backend.requires_runtime_isolation() {
+            run_blocking(|| operation(backend))
+        } else {
+            operation(backend)
+        }
+    }
+
     pub fn ensure_bootstrap_credential(&self) -> Result<Option<String>, AuthError> {
-        self.backend.ensure_bootstrap_credential()
+        self.with_backend(|backend| backend.ensure_bootstrap_credential())
     }
 
     pub fn bootstrap_admin(
@@ -167,31 +185,31 @@ impl AuthStore {
         credential: &str,
         username: &str,
     ) -> Result<(User, CreatedToken), AuthError> {
-        self.backend.bootstrap_admin(credential, username)
+        self.with_backend(|backend| backend.bootstrap_admin(credential, username))
     }
 
     pub fn create_user(&self, username: &str, role: Role) -> Result<User, AuthError> {
-        self.backend.create_user(username, role)
+        self.with_backend(|backend| backend.create_user(username, role))
     }
 
     pub fn list_users(&self) -> Result<Vec<User>, AuthError> {
-        self.backend.list_users()
+        self.with_backend(|backend| backend.list_users())
     }
 
     pub fn get_user(&self, username: &str) -> Result<Option<User>, AuthError> {
-        self.backend.get_user(username)
+        self.with_backend(|backend| backend.get_user(username))
     }
 
     pub fn set_role(&self, username: &str, role: Role) -> Result<(), AuthError> {
-        self.backend.set_role(username, role)
+        self.with_backend(|backend| backend.set_role(username, role))
     }
 
     pub fn set_enabled(&self, username: &str, enabled: bool) -> Result<(), AuthError> {
-        self.backend.set_enabled(username, enabled)
+        self.with_backend(|backend| backend.set_enabled(username, enabled))
     }
 
     pub fn delete_user(&self, username: &str) -> Result<(), AuthError> {
-        self.backend.delete_user(username)
+        self.with_backend(|backend| backend.delete_user(username))
     }
 
     pub fn create_token(
@@ -199,19 +217,45 @@ impl AuthStore {
         username: &str,
         expires_at: Option<i64>,
     ) -> Result<CreatedToken, AuthError> {
-        self.backend.create_token(username, expires_at)
+        self.with_backend(|backend| backend.create_token(username, expires_at))
     }
 
     pub fn list_tokens(&self, username: &str) -> Result<Vec<TokenMetadata>, AuthError> {
-        self.backend.list_tokens(username)
+        self.with_backend(|backend| backend.list_tokens(username))
     }
 
     pub fn revoke_token(&self, token_id: &str) -> Result<(), AuthError> {
-        self.backend.revoke_token(token_id)
+        self.with_backend(|backend| backend.revoke_token(token_id))
     }
 
     pub fn authenticate(&self, token: &str) -> Result<Option<AuthenticatedIdentity>, AuthError> {
-        self.backend.authenticate(token)
+        self.with_backend(|backend| backend.authenticate(token))
+    }
+}
+
+impl Drop for AuthStore {
+    fn drop(&mut self) {
+        let Some(backend) = self.backend.take() else {
+            return;
+        };
+        if backend.requires_runtime_isolation() {
+            run_blocking(move || drop(backend));
+        } else {
+            drop(backend);
+        }
+    }
+}
+
+fn run_blocking<T: Send>(operation: impl FnOnce() -> T + Send) -> T {
+    match Handle::try_current() {
+        Ok(handle) if matches!(handle.runtime_flavor(), RuntimeFlavor::MultiThread) => {
+            tokio::task::block_in_place(operation)
+        }
+        Ok(_) => std::thread::scope(|scope| match scope.spawn(operation).join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }),
+        Err(_) => operation(),
     }
 }
 
@@ -635,6 +679,10 @@ impl PostgresAuthStore {
 }
 
 impl AuthBackend for PostgresAuthStore {
+    fn requires_runtime_isolation(&self) -> bool {
+        true
+    }
+
     fn ensure_bootstrap_credential(&self) -> Result<Option<String>, AuthError> {
         let mut client = self.client.lock().map_err(|_| AuthError::LockPoisoned)?;
         let mut transaction = client.transaction().map_err(storage_error)?;
@@ -1018,6 +1066,30 @@ fn restrict_file_permissions(_: &Path) -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn run_blocking_supports_nested_runtime_on_current_thread_runtime() {
+        let result = run_blocking(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async { 42 })
+        });
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_blocking_supports_nested_runtime_on_multi_thread_runtime() {
+        let result = run_blocking(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async { 42 })
+        });
+        assert_eq!(result, 42);
+    }
 
     fn store() -> AuthStore {
         AuthStore::open(":memory:").unwrap()

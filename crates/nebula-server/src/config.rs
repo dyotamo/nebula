@@ -69,9 +69,24 @@ pub struct TlsOptions {
 #[serde(default, deny_unknown_fields)]
 pub struct PersistenceOptions {
     pub mode: PersistenceMode,
+    pub snapshot_backend: SnapshotBackend,
     pub snapshot_dir: PathBuf,
+    pub snapshot_s3_bucket: Option<String>,
+    pub snapshot_s3_region: Option<String>,
+    pub snapshot_s3_endpoint: Option<String>,
+    pub snapshot_s3_access_key_id: Option<String>,
+    pub snapshot_s3_secret_access_key: Option<String>,
+    pub snapshot_s3_prefix: String,
     pub snapshot_interval_secs: u64,
     pub snapshot_retention: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotBackend {
+    #[default]
+    Filesystem,
+    S3,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -157,7 +172,14 @@ impl Default for PersistenceOptions {
     fn default() -> Self {
         Self {
             mode: PersistenceMode::Volatile,
+            snapshot_backend: SnapshotBackend::Filesystem,
             snapshot_dir: PathBuf::from("snapshots"),
+            snapshot_s3_bucket: None,
+            snapshot_s3_region: None,
+            snapshot_s3_endpoint: None,
+            snapshot_s3_access_key_id: None,
+            snapshot_s3_secret_access_key: None,
+            snapshot_s3_prefix: String::new(),
             snapshot_interval_secs: 60,
             snapshot_retention: 3,
         }
@@ -285,11 +307,28 @@ impl Config {
         if config.persistence.mode == PersistenceMode::Snapshot
             && (config.persistence.snapshot_interval_secs == 0
                 || config.persistence.snapshot_retention == 0
-                || config.persistence.snapshot_dir.as_os_str().is_empty())
+                || (config.persistence.snapshot_backend == SnapshotBackend::Filesystem
+                    && config.persistence.snapshot_dir.as_os_str().is_empty())
+                || (config.persistence.snapshot_backend == SnapshotBackend::S3
+                    && config
+                        .persistence
+                        .snapshot_s3_bucket
+                        .as_deref()
+                        .is_none_or(str::is_empty)))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "persistence.snapshot_dir must not be empty, and snapshot_interval_secs and snapshot_retention must be greater than zero in snapshot mode",
+                "snapshot storage must be configured, and snapshot_interval_secs and snapshot_retention must be greater than zero in snapshot mode",
+            )
+            .into());
+        }
+
+        if config.persistence.snapshot_s3_access_key_id.is_some()
+            != config.persistence.snapshot_s3_secret_access_key.is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "both S3 access key ID and secret access key must be configured together",
             )
             .into());
         }
@@ -454,7 +493,9 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Args, AuthStorageBackend, Config, EvictionPolicy, PersistenceMode};
+    use super::{
+        Args, AuthStorageBackend, Config, EvictionPolicy, PersistenceMode, SnapshotBackend,
+    };
 
     #[test]
     fn defaults_are_applied_with_an_empty_config_file() {
@@ -481,6 +522,10 @@ mod tests {
             std::path::PathBuf::from("nebulad.db")
         );
         assert_eq!(config.persistence.mode, PersistenceMode::Volatile);
+        assert_eq!(
+            config.persistence.snapshot_backend,
+            SnapshotBackend::Filesystem
+        );
         assert_eq!(config.persistence.snapshot_interval_secs, 60);
         assert_eq!(config.persistence.snapshot_retention, 3);
         assert_eq!(
@@ -492,6 +537,40 @@ mod tests {
         let frame_limits = config.frame_limits();
         assert_eq!(frame_limits.max_key_len, 1_024);
         assert_eq!(frame_limits.max_value_len, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parses_s3_snapshot_storage_settings() {
+        let config: Config = toml::from_str(
+            "[persistence]\nmode = 'snapshot'\nsnapshot_backend = 's3'\nsnapshot_s3_bucket = 'nebula-cache'\nsnapshot_s3_region = 'us-east-1'\nsnapshot_s3_endpoint = 'http://localhost:4566'\nsnapshot_s3_access_key_id = 'test'\nsnapshot_s3_secret_access_key = 'test'\nsnapshot_s3_prefix = 'production/snapshots'\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.persistence.snapshot_backend, SnapshotBackend::S3);
+        assert_eq!(
+            config.persistence.snapshot_s3_bucket.as_deref(),
+            Some("nebula-cache")
+        );
+        assert_eq!(
+            config.persistence.snapshot_s3_region.as_deref(),
+            Some("us-east-1")
+        );
+        assert_eq!(
+            config.persistence.snapshot_s3_endpoint.as_deref(),
+            Some("http://localhost:4566")
+        );
+        assert_eq!(
+            config.persistence.snapshot_s3_access_key_id.as_deref(),
+            Some("test")
+        );
+        assert_eq!(
+            config.persistence.snapshot_s3_secret_access_key.as_deref(),
+            Some("test")
+        );
+        assert_eq!(
+            config.persistence.snapshot_s3_prefix,
+            "production/snapshots"
+        );
     }
 
     #[test]

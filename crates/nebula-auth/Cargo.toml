@@ -12,3 +12,4 @@ postgres-native-tls = "0.5"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 thiserror.workspace = true
+tokio.workspace = true

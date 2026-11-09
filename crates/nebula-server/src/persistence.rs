@@ -1,7 +1,5 @@
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
-    path::{Path, PathBuf},
+    fs, io,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -9,8 +7,19 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
+
+use futures::TryStreamExt;
 use nebula_core::{CacheStore, PersistenceEntry};
 use nebula_health::{lifecycle::ApplicationState, ComponentHealth, HealthComponent, HealthManager};
+use object_store::{
+    aws::AmazonS3Builder, local::LocalFileSystem, path::Path as ObjectPath, ObjectStore,
+};
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::Mutex,
@@ -18,7 +27,10 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
-use crate::metrics::Metrics;
+use crate::{
+    config::{PersistenceOptions, SnapshotBackend},
+    metrics::Metrics,
+};
 
 const MAGIC: &[u8; 4] = b"NBSC";
 const FORMAT_VERSION: u32 = 1;
@@ -29,7 +41,9 @@ static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub(crate) struct PersistenceManager {
-    directory: PathBuf,
+    storage: Result<Arc<dyn ObjectStore>, String>,
+    prefix: String,
+    storage_label: String,
     interval: Duration,
     retention: usize,
     operation: Arc<Mutex<()>>,
@@ -87,14 +101,75 @@ impl Drop for PersistenceRecorder {
 
 impl PersistenceManager {
     pub(crate) fn new(
-        directory: PathBuf,
+        options: PersistenceOptions,
         interval: Duration,
         retention: usize,
         health: HealthManager,
         metrics: Arc<Metrics>,
     ) -> Self {
+        let prefix = if options.snapshot_backend == SnapshotBackend::S3 {
+            options.snapshot_s3_prefix.trim_matches('/').to_owned()
+        } else {
+            String::new()
+        };
+        let (storage, storage_label) = match options.snapshot_backend {
+            SnapshotBackend::Filesystem => {
+                let label = options.snapshot_dir.display().to_string();
+                let storage = fs::create_dir_all(&options.snapshot_dir)
+                    .and_then(|_| {
+                        LocalFileSystem::new_with_prefix(&options.snapshot_dir)
+                            .map_err(io::Error::other)
+                    })
+                    .map(|storage| Arc::new(storage) as Arc<dyn ObjectStore>)
+                    .map_err(|error| error.to_string());
+                (storage, label)
+            }
+            SnapshotBackend::S3 => {
+                let bucket = options.snapshot_s3_bucket.clone();
+                let storage = bucket
+                    .ok_or_else(|| {
+                        "persistence.snapshot_s3_bucket must be set for S3 storage".to_owned()
+                    })
+                    .and_then(|bucket| {
+                        let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
+                        if let Some(region) = options.snapshot_s3_region.clone() {
+                            builder = builder.with_region(region);
+                        }
+                        if let Some(endpoint) = options.snapshot_s3_endpoint.as_deref() {
+                            builder = builder.with_endpoint(endpoint);
+                            if endpoint.starts_with("http://") {
+                                builder = builder.with_allow_http(true);
+                            }
+                        }
+                        if let Some(access_key_id) = options.snapshot_s3_access_key_id.as_deref() {
+                            builder = builder.with_access_key_id(access_key_id);
+                        }
+                        if let Some(secret_access_key) =
+                            options.snapshot_s3_secret_access_key.as_deref()
+                        {
+                            builder = builder.with_secret_access_key(secret_access_key);
+                        }
+                        builder
+                            .build()
+                            .map(|storage| Arc::new(storage) as Arc<dyn ObjectStore>)
+                            .map_err(|error| error.to_string())
+                    });
+                let label = format!(
+                    "s3://{}{}",
+                    options.snapshot_s3_bucket.as_deref().unwrap_or(""),
+                    if prefix.is_empty() {
+                        String::new()
+                    } else {
+                        format!("/{prefix}")
+                    }
+                );
+                (storage, label)
+            }
+        };
         Self {
-            directory,
+            storage,
+            prefix,
+            storage_label,
             interval,
             retention,
             operation: Arc::new(Mutex::new(())),
@@ -105,24 +180,26 @@ impl PersistenceManager {
 
     pub(crate) async fn restore(&self, store: Arc<CacheStore>) -> io::Result<bool> {
         let mut recorder = PersistenceRecorder::new(Arc::clone(&self.metrics), false);
-        info!(directory = %self.directory.display(), "cache snapshot restoration started");
-        let directory = self.directory.clone();
-        let result = tokio::task::spawn_blocking(move || load_latest_snapshot(&directory)).await;
-        let loaded = match result {
-            Ok(Ok(loaded)) => loaded,
-            Ok(Err(error)) => {
+        info!(storage = %self.storage_label, "cache snapshot restoration started");
+        let object_store = match &self.storage {
+            Ok(storage) => Arc::clone(storage),
+            Err(error) => {
+                let error = io::Error::other(error.clone());
                 self.report_failure(&error);
                 return Err(error);
             }
+        };
+        cleanup_interrupted_store_snapshots(object_store.as_ref(), &self.prefix).await;
+        let loaded = match load_latest_from_store(object_store, &self.prefix).await {
+            Ok(loaded) => loaded,
             Err(error) => {
-                let error = io::Error::other(format!("snapshot restoration task failed: {error}"));
                 self.report_failure(&error);
                 return Err(error);
             }
         };
 
         let Some((path, payload)) = loaded else {
-            info!(directory = %self.directory.display(), "no snapshots found; starting with an empty cache");
+            info!(storage = %self.storage_label, "no snapshots found; starting with an empty cache");
             self.report_success();
             recorder.success = true;
             return Ok(false);
@@ -149,7 +226,7 @@ impl PersistenceManager {
                 return Err(error);
             }
         };
-        info!(path = %path.display(), entries = restored, "cache snapshot restored");
+        info!(path = %path, entries = restored, "cache snapshot restored");
         self.report_success();
         recorder.success = true;
         Ok(true)
@@ -157,34 +234,41 @@ impl PersistenceManager {
 
     pub(crate) async fn snapshot(&self, store: Arc<CacheStore>) -> io::Result<()> {
         let mut recorder = PersistenceRecorder::new(Arc::clone(&self.metrics), true);
-        let operation = Arc::clone(&self.operation).lock_owned().await;
+        let _operation = Arc::clone(&self.operation).lock_owned().await;
+        let object_store = match &self.storage {
+            Ok(storage) => Arc::clone(storage),
+            Err(error) => {
+                let error = io::Error::other(error.clone());
+                self.report_failure(&error);
+                return Err(error);
+            }
+        };
         let captured = store.snapshot_for_persistence();
         let payload = payload_from_entries(captured)?;
-        let directory = self.directory.clone();
-        let retention = self.retention;
+        let object_name = next_snapshot_name(payload.created_at);
+        let path = snapshot_object_path(&self.prefix, &object_name)?;
 
         info!(
             entries = payload.entries.len(),
             "cache snapshot serialization started"
         );
-        let result = tokio::task::spawn_blocking(move || {
-            let _operation = operation;
-            write_snapshot(&directory, &payload, retention)
-        })
+        let result = async {
+            object_store
+                .put(&path, encode_snapshot(&payload)?.into())
+                .await
+                .map_err(|error| io::Error::other(format!("write snapshot: {error}")))?;
+            retain_store_snapshots(&object_store, &self.prefix, self.retention).await?;
+            Ok::<_, io::Error>(())
+        }
         .await;
         match result {
-            Ok(Ok(path)) => {
-                info!(path = %path.display(), "cache snapshot completed and synchronized");
+            Ok(()) => {
+                info!(path = %path, "cache snapshot completed and synchronized");
                 self.report_success();
                 recorder.success = true;
                 Ok(())
             }
-            Ok(Err(error)) => {
-                self.report_failure(&error);
-                Err(error)
-            }
             Err(error) => {
-                let error = io::Error::other(format!("snapshot write task failed: {error}"));
                 self.report_failure(&error);
                 Err(error)
             }
@@ -237,6 +321,144 @@ impl PersistenceManager {
     }
 }
 
+fn snapshot_object_path(prefix: &str, name: &str) -> io::Result<ObjectPath> {
+    let key = if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix}/{name}")
+    };
+    ObjectPath::parse(key).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+}
+
+fn next_snapshot_name(created_at: Timestamp) -> String {
+    let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{SNAPSHOT_PREFIX}{}-{}-{}-{sequence}{SNAPSHOT_EXTENSION}",
+        created_at.seconds,
+        created_at.nanos,
+        std::process::id()
+    )
+}
+
+async fn snapshot_paths(store: &dyn ObjectStore, prefix: &str) -> io::Result<Vec<ObjectPath>> {
+    let objects = store
+        .list(None)
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|error| io::Error::other(format!("list snapshots: {error}")))?;
+    let prefix = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}/")
+    };
+    Ok(objects
+        .into_iter()
+        .filter_map(|object| {
+            let key = object.location.to_string();
+            let relative = if prefix.is_empty() {
+                key.as_str()
+            } else {
+                key.strip_prefix(&prefix)?
+            };
+            (!relative.contains('/')
+                && relative.starts_with(SNAPSHOT_PREFIX)
+                && relative.ends_with(SNAPSHOT_EXTENSION))
+            .then_some(object.location)
+        })
+        .collect())
+}
+
+async fn cleanup_interrupted_store_snapshots(store: &dyn ObjectStore, prefix: &str) {
+    let objects = match store.list(None).try_collect::<Vec<_>>().await {
+        Ok(objects) => objects,
+        Err(error) => {
+            warn!(error = %error, "could not inspect interrupted snapshot files");
+            return;
+        }
+    };
+    let prefix = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}/")
+    };
+    for object in objects {
+        let key = object.location.to_string();
+        let Some(name) = key.strip_prefix(&prefix) else {
+            continue;
+        };
+        if !name.contains('/') && name.starts_with(".snapshot-") && name.ends_with(".tmp") {
+            if let Err(error) = store.delete(&object.location).await {
+                warn!(path = %object.location, error = %error, "could not remove interrupted snapshot temporary file");
+            }
+        }
+    }
+}
+
+async fn read_store_snapshot(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+) -> io::Result<SnapshotPayload> {
+    let result = store
+        .get(path)
+        .await
+        .map_err(|error| io::Error::other(format!("read snapshot {path}: {error}")))?;
+    let bytes = result
+        .bytes()
+        .await
+        .map_err(|error| io::Error::other(format!("read snapshot {path}: {error}")))?;
+    decode_snapshot(&bytes)
+}
+
+async fn load_latest_from_store(
+    store: Arc<dyn ObjectStore>,
+    prefix: &str,
+) -> io::Result<Option<(ObjectPath, SnapshotPayload)>> {
+    let candidates = snapshot_paths(store.as_ref(), prefix).await?;
+    let mut snapshots = Vec::new();
+    let mut failures = Vec::new();
+    for path in &candidates {
+        match read_store_snapshot(store.as_ref(), path).await {
+            Ok(payload) => snapshots.push((path.clone(), payload)),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                warn!(path = %path, error = %error, "ignoring invalid cache snapshot");
+                failures.push(error.to_string());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if snapshots.is_empty() && !candidates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("no valid snapshots found: {}", failures.join("; ")),
+        ));
+    }
+    snapshots.sort_by_key(|(_, payload)| payload.created_at);
+    Ok(snapshots.pop())
+}
+
+async fn retain_store_snapshots(
+    store: &dyn ObjectStore,
+    prefix: &str,
+    retention: usize,
+) -> io::Result<()> {
+    let paths = snapshot_paths(store, prefix).await?;
+    let mut snapshots = Vec::new();
+    for path in paths {
+        if let Ok(payload) = read_store_snapshot(store, &path).await {
+            snapshots.push((payload.created_at, path));
+        }
+    }
+    snapshots.sort_by_key(|(created_at, _)| *created_at);
+    let remove_count = snapshots.len().saturating_sub(retention);
+    for (_, path) in snapshots.into_iter().take(remove_count) {
+        store
+            .delete(&path)
+            .await
+            .map_err(|error| io::Error::other(format!("delete old snapshot {path}: {error}")))?;
+    }
+    Ok(())
+}
+
 fn payload_from_entries(entries: Vec<PersistenceEntry>) -> io::Result<SnapshotPayload> {
     let created_at = Timestamp::from_system_time(SystemTime::now())?;
     let mut entries: Vec<_> = entries
@@ -259,23 +481,28 @@ fn payload_from_entries(entries: Vec<PersistenceEntry>) -> io::Result<SnapshotPa
     })
 }
 
+fn encode_snapshot(payload: &SnapshotPayload) -> io::Result<Vec<u8>> {
+    let payload_bytes = serde_json::to_vec(payload)
+        .map_err(|error| io::Error::other(format!("serialize snapshot: {error}")))?;
+    let checksum = crc32(&payload_bytes);
+    let mut bytes = Vec::with_capacity(HEADER_LEN + payload_bytes.len());
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+    bytes.extend_from_slice(&checksum.to_be_bytes());
+    bytes.extend_from_slice(&payload_bytes);
+    Ok(bytes)
+}
+
+#[cfg(test)]
 fn write_snapshot(
     directory: &Path,
     payload: &SnapshotPayload,
     retention: usize,
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(directory)?;
-    let payload_bytes = serde_json::to_vec(payload)
-        .map_err(|error| io::Error::other(format!("serialize snapshot: {error}")))?;
-    let checksum = crc32(&payload_bytes);
-    let created_at = payload.created_at;
+    let bytes = encode_snapshot(payload)?;
+    let file_name = next_snapshot_name(payload.created_at);
     let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-    let file_name = format!(
-        "{SNAPSHOT_PREFIX}{}-{}-{}-{sequence}{SNAPSHOT_EXTENSION}",
-        created_at.seconds,
-        created_at.nanos,
-        std::process::id()
-    );
     let final_path = directory.join(file_name);
     let temporary_path = directory.join(format!(".snapshot-{}-{sequence}.tmp", std::process::id()));
 
@@ -284,10 +511,7 @@ fn write_snapshot(
             .write(true)
             .create_new(true)
             .open(&temporary_path)?;
-        file.write_all(MAGIC)?;
-        file.write_all(&FORMAT_VERSION.to_be_bytes())?;
-        file.write_all(&checksum.to_be_bytes())?;
-        file.write_all(&payload_bytes)?;
+        file.write_all(&bytes)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary_path, &final_path)?;
@@ -302,6 +526,7 @@ fn write_snapshot(
     write_result
 }
 
+#[cfg(test)]
 fn load_latest_snapshot(directory: &Path) -> io::Result<Option<(PathBuf, SnapshotPayload)>> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -348,10 +573,15 @@ fn load_latest_snapshot(directory: &Path) -> io::Result<Option<(PathBuf, Snapsho
     Ok(snapshots.pop())
 }
 
+#[cfg(test)]
 fn read_snapshot(path: &Path) -> io::Result<SnapshotPayload> {
     let mut file = File::open(path)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
+    decode_snapshot(&bytes)
+}
+
+fn decode_snapshot(bytes: &[u8]) -> io::Result<SnapshotPayload> {
     if bytes.len() < HEADER_LEN || &bytes[..4] != MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -388,6 +618,7 @@ fn read_snapshot(path: &Path) -> io::Result<SnapshotPayload> {
     Ok(payload)
 }
 
+#[cfg(test)]
 fn retain_snapshots(directory: &Path, retention: usize) -> io::Result<()> {
     let mut snapshots = Vec::new();
     for entry in fs::read_dir(directory)? {
@@ -409,6 +640,7 @@ fn retain_snapshots(directory: &Path, retention: usize) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn is_snapshot_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -466,7 +698,7 @@ mod tests {
     use nebula_core::CacheStore;
     use nebula_health::{lifecycle::Lifecycle, ComponentHealth, HealthComponent, HealthManager};
 
-    use crate::metrics::Metrics;
+    use crate::{config::PersistenceOptions, metrics::Metrics};
 
     use super::{
         load_latest_snapshot, write_snapshot, PersistenceManager, SnapshotPayload, Timestamp,
@@ -484,8 +716,12 @@ mod tests {
     }
 
     fn manager(directory: PathBuf, retention: usize) -> PersistenceManager {
+        let options = PersistenceOptions {
+            snapshot_dir: directory,
+            ..PersistenceOptions::default()
+        };
         PersistenceManager::new(
-            directory,
+            options,
             Duration::from_secs(60),
             retention,
             HealthManager::new(Lifecycle::new(), false),
@@ -612,8 +848,12 @@ mod tests {
         fs::write(directory.join("snapshot-broken.nbs"), b"broken").unwrap();
         let lifecycle = Lifecycle::new();
         let health = HealthManager::new(lifecycle, false);
+        let options = PersistenceOptions {
+            snapshot_dir: directory.clone(),
+            ..PersistenceOptions::default()
+        };
         let persistence = PersistenceManager::new(
-            directory.clone(),
+            options,
             Duration::from_secs(60),
             3,
             health.clone(),

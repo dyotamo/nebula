@@ -24,7 +24,6 @@ This README describes the system as it exists in this repository. It is not a di
     - [Request frame](#request-frame)
     - [Response frame](#response-frame)
     - [Opcodes and statuses](#opcodes-and-statuses)
-  - [Ambitions and future direction](#ambitions-and-future-direction)
   - [Operational and security boundaries](#operational-and-security-boundaries)
 
 ## Architecture and behavior
@@ -372,16 +371,6 @@ The fixed response header is 10 bytes, followed by the response value:
 | `FORBIDDEN`        |     5 | Authenticated role cannot perform the operation.                   |
 
 Keys are limited to 1,024 bytes and values to 8 MiB. `SET` requires a non-empty key. `AUTH` requires an empty key, a non-empty UTF-8 token of at most 1,024 bytes in the value field, and TTL `0`. A successful `AUTH` returns `OK` with `AUTH_RESULT`. When authentication is enabled, the server requires `AUTH` before cache operations on every connection; authentication also requires TLS. The store treats keys and values as opaque bytes, and TTL values are unsigned seconds.
-
-## Ambitions and future direction
-
-The implementation today is single-node. The following are longer-term architectural ambitions, not existing capabilities or a committed release schedule:
-
-- **Cluster membership and key placement:** Introduce a membership model and consistent hashing to assign keys across nodes and support routing to the node responsible for a key.
-- **Replication and quorum operations:** Explore replication with a target replication factor of three and quorum-based reads and writes. For a fixed three-replica set (`N=3`), `R=2` and `W=2` satisfy `R + W > N`, so read and write quorums intersect; quorum intersection alone does not guarantee linearizability.
-- **Explicit consistency and failure semantics:** Before implementing distributed operations, define leader/primary ownership, epochs or terms, conflict resolution, read/write ordering, and behavior during network partitions and membership changes.
-
-These capabilities require further design and validation. Until they are implemented, do not treat independent NebulaCache processes as a cluster or assume replication, quorum guarantees, or automatic failover.
 
 ## Operational and security boundaries
 
