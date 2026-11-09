@@ -43,7 +43,18 @@ pub struct SecurityOptions {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuthStorageOptions {
+    pub backend: AuthStorageBackend,
     pub database_path: PathBuf,
+    pub database_url: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthStorageBackend {
+    #[default]
+    Sqlite,
+    #[serde(alias = "postgresql")]
+    Postgres,
 }
 
 #[derive(Clone, Deserialize)]
@@ -125,7 +136,9 @@ impl Default for SecurityOptions {
 impl Default for AuthStorageOptions {
     fn default() -> Self {
         Self {
+            backend: AuthStorageBackend::Sqlite,
             database_path: PathBuf::from("nebulad.db"),
+            database_url: None,
         }
     }
 }
@@ -222,14 +235,33 @@ impl Config {
             .into());
         }
 
-        if config.security.authentication
-            && config.security.auth.database_path.as_os_str().is_empty()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "security.auth.database_path must not be empty when authentication is enabled",
-            )
-            .into());
+        if config.security.authentication {
+            match config.security.auth.backend {
+                AuthStorageBackend::Sqlite
+                    if config.security.auth.database_path.as_os_str().is_empty() =>
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "security.auth.database_path must not be empty when SQLite auth storage is selected",
+                    )
+                    .into());
+                }
+                AuthStorageBackend::Postgres
+                    if config
+                        .security
+                        .auth
+                        .database_url
+                        .as_deref()
+                        .is_none_or(str::is_empty) =>
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "security.auth.database_url must be set when PostgreSQL auth storage is selected",
+                    )
+                    .into());
+                }
+                _ => {}
+            }
         }
 
         if config.tls.enabled
@@ -422,7 +454,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Args, Config, EvictionPolicy, PersistenceMode};
+    use super::{Args, AuthStorageBackend, Config, EvictionPolicy, PersistenceMode};
 
     #[test]
     fn defaults_are_applied_with_an_empty_config_file() {
@@ -443,6 +475,11 @@ mod tests {
         assert_eq!(config.tls.private_key, None);
         assert_eq!(config.shutdown_timeout_secs, 30);
         assert_eq!(config.ttl_cleanup_interval_secs, 3_600);
+        assert_eq!(config.security.auth.backend, AuthStorageBackend::Sqlite);
+        assert_eq!(
+            config.security.auth.database_path,
+            std::path::PathBuf::from("nebulad.db")
+        );
         assert_eq!(config.persistence.mode, PersistenceMode::Volatile);
         assert_eq!(config.persistence.snapshot_interval_secs, 60);
         assert_eq!(config.persistence.snapshot_retention, 3);
@@ -455,6 +492,45 @@ mod tests {
         let frame_limits = config.frame_limits();
         assert_eq!(frame_limits.max_key_len, 1_024);
         assert_eq!(frame_limits.max_value_len, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parses_postgres_auth_storage_settings() {
+        let config: Config = toml::from_str(
+            "[security]\nauthentication = true\n\n[security.auth]\nbackend = 'postgresql'\ndatabase_url = 'postgresql://user:password@localhost/nebulacache'\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.security.auth.backend, AuthStorageBackend::Postgres);
+        assert_eq!(
+            config.security.auth.database_url.as_deref(),
+            Some("postgresql://user:password@localhost/nebulacache")
+        );
+    }
+
+    #[test]
+    fn requires_postgres_url_when_authentication_is_enabled() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("nebula-postgres-config-{unique}.toml"));
+        fs::write(
+            &path,
+            "[security]\nauthentication = true\n\n[security.auth]\nbackend = 'postgresql'\n\n[tls]\nenabled = true\ncertificate = 'server.pem'\nprivate_key = 'server-key.pem'\n",
+        )
+        .unwrap();
+
+        let result = Config::load(Args {
+            config: Some(path.clone()),
+        });
+        fs::remove_file(path).unwrap();
+
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("security.auth.database_url must be set"));
     }
 
     #[test]

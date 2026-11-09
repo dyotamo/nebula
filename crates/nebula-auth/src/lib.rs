@@ -4,6 +4,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use postgres::Client;
+use postgres_native_tls::MakeTlsConnector;
 use rand::{rngs::OsRng, RngCore};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -84,8 +86,8 @@ pub struct CreatedToken {
 
 #[derive(Debug, Error)]
 pub enum AuthError {
-    #[error("authentication storage error")]
-    Storage(#[from] rusqlite::Error),
+    #[error("authentication storage error: {0}")]
+    Storage(String),
     #[error("authentication storage lock poisoned")]
     LockPoisoned,
     #[error("invalid role")]
@@ -113,11 +115,108 @@ pub enum AuthError {
 }
 
 pub struct AuthStore {
+    backend: Box<dyn AuthBackend>,
+}
+
+trait AuthBackend: Send + Sync {
+    fn ensure_bootstrap_credential(&self) -> Result<Option<String>, AuthError>;
+    fn bootstrap_admin(
+        &self,
+        credential: &str,
+        username: &str,
+    ) -> Result<(User, CreatedToken), AuthError>;
+    fn create_user(&self, username: &str, role: Role) -> Result<User, AuthError>;
+    fn list_users(&self) -> Result<Vec<User>, AuthError>;
+    fn get_user(&self, username: &str) -> Result<Option<User>, AuthError>;
+    fn set_role(&self, username: &str, role: Role) -> Result<(), AuthError>;
+    fn set_enabled(&self, username: &str, enabled: bool) -> Result<(), AuthError>;
+    fn delete_user(&self, username: &str) -> Result<(), AuthError>;
+    fn create_token(
+        &self,
+        username: &str,
+        expires_at: Option<i64>,
+    ) -> Result<CreatedToken, AuthError>;
+    fn list_tokens(&self, username: &str) -> Result<Vec<TokenMetadata>, AuthError>;
+    fn revoke_token(&self, token_id: &str) -> Result<(), AuthError>;
+    fn authenticate(&self, token: &str) -> Result<Option<AuthenticatedIdentity>, AuthError>;
+}
+
+struct SqliteAuthStore {
     connection: Mutex<Connection>,
 }
 
 impl AuthStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuthError> {
+        Ok(Self {
+            backend: Box::new(SqliteAuthStore::open(path)?),
+        })
+    }
+
+    pub fn open_postgres(connection_string: &str) -> Result<Self, AuthError> {
+        Ok(Self {
+            backend: Box::new(PostgresAuthStore::open(connection_string)?),
+        })
+    }
+
+    pub fn ensure_bootstrap_credential(&self) -> Result<Option<String>, AuthError> {
+        self.backend.ensure_bootstrap_credential()
+    }
+
+    pub fn bootstrap_admin(
+        &self,
+        credential: &str,
+        username: &str,
+    ) -> Result<(User, CreatedToken), AuthError> {
+        self.backend.bootstrap_admin(credential, username)
+    }
+
+    pub fn create_user(&self, username: &str, role: Role) -> Result<User, AuthError> {
+        self.backend.create_user(username, role)
+    }
+
+    pub fn list_users(&self) -> Result<Vec<User>, AuthError> {
+        self.backend.list_users()
+    }
+
+    pub fn get_user(&self, username: &str) -> Result<Option<User>, AuthError> {
+        self.backend.get_user(username)
+    }
+
+    pub fn set_role(&self, username: &str, role: Role) -> Result<(), AuthError> {
+        self.backend.set_role(username, role)
+    }
+
+    pub fn set_enabled(&self, username: &str, enabled: bool) -> Result<(), AuthError> {
+        self.backend.set_enabled(username, enabled)
+    }
+
+    pub fn delete_user(&self, username: &str) -> Result<(), AuthError> {
+        self.backend.delete_user(username)
+    }
+
+    pub fn create_token(
+        &self,
+        username: &str,
+        expires_at: Option<i64>,
+    ) -> Result<CreatedToken, AuthError> {
+        self.backend.create_token(username, expires_at)
+    }
+
+    pub fn list_tokens(&self, username: &str) -> Result<Vec<TokenMetadata>, AuthError> {
+        self.backend.list_tokens(username)
+    }
+
+    pub fn revoke_token(&self, token_id: &str) -> Result<(), AuthError> {
+        self.backend.revoke_token(token_id)
+    }
+
+    pub fn authenticate(&self, token: &str) -> Result<Option<AuthenticatedIdentity>, AuthError> {
+        self.backend.authenticate(token)
+    }
+}
+
+impl SqliteAuthStore {
+    fn open(path: impl AsRef<Path>) -> Result<Self, AuthError> {
         let path = path.as_ref();
         let memory_database = path == Path::new(":memory:");
         if !memory_database {
@@ -288,7 +387,7 @@ impl AuthStore {
                 read_user,
             )
             .optional()
-            .map_err(AuthError::Storage)
+            .map_err(|error| AuthError::Storage(error.to_string()))
     }
 
     pub fn set_role(&self, username: &str, role: Role) -> Result<(), AuthError> {
@@ -387,7 +486,7 @@ impl AuthStore {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(AuthError::Storage)
+            .map_err(|error| AuthError::Storage(error.to_string()))
     }
 
     pub fn revoke_token(&self, token_id: &str) -> Result<(), AuthError> {
@@ -432,7 +531,7 @@ impl AuthStore {
                 },
             )
             .optional()
-            .map_err(AuthError::Storage)
+            .map_err(|error| AuthError::Storage(error.to_string()))
     }
 
     fn update_user(&self, username: &str, column: &str, value: &str) -> Result<(), AuthError> {
@@ -446,6 +545,379 @@ impl AuthStore {
             return Err(AuthError::UserNotFound);
         }
         Ok(())
+    }
+}
+
+impl AuthBackend for SqliteAuthStore {
+    fn ensure_bootstrap_credential(&self) -> Result<Option<String>, AuthError> {
+        SqliteAuthStore::ensure_bootstrap_credential(self)
+    }
+    fn bootstrap_admin(
+        &self,
+        credential: &str,
+        username: &str,
+    ) -> Result<(User, CreatedToken), AuthError> {
+        SqliteAuthStore::bootstrap_admin(self, credential, username)
+    }
+    fn create_user(&self, username: &str, role: Role) -> Result<User, AuthError> {
+        SqliteAuthStore::create_user(self, username, role)
+    }
+    fn list_users(&self) -> Result<Vec<User>, AuthError> {
+        SqliteAuthStore::list_users(self)
+    }
+    fn get_user(&self, username: &str) -> Result<Option<User>, AuthError> {
+        SqliteAuthStore::get_user(self, username)
+    }
+    fn set_role(&self, username: &str, role: Role) -> Result<(), AuthError> {
+        SqliteAuthStore::set_role(self, username, role)
+    }
+    fn set_enabled(&self, username: &str, enabled: bool) -> Result<(), AuthError> {
+        SqliteAuthStore::set_enabled(self, username, enabled)
+    }
+    fn delete_user(&self, username: &str) -> Result<(), AuthError> {
+        SqliteAuthStore::delete_user(self, username)
+    }
+    fn create_token(
+        &self,
+        username: &str,
+        expires_at: Option<i64>,
+    ) -> Result<CreatedToken, AuthError> {
+        SqliteAuthStore::create_token(self, username, expires_at)
+    }
+    fn list_tokens(&self, username: &str) -> Result<Vec<TokenMetadata>, AuthError> {
+        SqliteAuthStore::list_tokens(self, username)
+    }
+    fn revoke_token(&self, token_id: &str) -> Result<(), AuthError> {
+        SqliteAuthStore::revoke_token(self, token_id)
+    }
+    fn authenticate(&self, token: &str) -> Result<Option<AuthenticatedIdentity>, AuthError> {
+        SqliteAuthStore::authenticate(self, token)
+    }
+}
+
+struct PostgresAuthStore {
+    client: Mutex<Client>,
+}
+
+impl PostgresAuthStore {
+    fn open(connection_string: &str) -> Result<Self, AuthError> {
+        let tls = native_tls::TlsConnector::new().map_err(storage_error)?;
+        let mut client = Client::connect(connection_string, MakeTlsConnector::new(tls))
+            .map_err(storage_error)?;
+        client
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS users (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 username TEXT NOT NULL UNIQUE,
+                 role TEXT NOT NULL CHECK (role IN ('readonly', 'readwrite', 'admin')),
+                 enabled BOOLEAN NOT NULL,
+                 created_at BIGINT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS tokens (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                 token_hash BYTEA NOT NULL UNIQUE,
+                 expires_at BIGINT,
+                 revoked BOOLEAN NOT NULL,
+                 created_at BIGINT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS tokens_user_id_idx ON tokens(user_id);
+             CREATE TABLE IF NOT EXISTS bootstrap_credentials (
+                 id SMALLINT PRIMARY KEY CHECK (id = 1),
+                 token_hash BYTEA NOT NULL
+             );",
+            )
+            .map_err(storage_error)?;
+        Ok(Self {
+            client: Mutex::new(client),
+        })
+    }
+}
+
+impl AuthBackend for PostgresAuthStore {
+    fn ensure_bootstrap_credential(&self) -> Result<Option<String>, AuthError> {
+        let mut client = self.client.lock().map_err(|_| AuthError::LockPoisoned)?;
+        let mut transaction = client.transaction().map_err(storage_error)?;
+        transaction
+            .query_one("SELECT pg_advisory_xact_lock(827100001)", &[])
+            .map_err(storage_error)?;
+        let has_admin: bool = transaction
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE role = 'admin')",
+                &[],
+            )
+            .map_err(storage_error)?
+            .get(0);
+        let has_bootstrap: bool = transaction
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM bootstrap_credentials WHERE id = 1)",
+                &[],
+            )
+            .map_err(storage_error)?
+            .get(0);
+        if has_admin || has_bootstrap {
+            transaction.commit().map_err(storage_error)?;
+            return Ok(None);
+        }
+        let credential = generate_secret("neb_boot_")?;
+        transaction
+            .execute(
+                "INSERT INTO bootstrap_credentials(id, token_hash) VALUES (1, $1)",
+                &[&hash_token(&credential)],
+            )
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(Some(credential))
+    }
+
+    fn bootstrap_admin(
+        &self,
+        credential: &str,
+        username: &str,
+    ) -> Result<(User, CreatedToken), AuthError> {
+        validate_username(username)?;
+        let mut client = self.client.lock().map_err(|_| AuthError::LockPoisoned)?;
+        let mut transaction = client.transaction().map_err(storage_error)?;
+        let expected: Option<Vec<u8>> = transaction
+            .query_opt(
+                "SELECT token_hash FROM bootstrap_credentials WHERE id = 1 FOR UPDATE",
+                &[],
+            )
+            .map_err(storage_error)?
+            .map(|row| row.get(0));
+        let Some(expected) = expected else {
+            return Err(AuthError::BootstrapUnavailable);
+        };
+        if expected != hash_token(credential) {
+            return Err(AuthError::InvalidBootstrapCredential);
+        }
+        let existing_admin: bool = transaction
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE role = 'admin')",
+                &[],
+            )
+            .map_err(storage_error)?
+            .get(0);
+        if existing_admin {
+            transaction
+                .execute("DELETE FROM bootstrap_credentials WHERE id = 1", &[])
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+            return Err(AuthError::BootstrapUnavailable);
+        }
+        let user = new_user(username, Role::Admin)?;
+        transaction.execute("INSERT INTO users(id, username, role, enabled, created_at) VALUES ($1, $2, $3, TRUE, $4)", &[&user.id, &user.username, &user.role.as_str(), &user.created_at]).map_err(map_postgres_username_constraint)?;
+        let token = generate_secret("neb_live_")?;
+        let metadata = TokenMetadata {
+            id: generate_id()?,
+            user_id: user.id.clone(),
+            created_at: unix_time()?,
+            expires_at: None,
+            revoked: false,
+        };
+        transaction.execute("INSERT INTO tokens(id, user_id, token_hash, expires_at, revoked, created_at) VALUES ($1, $2, $3, NULL, FALSE, $4)", &[&metadata.id, &metadata.user_id, &hash_token(&token), &metadata.created_at]).map_err(storage_error)?;
+        transaction
+            .execute("DELETE FROM bootstrap_credentials WHERE id = 1", &[])
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok((user, CreatedToken { metadata, token }))
+    }
+
+    fn create_user(&self, username: &str, role: Role) -> Result<User, AuthError> {
+        validate_username(username)?;
+        let user = new_user(username, role)?;
+        self.client.lock().map_err(|_| AuthError::LockPoisoned)?.execute("INSERT INTO users(id, username, role, enabled, created_at) VALUES ($1, $2, $3, TRUE, $4)", &[&user.id, &user.username, &user.role.as_str(), &user.created_at]).map_err(map_postgres_username_constraint)?;
+        Ok(user)
+    }
+
+    fn list_users(&self) -> Result<Vec<User>, AuthError> {
+        let rows = self
+            .client
+            .lock()
+            .map_err(|_| AuthError::LockPoisoned)?
+            .query(
+                "SELECT id, username, role, enabled, created_at FROM users ORDER BY username",
+                &[],
+            )
+            .map_err(storage_error)?;
+        rows.iter().map(postgres_read_user).collect()
+    }
+
+    fn get_user(&self, username: &str) -> Result<Option<User>, AuthError> {
+        self.client
+            .lock()
+            .map_err(|_| AuthError::LockPoisoned)?
+            .query_opt(
+                "SELECT id, username, role, enabled, created_at FROM users WHERE username = $1",
+                &[&username],
+            )
+            .map_err(storage_error)?
+            .as_ref()
+            .map(postgres_read_user)
+            .transpose()
+    }
+
+    fn set_role(&self, username: &str, role: Role) -> Result<(), AuthError> {
+        self.update_user("role", role.as_str(), username)
+    }
+
+    fn set_enabled(&self, username: &str, enabled: bool) -> Result<(), AuthError> {
+        let changed = self
+            .client
+            .lock()
+            .map_err(|_| AuthError::LockPoisoned)?
+            .execute(
+                "UPDATE users SET enabled = $1 WHERE username = $2",
+                &[&enabled, &username],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(AuthError::UserNotFound);
+        }
+        Ok(())
+    }
+
+    fn delete_user(&self, username: &str) -> Result<(), AuthError> {
+        let changed = self
+            .client
+            .lock()
+            .map_err(|_| AuthError::LockPoisoned)?
+            .execute("DELETE FROM users WHERE username = $1", &[&username])
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(AuthError::UserNotFound);
+        }
+        Ok(())
+    }
+
+    fn create_token(
+        &self,
+        username: &str,
+        expires_at: Option<i64>,
+    ) -> Result<CreatedToken, AuthError> {
+        let now = unix_time()?;
+        if expires_at.is_some_and(|expires_at| expires_at <= now) {
+            return Err(AuthError::InvalidExpiration);
+        }
+        let token = generate_secret("neb_live_")?;
+        let metadata = TokenMetadata {
+            id: generate_id()?,
+            user_id: String::new(),
+            created_at: now,
+            expires_at,
+            revoked: false,
+        };
+        let mut client = self.client.lock().map_err(|_| AuthError::LockPoisoned)?;
+        let mut transaction = client.transaction().map_err(storage_error)?;
+        let user_id: Option<String> = transaction
+            .query_opt(
+                "SELECT id FROM users WHERE username = $1 AND enabled = TRUE",
+                &[&username],
+            )
+            .map_err(storage_error)?
+            .map(|row| row.get(0));
+        let Some(user_id) = user_id else {
+            return Err(AuthError::UserNotFound);
+        };
+        transaction.execute("INSERT INTO tokens(id, user_id, token_hash, expires_at, revoked, created_at) VALUES ($1, $2, $3, $4, FALSE, $5)", &[&metadata.id, &user_id, &hash_token(&token), &expires_at, &now]).map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(CreatedToken {
+            metadata: TokenMetadata {
+                user_id,
+                ..metadata
+            },
+            token,
+        })
+    }
+
+    fn list_tokens(&self, username: &str) -> Result<Vec<TokenMetadata>, AuthError> {
+        let rows = self.client.lock().map_err(|_| AuthError::LockPoisoned)?.query("SELECT t.id, t.user_id, t.created_at, t.expires_at, t.revoked FROM tokens t JOIN users u ON u.id = t.user_id WHERE u.username = $1 ORDER BY t.created_at DESC", &[&username]).map_err(storage_error)?;
+        rows.iter()
+            .map(|row| {
+                Ok(TokenMetadata {
+                    id: row.get(0),
+                    user_id: row.get(1),
+                    created_at: row.get(2),
+                    expires_at: row.get(3),
+                    revoked: row.get(4),
+                })
+            })
+            .collect()
+    }
+
+    fn revoke_token(&self, token_id: &str) -> Result<(), AuthError> {
+        let changed = self
+            .client
+            .lock()
+            .map_err(|_| AuthError::LockPoisoned)?
+            .execute(
+                "UPDATE tokens SET revoked = TRUE WHERE id = $1",
+                &[&token_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(AuthError::TokenNotFound);
+        }
+        Ok(())
+    }
+
+    fn authenticate(&self, token: &str) -> Result<Option<AuthenticatedIdentity>, AuthError> {
+        let now = unix_time()?;
+        let row = self.client.lock().map_err(|_| AuthError::LockPoisoned)?.query_opt("SELECT u.id, u.username, u.role FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = $1 AND t.revoked = FALSE AND u.enabled = TRUE AND (t.expires_at IS NULL OR t.expires_at > $2)", &[&hash_token(token), &now]).map_err(storage_error)?;
+        row.map(|row| {
+            Ok(AuthenticatedIdentity {
+                user_id: row.get(0),
+                username: row.get(1),
+                role: Role::try_from(row.get::<_, String>(2).as_str())?,
+            })
+        })
+        .transpose()
+    }
+}
+
+impl PostgresAuthStore {
+    fn update_user(&self, column: &str, value: &str, username: &str) -> Result<(), AuthError> {
+        let query = format!("UPDATE users SET {column} = $1 WHERE username = $2");
+        let changed = self
+            .client
+            .lock()
+            .map_err(|_| AuthError::LockPoisoned)?
+            .execute(&query, &[&value, &username])
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(AuthError::UserNotFound);
+        }
+        Ok(())
+    }
+}
+
+fn postgres_read_user(row: &postgres::Row) -> Result<User, AuthError> {
+    Ok(User {
+        id: row.get(0),
+        username: row.get(1),
+        role: Role::try_from(row.get::<_, String>(2).as_str())?,
+        enabled: row.get(3),
+        created_at: row.get(4),
+    })
+}
+
+fn storage_error(error: impl std::fmt::Display) -> AuthError {
+    AuthError::Storage(error.to_string())
+}
+
+fn map_postgres_username_constraint(error: postgres::Error) -> AuthError {
+    if error.code().is_some_and(|code| code.code() == "23505")
+        && error.as_db_error().and_then(|error| error.constraint()) == Some("users_username_key")
+    {
+        AuthError::UsernameExists
+    } else {
+        storage_error(error)
+    }
+}
+
+impl From<rusqlite::Error> for AuthError {
+    fn from(error: rusqlite::Error) -> Self {
+        storage_error(error)
     }
 }
 
@@ -517,7 +989,7 @@ fn map_username_constraint(error: rusqlite::Error) -> AuthError {
     ) {
         AuthError::UsernameExists
     } else {
-        AuthError::Storage(error)
+        storage_error(error)
     }
 }
 

@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     admin,
-    config::{Config, PersistenceMode, TlsOptions},
+    config::{AuthStorageBackend, Config, PersistenceMode, TlsOptions},
     metrics::{self, Metrics},
     persistence::PersistenceManager,
     server, systemd, ttl_cleanup,
@@ -157,7 +157,27 @@ impl Application {
         }
 
         let auth_store = if self.config.security.authentication {
-            let store = match AuthStore::open(&self.config.security.auth.database_path) {
+            let opened_store = match self.config.security.auth.backend {
+                AuthStorageBackend::Sqlite => {
+                    AuthStore::open(&self.config.security.auth.database_path)
+                        .map_err(io::Error::other)
+                }
+                AuthStorageBackend::Postgres => self
+                    .config
+                    .security
+                    .auth
+                    .database_url
+                    .as_deref()
+                    .filter(|url| !url.is_empty())
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "security.auth.database_url must be set for PostgreSQL auth storage",
+                        )
+                    })
+                    .and_then(|url| AuthStore::open_postgres(url).map_err(io::Error::other)),
+            };
+            let store = match opened_store {
                 Ok(store) => Arc::new(store),
                 Err(err) => {
                     return Err(self
