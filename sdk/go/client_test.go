@@ -392,13 +392,13 @@ func TestProtocolError(t *testing.T) {
 }
 
 func TestAddressAndTimeoutValidation(t *testing.T) {
-	if _, err := New("::1:7001"); err == nil {
+	if _, err := New("::1:17171"); err == nil {
 		t.Fatal("New() accepted an unbracketed IPv6 address")
 	}
 	if _, err := New("localhost:70000"); err == nil {
 		t.Fatal("New() accepted an out-of-range port")
 	}
-	if _, err := NewWithTimeout("localhost:7001", 0); err == nil {
+	if _, err := NewWithTimeout("localhost:17171", 0); err == nil {
 		t.Fatal("NewWithTimeout() accepted a non-positive timeout")
 	}
 	if client, err := New(); err != nil || client == nil {

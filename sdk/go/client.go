@@ -21,7 +21,7 @@ import (
 
 const (
 	// DefaultAddress is the local binary-protocol endpoint.
-	DefaultAddress  = "127.0.0.1:7001"
+	DefaultAddress = "127.0.0.1:17171"
 	// DefaultTimeout is the default connect, request, and acquisition timeout.
 	DefaultTimeout  = 5 * time.Second
 	maxKeyLength    = 1024
@@ -37,11 +37,11 @@ var protocolMagic = [4]byte{'N', 'E', 'B', 'U'}
 // Start with DefaultConfig; the zero value is not valid.
 type Config struct {
 	// Address is host:port, with brackets required around IPv6 hosts.
-	Address        string
+	Address string
 	// MinPoolSize is the pool size targeted lazily during acquisition.
-	MinPoolSize    int
+	MinPoolSize int
 	// MaxPoolSize bounds established connections and in-progress dials together.
-	MaxPoolSize    int
+	MaxPoolSize int
 	// ConnectTimeout bounds each dial, including the TLS handshake when enabled.
 	ConnectTimeout time.Duration
 	// RequestTimeout bounds a request's writes and reads, and each AUTH exchange.
@@ -50,15 +50,15 @@ type Config struct {
 	// AUTH uses its own RequestTimeout and is not canceled by this deadline.
 	AcquireTimeout time.Duration
 	// IdleTimeout retires unused connections when the pool is next acquired.
-	IdleTimeout    time.Duration
+	IdleTimeout time.Duration
 	// MaxLifetime retires aged connections during acquisition or release, not mid-request.
-	MaxLifetime    time.Duration
+	MaxLifetime time.Duration
 	// MaxRetries limits additional GET attempts after transient transport failures.
-	MaxRetries     int
+	MaxRetries int
 	// TLSConfig enables TLS when non-nil and is cloned for each dial.
-	TLSConfig      *tls.Config
+	TLSConfig *tls.Config
 	// Token enables per-connection AUTH when non-empty.
-	Token          string
+	Token string
 }
 
 // DefaultConfig returns a valid configuration with a lazy pool of at most ten connections.
