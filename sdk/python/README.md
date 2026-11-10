@@ -4,7 +4,7 @@ A synchronous, dependency-free Python 3.10+ client for the NebulaCache v1 binary
 
 ## Before you start
 
-Start the server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
+Start the server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:17171`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
 
 ## Install
 
@@ -19,7 +19,7 @@ python -m pip install .
 ```python
 from nebulacache import NebulaCache
 
-cache = NebulaCache("127.0.0.1:7001")
+cache = NebulaCache("127.0.0.1:17171")
 try:
     cache.ping()
     cache.set("greeting", "hello", ttl_secs=60)
@@ -35,7 +35,7 @@ finally:
 
 ## API and behavior
 
-- `NebulaCache(address="127.0.0.1:7001", timeout=5.0, ...)`: create a client. `address` is `host:port`; bracket IPv6 literals as `[host]:port`.
+- `NebulaCache(address="127.0.0.1:17171", timeout=5.0, ...)`: create a client. `address` is `host:port`; bracket IPv6 literals as `[host]:port`.
 - `ping() -> bool`: return `True` when the server replies with `PONG`.
 - `set(key, value, ttl_secs=0) -> None`: store a non-empty string key and text or binary value.
 - `get(key) -> bytes | None`: return raw bytes or `None` when missing/expired.
@@ -54,7 +54,7 @@ import ssl
 from nebulacache import NebulaCache
 
 cache = NebulaCache(
-    "cache.example:7001",
+    "cache.example:17171",
     ssl_context=ssl.create_default_context(cafile="ca.pem"),
     token=os.environ["NEBULA_TOKEN"],
 )
@@ -74,14 +74,14 @@ Connections are opened lazily, reused, and owned by the client until `close()`. 
 
 ## Example CLI
 
-The included CLI supports `ping`, `set`, `get`, and `delete`. It defaults to `NEBULA_ADDR` or `127.0.0.1:7001`. Use `--tls-ca` or `NEBULA_TLS_CA` to load a CA PEM and enable verified TLS:
+The included CLI supports `ping`, `set`, `get`, and `delete`. It defaults to `NEBULA_ADDR` or `127.0.0.1:17171`. Use `--tls-ca` or `NEBULA_TLS_CA` to load a CA PEM and enable verified TLS:
 
 ```bash
 python ./examples/cache_cli.py ping
 python ./examples/cache_cli.py set greeting hello --ttl 60
 python ./examples/cache_cli.py get greeting
 python ./examples/cache_cli.py delete greeting
-python ./examples/cache_cli.py --address 127.0.0.1:7001 ping
+python ./examples/cache_cli.py --address 127.0.0.1:17171 ping
 python ./examples/cache_cli.py --tls-ca /path/to/ca.pem ping
 NEBULA_TLS_CA=/path/to/ca.pem python ./examples/cache_cli.py ping
 ```

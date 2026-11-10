@@ -12,6 +12,6 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates bash \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/nebula-server /usr/local/bin/nebula-server
-EXPOSE 7001
+EXPOSE 17171
 USER 1000:1000
 ENTRYPOINT ["nebula-server"]

@@ -162,10 +162,10 @@ public final class NebulaCache implements AutoCloseable {
     }
 
     /**
-     * Creates a lazy client for {@code 127.0.0.1:7001} with default settings.
+     * Creates a lazy client for {@code 127.0.0.1:17171} with default settings.
      */
     public NebulaCache() {
-        this("127.0.0.1:7001");
+        this("127.0.0.1:17171");
     }
 
     /**
@@ -239,13 +239,13 @@ public final class NebulaCache implements AutoCloseable {
      * Runs a PING, SET, GET, and DELETE smoke test against a running server.
      * Uses a unique temporary key and prints results to standard output.
      *
-     * @param args optional {@code --tls} flag and endpoint; defaults to {@code 127.0.0.1:7001}
+     * @param args optional {@code --tls} flag and endpoint; defaults to {@code 127.0.0.1:17171}
      * @throws IllegalArgumentException if arguments are unsupported or the endpoint is invalid
      * @throws NebulaCacheException if a cache operation fails
      * @throws IllegalStateException if the stored smoke-test value cannot be retrieved
      */
     public static void main(String[] args) {
-        String address = "127.0.0.1:7001";
+        String address = "127.0.0.1:17171";
         boolean addressSet = false;
         boolean tlsEnabled = false;
         for (String arg : args) {

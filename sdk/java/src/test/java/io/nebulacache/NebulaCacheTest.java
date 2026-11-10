@@ -99,8 +99,8 @@ class NebulaCacheTest {
                 () -> cache.set("key", "value", BigInteger.ONE.shiftLeft(64)));
         assertThrows(IllegalArgumentException.class, () -> cache.set("é".repeat(513), "value"));
         assertThrows(IllegalArgumentException.class, () -> new NebulaCache("localhost:70000"));
-        assertThrows(IllegalArgumentException.class, () -> new NebulaCache("::1:7001"));
-        assertThrows(IllegalArgumentException.class, () -> new NebulaCache("127.0.0.1:7001", Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> new NebulaCache("::1:17171"));
+        assertThrows(IllegalArgumentException.class, () -> new NebulaCache("127.0.0.1:17171", Duration.ZERO));
     }
 
     @Test

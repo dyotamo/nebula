@@ -4,7 +4,7 @@ A synchronous Java 17+ client for the NebulaCache v1 binary TCP protocol. The SD
 
 ## Before you start
 
-Start a server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
+Start a server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:17171`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
 
 ## Build and install
 
@@ -41,7 +41,7 @@ import java.nio.charset.StandardCharsets;
 
 public class Example {
     public static void main(String[] args) {
-        try (NebulaCache cache = new NebulaCache("127.0.0.1:7001")) {
+        try (NebulaCache cache = new NebulaCache("127.0.0.1:17171")) {
             if (cache.ping()) {
                 System.out.println("PONG");
             }
@@ -61,7 +61,7 @@ public class Example {
 
 ## API and behavior
 
-- `new NebulaCache()`: connect to `127.0.0.1:7001` with default settings.
+- `new NebulaCache()`: connect to `127.0.0.1:17171` with default settings.
 - `new NebulaCache(address)`: connect to the given `host:port` using default settings. IPv6 addresses use `[host]:port`.
 - `new NebulaCache(address, timeout)`: use one positive `Duration` for connect and request timeouts.
 - `new NebulaCache(address, config)`: configure pool sizes, connect/request/acquire/idle/lifetime timeouts, retry count, TLS, and token.
@@ -86,7 +86,7 @@ NebulaCache.Config config = new NebulaCache.Config(
         Duration.ofSeconds(5), Duration.ofSeconds(5), Duration.ofSeconds(5),
         Duration.ofSeconds(60), Duration.ofSeconds(300),
         2, true, System.getenv("NEBULA_TOKEN"));
-try (NebulaCache cache = new NebulaCache("cache.example:7001", config)) {
+try (NebulaCache cache = new NebulaCache("cache.example:17171", config)) {
     cache.ping();
 }
 ```
@@ -115,8 +115,8 @@ The SDK main method exercises ping, set, get, and delete. Build first, then run 
 ```bash
 mvn package
 java -cp ./target/classes io.nebulacache.NebulaCache
-java -cp ./target/classes io.nebulacache.NebulaCache 127.0.0.1:7001
-java -cp ./target/classes io.nebulacache.NebulaCache --tls 127.0.0.1:7001
+java -cp ./target/classes io.nebulacache.NebulaCache 127.0.0.1:17171
+java -cp ./target/classes io.nebulacache.NebulaCache --tls 127.0.0.1:17171
 ```
 
 For TLS with a private CA, start Java with the trust-store system properties shown in [TLS and token authentication](#tls-and-token-authentication). The smoke-test main currently supports the `--tls` flag but not a token argument; use the SDK `Config` API for authenticated calls.

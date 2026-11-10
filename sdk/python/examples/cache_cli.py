@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nebulacache-example")
     parser.add_argument(
         "--address",
-        default=os.environ.get("NEBULA_ADDR", "127.0.0.1:7001"),
+        default=os.environ.get("NEBULA_ADDR", "127.0.0.1:17171"),
         help="NebulaCache node address (default: %(default)s)",
     )
     parser.add_argument(

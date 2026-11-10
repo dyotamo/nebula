@@ -32,7 +32,7 @@ struct Cli {
         long,
         global = true,
         env = "NEBULA_ADDR",
-        default_value = "127.0.0.1:7001",
+        default_value = "127.0.0.1:17171",
         value_name = "HOST:PORT"
     )]
     address: String,
@@ -40,7 +40,7 @@ struct Cli {
         long,
         global = true,
         env = "NEBULA_ADMIN_ADDR",
-        default_value = "http://127.0.0.1:7002",
+        default_value = "http://127.0.0.1:17172",
         value_name = "URL",
         help = "HTTP or HTTPS URL for the admin API"
     )]
@@ -316,7 +316,7 @@ mod tests {
             "nebula-client",
             "set",
             "--address",
-            "cache:7002",
+            "cache:17172",
             "--tls-ca",
             "rootCA.pem",
             "key",
@@ -325,7 +325,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli.address, "cache:7002");
+        assert_eq!(cli.address, "cache:17172");
         assert_eq!(
             cli.tls_ca.as_deref().and_then(|path| path.to_str()),
             Some("rootCA.pem")
@@ -345,7 +345,7 @@ mod tests {
         let cli =
             Cli::try_parse_from(["nebula-client", "bootstrap-admin", "administrator"]).unwrap();
 
-        assert_eq!(cli.admin_address, "http://127.0.0.1:7002");
+        assert_eq!(cli.admin_address, "http://127.0.0.1:17172");
     }
 
     #[test]

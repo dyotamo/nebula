@@ -4,7 +4,7 @@ A dependency-free Go 1.22+ client for the NebulaCache v1 binary TCP protocol. Th
 
 ## Before you start
 
-Start a NebulaCache server using the repository-root setup and configuration instructions in [the main README](./../../README.md#run-the-server). The default client address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
+Start a NebulaCache server using the repository-root setup and configuration instructions in [the main README](./../../README.md#run-the-server). The default client address is `127.0.0.1:17171`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
 
 ## Install
 
@@ -62,7 +62,7 @@ Keys and string values use UTF-8. `Set` accepts `[]byte`; `SetString` accepts te
 
 ## API and behavior
 
-- `New()` and `New(address)`: create a client for `127.0.0.1:7001` or the supplied `host:port`, with a five-second default timeout.
+- `New()` and `New(address)`: create a client for `127.0.0.1:17171` or the supplied `host:port`, with a five-second default timeout.
 - `NewWithTimeout(address, timeout)`: use a custom positive `time.Duration` for connect and request timeouts.
 - `NewWithConfig(config)`: configure address, pool sizes, timeouts, retry count, optional TLS, and optional auth token.
 - `Ping() error`: succeeds when the server replies with `PONG`.
@@ -104,7 +104,7 @@ func connect() (*nebulacache.NebulaCache, error) {
 	}
 
 	config := nebulacache.DefaultConfig()
-	config.Address = "cache.example:7001"
+	config.Address = "cache.example:17171"
 	config.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
 	config.Token = os.Getenv("NEBULA_TOKEN")
 	return nebulacache.NewWithConfig(config)
@@ -115,7 +115,7 @@ Import `fmt` if using the error formatting shown. Leave `TLSConfig` nil to use p
 
 ## Pooling, timeouts, and retries
 
-`NewWithConfig` accepts `Address`, `MinPoolSize`, `MaxPoolSize`, `ConnectTimeout`, `RequestTimeout`, `AcquireTimeout`, `IdleTimeout`, `MaxLifetime`, `MaxRetries`, `TLSConfig`, and `Token`. `DefaultConfig()` uses `127.0.0.1:7001`, min pool 0, max pool 10, five-second connect/request/acquire timeouts, 60-second idle timeout, 300-second maximum lifetime, and two retries.
+`NewWithConfig` accepts `Address`, `MinPoolSize`, `MaxPoolSize`, `ConnectTimeout`, `RequestTimeout`, `AcquireTimeout`, `IdleTimeout`, `MaxLifetime`, `MaxRetries`, `TLSConfig`, and `Token`. `DefaultConfig()` uses `127.0.0.1:17171`, min pool 0, max pool 10, five-second connect/request/acquire timeouts, 60-second idle timeout, 300-second maximum lifetime, and two retries.
 
 Connections are opened lazily, reused, and owned by the client until `Close()`. A connection processes one request at a time; concurrent calls use separate pooled connections. Idle/old/broken connections are retired. Only GET is retried after transient transport failures, with bounded exponential full jitter and a shared retry budget. SET and DELETE are not replayed because a timeout may occur after the server has applied a mutation.
 
@@ -130,7 +130,7 @@ go run ./examples
 Use another address or a private CA when needed:
 
 ```bash
-go run ./examples --address 127.0.0.1:7001
+go run ./examples --address 127.0.0.1:17171
 go run ./examples --tls-ca /path/to/ca.pem
 NEBULA_TLS_CA=/path/to/ca.pem go run ./examples
 ```

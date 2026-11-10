@@ -64,11 +64,11 @@ class CacheResponseError extends NebulaCacheError {
  */
 class NebulaCache {
   /**
-   * @param {string} [address="127.0.0.1:7001"] Host:port, with brackets around IPv6 hosts.
+   * @param {string} [address="127.0.0.1:17171"] Host:port, with brackets around IPv6 hosts.
    * @param {number|NebulaCacheOptions} [timeout=5000] Connect/request timeout in
    * milliseconds, or pool options. A numeric timeout leaves acquireTimeout at its default.
    */
-  constructor(address = '127.0.0.1:7001', timeout = 5000) {
+  constructor(address = '127.0.0.1:17171', timeout = 5000) {
     const parsedAddress = parseAddress(address);
     this.options = parseOptions(timeout);
     this.host = parsedAddress.host;

@@ -52,7 +52,7 @@ class NebulaCache:
 
     def __init__(
         self,
-        address: str = "127.0.0.1:7001",
+        address: str = "127.0.0.1:17171",
         timeout: float = 5.0,
         *,
         min_pool_size: int = 0,
@@ -69,7 +69,7 @@ class NebulaCache:
         """Configure a lazy connection pool without opening sockets.
 
         Args:
-            address: Host and port, default "127.0.0.1:7001"; use [host]:port
+            address: Host and port, default "127.0.0.1:17171"; use [host]:port
                 for IPv6. Ports must be in the range 1 through 65535.
             timeout: Default connect/request timeout in seconds (5.0), used
                 when the corresponding override is None.

@@ -4,7 +4,7 @@ An asynchronous Rust client for the NebulaCache v1 binary TCP protocol. It suppo
 
 ## Before you start
 
-Start a NebulaCache server using the repository's [server instructions](../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides cache operations over the binary TCP protocol; it does not provide user or token administration. Token authentication can be used with or without TLS; use verified TLS when the network is not trusted.
+Start a NebulaCache server using the repository's [server instructions](../../README.md#run-the-server). The default address is `127.0.0.1:17171`. This SDK provides cache operations over the binary TCP protocol; it does not provide user or token administration. Token authentication can be used with or without TLS; use verified TLS when the network is not trusted.
 
 ## Use the SDK
 
@@ -29,7 +29,7 @@ use nebulacache::NebulaCache;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cache = NebulaCache::new("127.0.0.1:7001")?;
+    let cache = NebulaCache::new("127.0.0.1:17171")?;
 
     cache.ping().await?;
     cache.set_string_with_ttl("greeting", "hello", 60).await?;
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API and behavior
 
-- `NebulaCache::new(address)`: create a client for a `host:port` address. `Config::default()` uses `127.0.0.1:7001`.
+- `NebulaCache::new(address)`: create a client for a `host:port` address. `Config::default()` uses `127.0.0.1:17171`.
 - `NebulaCache::with_config(config)`: configure connection limits, timeouts, retries, TLS, and an optional token.
 - `ping().await`: check that the server responds with `PONG`.
 - `set(key, value).await` / `set_string(key, value).await`: store binary or UTF-8 data without expiration.
@@ -69,7 +69,7 @@ use nebulacache::{Config, NebulaCache};
 use std::path::PathBuf;
 
 let mut config = Config::default();
-config.address = "cache.example:7001".to_owned();
+config.address = "cache.example:17171".to_owned();
 config.tls_ca_path = Some(PathBuf::from("./ca.pem"));
 config.token = std::env::var("NEBULA_TOKEN").ok();
 let cache = NebulaCache::with_config(config)?;
@@ -94,7 +94,7 @@ cargo run -p nebulacache --example cache_cli -- ping
 cargo run -p nebulacache --example cache_cli -- set greeting hello --ttl 60
 cargo run -p nebulacache --example cache_cli -- get greeting
 cargo run -p nebulacache --example cache_cli -- delete greeting
-cargo run -p nebulacache --example cache_cli -- --address 127.0.0.1:7001 ping
+cargo run -p nebulacache --example cache_cli -- --address 127.0.0.1:17171 ping
 cargo run -p nebulacache --example cache_cli -- --tls-ca ./server-ca.pem ping
 NEBULA_TLS_CA=./server-ca.pem NEBULA_TOKEN="$NEBULA_TOKEN" cargo run -p nebulacache --example cache_cli -- ping
 ```

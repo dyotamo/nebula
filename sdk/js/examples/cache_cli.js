@@ -5,7 +5,7 @@ const USAGE = 'Usage: node examples/cache_cli.js [--address host:port] [--tls-ca
 const MAX_UINT64 = 0xffffffffffffffffn;
 
 async function main(argv) {
-  let address = process.env.NEBULA_ADDR || '127.0.0.1:7001';
+  let address = process.env.NEBULA_ADDR || '127.0.0.1:17171';
   let tlsCA = process.env.NEBULA_TLS_CA;
   const args = [...argv];
 

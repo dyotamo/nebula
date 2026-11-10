@@ -14,6 +14,13 @@ This README describes the system as it exists in this repository. It is not a di
   - [Requirements and checks](#requirements-and-checks)
   - [Run the server](#run-the-server)
   - [Configuration reference](#configuration-reference)
+    - [Top-level settings](#top-level-settings)
+    - [`[admin]`](#admin)
+    - [`[tls]`](#tls)
+    - [`[security]` and `[security.auth]`](#security-and-securityauth)
+    - [`[persistence]`](#persistence)
+    - [`[metrics]`](#metrics)
+    - [`[resource_limits]`](#resource_limits)
   - [TLS and client authentication](#tls-and-client-authentication)
   - [Admin console](#admin-console)
   - [Snapshots and recovery](#snapshots-and-recovery)
@@ -122,7 +129,7 @@ SDK checks are listed in each SDK README. Run the Rust SDK checks from the works
 The server requires a TOML configuration file. Without an explicit path it reads `./nebulad.toml` from the current working directory; the path is the server's only command-line argument. Make an empty config file to use defaults, or define settings in it. For example, save this as `./nebulad.toml`:
 
 ```toml
-listen_addr = "127.0.0.1:7001"
+listen_addr = "127.0.0.1:17171"
 log_level = "info"
 ```
 
@@ -132,7 +139,7 @@ Run the server from the repository root:
 cargo run -p nebula-server -- ./nebulad.toml
 ```
 
-To use defaults, the file may be empty. The default TCP bind is `0.0.0.0:7001`, which listens on every interface. The default is plaintext and TCP auth is off, so choose a trusted/loopback bind or configure TLS, authentication, and network-level access controls before exposing the listener.
+To use defaults, the file may be empty. The default TCP bind is `0.0.0.0:17171`, which listens on every interface. The default is plaintext and TCP auth is off, so choose a trusted/loopback bind or configure TLS, authentication, and network-level access controls before exposing the listener.
 
 The server rejects unknown TOML fields and invalid combinations at startup. String values in the TOML may contain `${NAME}` or `${NAME:-default}`. Unset variables without a default cause configuration loading to fail. Environment substitutions are converted to the field's expected boolean/numeric type where applicable.
 
@@ -141,14 +148,14 @@ The server rejects unknown TOML fields and invalid combinations at startup. Stri
 Every configuration field and its default is listed below. Optional TLS paths, the PostgreSQL URL, and optional S3 bucket/region/endpoint/credential values default to unset and are omitted as TOML assignments. All relative paths are resolved from the server process working directory.
 
 ```toml
-listen_addr = "0.0.0.0:7001"
+listen_addr = "0.0.0.0:17171"
 shutdown_timeout_secs = 30
 ttl_cleanup_interval_secs = 3600
 log_level = "info"
 
 [admin]
 enabled = false
-listen_addr = "127.0.0.1:7002"
+listen_addr = "127.0.0.1:17172"
 metrics_dashboard = true
 
 [tls]
@@ -171,7 +178,7 @@ snapshot_retention = 3
 
 [metrics]
 enabled = true
-listen_addr = "127.0.0.1:7003"
+listen_addr = "127.0.0.1:17173"
 
 [resource_limits]
 max_cache_size_bytes = 67108864
@@ -181,7 +188,7 @@ eviction_policy = "lru"
 
 ### Top-level settings
 
-- `listen_addr`: TCP bind address for the binary cache protocol. Defaults to all interfaces on port `7001`.
+- `listen_addr`: TCP bind address for the binary cache protocol. Defaults to all interfaces on port `17171`.
 - `shutdown_timeout_secs`: maximum number of seconds to wait for services and workers to stop cleanly. Defaults to `30`.
 - `ttl_cleanup_interval_secs`: interval in seconds between background expired-entry cleanup passes. Must be greater than zero; defaults to `3600`. Expired entries are also removed when accessed.
 - `log_level`: tracing filter used unless `RUST_LOG` is set. Defaults to `info`; accepts the tracing-subscriber `EnvFilter` syntax.
@@ -189,7 +196,7 @@ eviction_policy = "lru"
 ### `[admin]`
 
 - `enabled`: starts the HTTP administration console. Defaults to `false`; enabling it requires `security.authentication = true` and the console has no password-login mode.
-- `listen_addr`: HTTP bind address for the console. Defaults to `127.0.0.1:7002`.
+- `listen_addr`: HTTP bind address for the console. Defaults to `127.0.0.1:17172`.
 - `metrics_dashboard`: enables the metrics and health dashboard within the console. Defaults to `true`; this does not control the standalone metrics endpoint.
 
 ### `[tls]`
@@ -225,7 +232,7 @@ Snapshot settings are validated at startup; backend storage must be configured w
 ### `[metrics]`
 
 - `enabled`: starts the standalone Prometheus HTTP endpoint. Defaults to `true`.
-- `listen_addr`: metrics HTTP bind address. Defaults to `127.0.0.1:7003`. The endpoint has no built-in authentication or TLS.
+- `listen_addr`: metrics HTTP bind address. Defaults to `127.0.0.1:17173`. The endpoint has no built-in authentication or TLS.
 
 ### `[resource_limits]`
 
@@ -269,21 +276,21 @@ On the first startup with TCP authentication or the admin console enabled, the s
 
 ```bash
 NEBULA_BOOTSTRAP_TOKEN='credential-printed-by-server' \
-  cargo run -p nebula-client -- --admin-address http://127.0.0.1:7002 bootstrap-admin administrator
+  cargo run -p nebula-client -- --admin-address http://127.0.0.1:17172 bootstrap-admin administrator
 ```
 
 The command prints an API token once. Store it securely. For later administration, provide the admin token through `NEBULA_TOKEN`; user/token commands also use the HTTP admin API:
 
 ```bash
-NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --admin-address http://127.0.0.1:7002 user create app-reader --role readonly
-NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --admin-address http://127.0.0.1:7002 token create app-reader --expires-in 30d
+NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --admin-address http://127.0.0.1:17172 user create app-reader --role readonly
+NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --admin-address http://127.0.0.1:17172 token create app-reader --expires-in 30d
 ```
 
 The CLI supports user create/list/show/set-role/disable/enable/delete and token create/list/revoke. Roles are `readonly`, `readwrite`, and `admin`; token expiry accepts a duration such as `30d`, `12h`, `60m`, or `300s`. Set `NEBULA_ADMIN_ADDR` instead of repeating `--admin-address`, and configure `NEBULA_TOKEN` for authenticated admin requests. For authenticated cache requests, configure `NEBULA_TOKEN`; `--tls-ca` or `NEBULA_TLS_CA` optionally enables TLS for the TCP client.
 
 ## Admin console
 
-The web console is disabled by default and listens on `127.0.0.1:7002` when enabled. The listener serves HTTP only; it does not configure or terminate TLS. It uses token authentication and has no password-login mode. Enabling it also enables token authentication for TCP clients; TCP TLS remains optional. For remote browser and CLI access, place the console behind a TLS-terminating reverse proxy and have the proxy set the session cookie's `Secure` attribute:
+The web console is disabled by default and listens on `127.0.0.1:17172` when enabled. The listener serves HTTP only; it does not configure or terminate TLS. It uses token authentication and has no password-login mode. Enabling it also enables token authentication for TCP clients; TCP TLS remains optional. For remote browser and CLI access, place the console behind a TLS-terminating reverse proxy and have the proxy set the session cookie's `Secure` attribute:
 
 ```toml
 [security]
@@ -291,11 +298,11 @@ authentication = true
 
 [admin]
 enabled = true
-listen_addr = "127.0.0.1:7002"
+listen_addr = "127.0.0.1:17172"
 metrics_dashboard = true
 ```
 
-After creating an administrator as described above, visit `http://127.0.0.1:7002` locally or use the HTTPS URL exposed by your TLS-terminating proxy. Configure the CLI's `--admin-address` or `NEBULA_ADMIN_ADDR` with that `https://` URL; it uses standard TLS certificate and hostname verification and does not need the proxy's private key or a server-side TLS configuration. Console capabilities include:
+After creating an administrator as described above, visit `http://127.0.0.1:17172` locally or use the HTTPS URL exposed by your TLS-terminating proxy. Configure the CLI's `--admin-address` or `NEBULA_ADMIN_ADDR` with that `https://` URL; it uses standard TLS certificate and hostname verification and does not need the proxy's private key or a server-side TLS configuration. Console capabilities include:
 
 - Browse cache entries with text search and pagination; the UI renders cache content as text, so use an SDK/CLI for arbitrary binary data.
 - Add/update entries with TTL, delete individual entries, and clear the cache.
@@ -335,7 +342,7 @@ Snapshots are checksummed and written to the configured filesystem directory or 
 
 ## Metrics and health
 
-Metrics are enabled by default at `http://127.0.0.1:7003/metrics`. The HTTP listener has no built-in authentication or TLS, so keep it on a trusted interface/network. The exporter exposes Prometheus counters, gauges, and histograms for:
+Metrics are enabled by default at `http://127.0.0.1:17173/metrics`. The HTTP listener has no built-in authentication or TLS, so keep it on a trusted interface/network. The exporter exposes Prometheus counters, gauges, and histograms for:
 
 - Uptime and lifecycle state.
 - Request totals, errors, and duration by operation (`ping`, `set`, `get`, `delete`).
@@ -348,10 +355,10 @@ The optional admin dashboard presents current health, cache and connection state
 
 ## Command-line client
 
-The Rust CLI defaults to `127.0.0.1:7001`; select another TCP address with `--address`/`-a` or `NEBULA_ADDR`:
+The Rust CLI defaults to `127.0.0.1:17171`; select another TCP address with `--address`/`-a` or `NEBULA_ADDR`:
 
 ```bash
-cargo run -p nebula-client -- --address 127.0.0.1:7001 ping
+cargo run -p nebula-client -- --address 127.0.0.1:17171 ping
 cargo run -p nebula-client -- set greeting hello
 cargo run -p nebula-client -- set temporary value 30
 cargo run -p nebula-client -- get greeting
@@ -374,9 +381,9 @@ Each SDK README covers installation, API behavior, TLS/auth options, errors, poo
 
 ## Docker
 
-The Dockerfile builds the `nebulad` server executable and the Compose file publishes TCP port `7001`. **As currently configured, the image and Compose service do not include or mount the required `nebulad.toml` file**, while the server requires a TOML file at startup. Consequently, `docker compose up --build` as-is does not provide a runnable default server configuration. Supply a configuration file to the container before relying on this workflow; do not assume Compose creates a three-node cluster or configures persistence/authentication. The Dockerfile runs as UID/GID `1000:1000`, so mounted config, snapshot, and auth database paths must be readable/writable as appropriate for that user.
+The Dockerfile builds the `nebulad` server executable and the Compose file publishes TCP port `17171`. **As currently configured, the image and Compose service do not include or mount the required `nebulad.toml` file**, while the server requires a TOML file at startup. Consequently, `docker compose up --build` as-is does not provide a runnable default server configuration. Supply a configuration file to the container before relying on this workflow; do not assume Compose creates a three-node cluster or configures persistence/authentication. The Dockerfile runs as UID/GID `1000:1000`, so mounted config, snapshot, and auth database paths must be readable/writable as appropriate for that user.
 
-The image exposes port `7001` only. Admin and metrics listeners are not published by the Compose file. The included container setup is for development; production deployments need explicit config, secure credentials and certificates, storage permissions, service/network policy, and monitoring configuration.
+The image exposes port `17171` only. Admin and metrics listeners are not published by the Compose file. The included container setup is for development; production deployments need explicit config, secure credentials and certificates, storage permissions, service/network policy, and monitoring configuration.
 
 ## Wire protocol
 

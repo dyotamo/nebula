@@ -4,7 +4,7 @@ A dependency-free Node.js 18+ client for the NebulaCache v1 binary TCP protocol.
 
 ## Before you start
 
-Start a server using [the repository's server instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
+Start a server using [the repository's server instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:17171`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
 
 ## Install
 
@@ -22,7 +22,7 @@ No external runtime packages are required.
 const { NebulaCache } = require('nebulacache');
 
 async function main() {
-  const cache = new NebulaCache('127.0.0.1:7001');
+  const cache = new NebulaCache('127.0.0.1:17171');
   try {
     await cache.ping();
     await cache.set('greeting', 'hello', 60);
@@ -45,7 +45,7 @@ main().catch((error) => {
 
 ## API and behavior
 
-- `new NebulaCache(address = '127.0.0.1:7001', timeoutOrOptions = 5000)`: create a client. A numeric second argument sets connect and request timeout milliseconds; an options object allows more control.
+- `new NebulaCache(address = '127.0.0.1:17171', timeoutOrOptions = 5000)`: create a client. A numeric second argument sets connect and request timeout milliseconds; an options object allows more control.
 - `await ping()`: return true when the server responds with `PONG`.
 - `await set(key, value, ttlSecs = 0)`: store text or binary data, optionally with a TTL in seconds.
 - `await get(key)`: return raw `Buffer` bytes or `null` if absent/expired.
@@ -64,7 +64,7 @@ Pass normal Node.js TLS connection options in `tls` to encrypt TCP connections. 
 const fs = require('node:fs');
 const { NebulaCache } = require('nebulacache');
 
-const cache = new NebulaCache('cache.example:7001', {
+const cache = new NebulaCache('cache.example:17171', {
   tls: { ca: fs.readFileSync('./ca.pem') },
   token: process.env.NEBULA_TOKEN,
 });
@@ -78,14 +78,14 @@ Connections are created lazily, reused for requests, and closed by `close()`. Ea
 
 ## Example CLI
 
-The included CLI supports `ping`, `set`, `get`, and `delete`. It uses `NEBULA_ADDR` or `127.0.0.1:7001`; `--tls-ca` or `NEBULA_TLS_CA` loads a private CA and enables TLS.
+The included CLI supports `ping`, `set`, `get`, and `delete`. It uses `NEBULA_ADDR` or `127.0.0.1:17171`; `--tls-ca` or `NEBULA_TLS_CA` loads a private CA and enables TLS.
 
 ```bash
 node ./examples/cache_cli.js ping
 node ./examples/cache_cli.js set greeting hello --ttl 60
 node ./examples/cache_cli.js get greeting
 node ./examples/cache_cli.js delete greeting
-node ./examples/cache_cli.js --address 127.0.0.1:7001 ping
+node ./examples/cache_cli.js --address 127.0.0.1:17171 ping
 node ./examples/cache_cli.js --tls-ca /path/to/ca.pem ping
 NEBULA_TLS_CA=/path/to/ca.pem node ./examples/cache_cli.js ping
 ```

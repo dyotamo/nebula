@@ -61,7 +61,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            address: "127.0.0.1:7001".to_owned(),
+            address: "127.0.0.1:17171".to_owned(),
             max_pool_size: 10,
             connect_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(5),
@@ -621,7 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn validates_keys_and_configuration() {
-        let client = NebulaCache::new("127.0.0.1:7001").unwrap();
+        let client = NebulaCache::new("127.0.0.1:17171").unwrap();
         assert!(matches!(
             client.get("").await,
             Err(NebulaCacheError::InvalidInput(_))

@@ -3,7 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 project_root=$(CDPATH= cd "$script_dir/.." && pwd)
-address=${1:-${NEBULA_ADDR:-127.0.0.1:7001}}
+address=${1:-${NEBULA_ADDR:-127.0.0.1:17171}}
 tls_ca=${2:-${NEBULA_TLS_CA:-}}
 target_dir=${CARGO_TARGET_DIR:-target}
 

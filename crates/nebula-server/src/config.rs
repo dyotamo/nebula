@@ -174,7 +174,7 @@ pub struct AdminOptions {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], 7001)),
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 17171)),
             admin: AdminOptions::default(),
             tls: TlsOptions::default(),
             security: SecurityOptions::default(),
@@ -249,7 +249,7 @@ impl Default for MetricsOptions {
     fn default() -> Self {
         Self {
             enabled: true,
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 7003)),
+            listen_addr: SocketAddr::from(([127, 0, 0, 1], 17173)),
         }
     }
 }
@@ -258,7 +258,7 @@ impl Default for AdminOptions {
     fn default() -> Self {
         Self {
             enabled: false,
-            listen_addr: SocketAddr::from(([127, 0, 0, 1], 7002)),
+            listen_addr: SocketAddr::from(([127, 0, 0, 1], 17172)),
             metrics_dashboard: true,
         }
     }
@@ -566,8 +566,8 @@ mod tests {
         let args = Args::try_parse_from(["nebula-server"]).unwrap();
         let config = Config::load_with_default(args, &config_path).unwrap();
         fs::remove_file(config_path).unwrap();
-        assert_eq!(config.listen_addr.to_string(), "0.0.0.0:7001");
-        assert_eq!(config.admin.listen_addr.to_string(), "127.0.0.1:7002");
+        assert_eq!(config.listen_addr.to_string(), "0.0.0.0:17171");
+        assert_eq!(config.admin.listen_addr.to_string(), "127.0.0.1:17172");
         assert!(!config.admin.enabled);
         assert!(!config.tls.enabled);
         assert_eq!(config.tls.certificate, None);
@@ -695,20 +695,20 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("nebulad-config-{unique}"));
         fs::create_dir(&directory).unwrap();
         let default_config = directory.join("nebulad.toml");
-        fs::write(&default_config, r#"listen_addr = "127.0.0.1:7003""#).unwrap();
+        fs::write(&default_config, r#"listen_addr = "127.0.0.1:17173""#).unwrap();
 
         let args = Args::try_parse_from(["nebula-server"]).unwrap();
         let config = Config::load_with_default(args, &default_config).unwrap();
 
         fs::remove_file(default_config).unwrap();
         fs::remove_dir(directory).unwrap();
-        assert_eq!(config.listen_addr.to_string(), "127.0.0.1:7003");
+        assert_eq!(config.listen_addr.to_string(), "127.0.0.1:17173");
     }
 
     #[test]
     fn loads_all_server_settings_from_toml() {
         let config: Config = toml::from_str(
-            r#"listen_addr = "127.0.0.1:7003"
+            r#"listen_addr = "127.0.0.1:17173"
 shutdown_timeout_secs = 7
 ttl_cleanup_interval_secs = 120
 
@@ -738,7 +738,7 @@ eviction_policy = "lfu"
         )
         .unwrap();
 
-        assert_eq!(config.listen_addr.to_string(), "127.0.0.1:7003");
+        assert_eq!(config.listen_addr.to_string(), "127.0.0.1:17173");
         assert_eq!(config.admin.listen_addr.to_string(), "127.0.0.1:7004");
         assert!(config.admin.enabled);
         assert!(config.security.authentication);
@@ -863,14 +863,14 @@ eviction_policy = "lfu"
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
-        fs::write(&path, "listen_addr = \"127.0.0.1:7003\"\n").unwrap();
+        fs::write(&path, "listen_addr = \"127.0.0.1:17173\"\n").unwrap();
 
         let config =
             Config::load(Args::try_parse_from(["nebula-server", path.to_str().unwrap()]).unwrap())
                 .unwrap();
 
         fs::remove_file(path).unwrap();
-        assert_eq!(config.listen_addr.to_string(), "127.0.0.1:7003");
+        assert_eq!(config.listen_addr.to_string(), "127.0.0.1:17173");
         assert!(!config.admin.enabled);
         assert_eq!(config.shutdown_timeout_secs, 30);
         assert_eq!(config.frame_limits().max_key_len, 1_024);

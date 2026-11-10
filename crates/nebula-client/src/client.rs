@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn token_authentication_can_be_used_without_tls() {
         assert!(Client::new(
-            "127.0.0.1:7001",
+            "127.0.0.1:17171",
             None::<&std::path::Path>,
             Some("token".to_owned())
         )
