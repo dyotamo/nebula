@@ -1,6 +1,6 @@
 # NebulaCache
 
-NebulaCache is a single-node, in-memory key/value cache exposed over a versioned binary TCP protocol. The repository contains a Rust server and command-line client, Go/Java/JavaScript/Python client SDKs, optional TCP TLS and token authentication, TTL expiration, bounded cache memory with eviction, optional snapshots, Prometheus metrics, health monitoring, and an optional web administration console.
+NebulaCache is a single-node, in-memory key/value cache exposed over a versioned binary TCP protocol. The repository contains a Rust server and command-line client, Rust/Go/Java/JavaScript/Python client SDKs, optional TCP TLS and token authentication, TTL expiration, bounded cache memory with eviction, optional snapshots, Prometheus metrics, health monitoring, and an optional web administration console.
 
 This README describes the system as it exists in this repository. It is not a distributed cache: each server process owns its own data and there is no node discovery, replication, routing, quorum, or automatic failover.
 
@@ -8,6 +8,7 @@ This README describes the system as it exists in this repository. It is not a di
 
 - [NebulaCache](#nebulacache)
   - [Contents](#contents)
+  - [Features](#features)
   - [Architecture and behavior](#architecture-and-behavior)
   - [Repository layout](#repository-layout)
   - [Requirements and checks](#requirements-and-checks)
@@ -25,6 +26,19 @@ This README describes the system as it exists in this repository. It is not a di
     - [Response frame](#response-frame)
     - [Opcodes and statuses](#opcodes-and-statuses)
   - [Operational and security boundaries](#operational-and-security-boundaries)
+
+## Features
+
+NebulaCache combines a small, explicit server model with practical cache controls and operational tooling:
+
+- **Predictable single-node operation:** one server process owns the cache; there is no hidden clustering or coordination layer.
+- **Bounded memory with configurable eviction:** set a cache-wide memory limit and choose LRU, LFU, or FIFO eviction. Entries that still cannot fit are rejected rather than silently exceeding the limit.
+- **TTL expiration:** assign per-entry expiration in seconds, with expiration checked on reads and by a background cleanup worker.
+- **Compact binary protocol:** a versioned TCP protocol supports opaque values up to 8 MiB, with Rust, Go, Java, JavaScript, and Python clients.
+- **Optional TLS and token authentication:** TLS can protect TCP clients and the admin console; API-token authentication adds role-based read/write access and requires TLS.
+- **Recovery snapshots:** periodically save and restore snapshots using a local filesystem or S3-compatible storage, with retention controls.
+- **Built-in operations visibility:** Prometheus metrics, component health reporting, a watchdog, and an optional web console with a metrics dashboard.
+- **Async Rust client:** connection pooling, configurable timeouts, verified TLS, token authentication, and bounded retries for GET requests.
 
 ## Architecture and behavior
 
@@ -75,6 +89,7 @@ Each cache key and value is opaque bytes at the protocol level. TTL is an unsign
 ## Repository layout
 
 - Rust workspace: `./crates/nebula-{protocol,core,auth,health,watchdog,server,client}`
+- Rust SDK: `./sdk/rust`
 - Go SDK: `./sdk/go`
 - Java SDK: `./sdk/java`
 - JavaScript SDK: `./sdk/js`
@@ -82,7 +97,7 @@ Each cache key and value is opaque bytes at the protocol level. TTL is an unsign
 
 ## Requirements and checks
 
-- Rust stable for the server and CLI (the Docker builder currently uses Rust 1.87).
+- Rust stable for the server, CLI, and Rust SDK (the Docker builder currently uses Rust 1.87).
 - Go 1.22 or newer, Java 17 and Maven, Node.js 18 or newer, and Python 3.10 or newer to work with the respective SDKs.
 - Docker and Docker Compose are optional.
 
@@ -94,8 +109,9 @@ cargo test --workspace
 cargo build --release --workspace
 ```
 
-SDK checks are listed in each SDK README. They can also be run from the workspace root with the corresponding directory as the working directory:
+SDK checks are listed in each SDK README. Run the Rust SDK checks from the workspace root; run the other SDK checks from the corresponding SDK directory:
 
+- Rust: `cargo test -p nebulacache` and `cargo build -p nebulacache`
 - Go: `go test ./...` and `go build ./...`
 - Java: `mvn test` and `mvn package`
 - JavaScript: `npm test`
@@ -351,8 +367,9 @@ TLS uses a CA PEM file, supplied with `--tls-ca` or `NEBULA_TLS_CA`. TCP request
 
 ## SDKs
 
-All four SDKs implement the same cache operations: ping, set, get, delete, TTLs, and optional TLS. They return language-appropriate binary data and distinguish missing keys. They also support token authentication over verified TLS.
+All five SDKs provide the cache operations appropriate to each language: ping, set, get, delete, TTLs, and optional TLS. They support token authentication over verified TLS and distinguish missing keys. The Rust SDK is asynchronous and additionally provides connection pooling, configurable timeouts, and bounded GET retries.
 
+- Rust: [SDK guide](./sdk/rust/README.md)
 - Go: [SDK guide](./sdk/go/README.md)
 - Java: [SDK guide](./sdk/java/README.md)
 - JavaScript: [SDK guide](./sdk/js/README.md)
