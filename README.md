@@ -28,7 +28,7 @@ This README describes the system as it exists in this repository. It is not a di
 
 ## Architecture and behavior
 
-The system is a single process with a concurrent in-memory store. Requests arrive through TCP, are decoded using protocol v1, and are dispatched to the cache store. HTTP services for Prometheus metrics and the optional admin console run separately from the binary TCP listener.
+The system is a single process with a concurrent in-memory store. Requests arrive through TCP, are decoded using protocol v1, and are dispatched to the cache store. HTTP services for Prometheus metrics and the optional admin console run separately from the binary TCP listener. User and API-token records are stored in the configured SQLite or PostgreSQL authentication backend; snapshots can use a local filesystem or S3-compatible object storage.
 
 ```mermaid
 flowchart TD
@@ -39,9 +39,9 @@ flowchart TD
     auth --> handler["Cache operation handler"]
     handler --> cache["Concurrent in-memory store"]
     admin["Optional admin console"] -->|"Cache operations"| cache
-    admin -->|"User and token administration"| authdb["SQLite auth database"]
+    admin -->|"User and token administration"| authdb["SQLite or PostgreSQL auth store"]
     auth --> authdb
-    cache -->|"Periodic and shutdown snapshots"| snapshots["Snapshot files"]
+    cache -->|"Periodic and shutdown snapshots"| snapshots["Filesystem or S3 snapshot storage"]
     snapshots -->|"Startup restore"| cache
     cache --> metrics["Prometheus metrics endpoint"]
     health["Lifecycle and component health"] --> metrics
@@ -53,9 +53,9 @@ flowchart TD
     click auth "./crates/nebula-server/src/server.rs#L188"
     click handler "./crates/nebula-server/src/handler.rs#L35"
     click cache "./crates/nebula-core/src/store.rs#L63"
-    click admin "./crates/nebula-server/src/admin_console.rs#L293"
-    click authdb "./crates/nebula-server/src/application.rs#L148"
-    click snapshots "./crates/nebula-server/src/persistence.rs#L170"
+    click admin "./crates/nebula-server/src/application.rs#L311"
+    click authdb "./crates/nebula-server/src/application.rs#L168"
+    click snapshots "./crates/nebula-server/src/application.rs#L54"
     click metrics "./crates/nebula-server/src/metrics.rs#L596"
     click health "./crates/nebula-server/src/metrics.rs#L614"
 ```
@@ -64,11 +64,11 @@ flowchart TD
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `nebula-protocol` | Protocol v1 request/response types, TCP framing, and frame limits.                                                                                                                |
 | `nebula-core`     | Concurrent key/value storage, TTL tracking, memory accounting, LRU/LFU/FIFO eviction, and snapshot interfaces.                                                                    |
-| `nebula-auth`     | SQLite-backed users, roles, bootstrap credential, API-token hashing/verification, expiry, and revocation.                                                                         |
+| `nebula-auth`     | SQLite- or PostgreSQL-backed users, roles, bootstrap credential, API-token hashing/verification, expiry, and revocation.                                                            |
 | `nebula-health`   | Application lifecycle and component health state.                                                                                                                                 |
 | `nebula-watchdog` | Background-worker heartbeat monitoring.                                                                                                                                           |
 | `nebula-server`   | TCP/TLS listener, optional authentication, HTTP admin console, Prometheus exporter, persistence, and graceful lifecycle management. The package exposes the `nebulad` executable. |
-| `nebula-client`   | Rust command-line client for cache operations and local auth database management.                                                                                                 |
+| `nebula-client`   | Rust command-line client for cache operations and HTTPS admin API user/token management.                                                                                           |
 
 Each cache key and value is opaque bytes at the protocol level. TTL is an unsigned integer number of seconds: `0` means no expiration. Entries expire on reads and are also removed by the periodic cleanup worker. Keys are limited to 1,024 bytes and values to 8 MiB. By default, total key-plus-value memory is capped at 64 MiB; LRU eviction is used when needed. Cache capacity and connection counts can be configured.
 
@@ -122,7 +122,7 @@ The server rejects unknown TOML fields and invalid combinations at startup. Stri
 
 ## Configuration reference
 
-All settings and defaults are shown below. Omitted values use these defaults.
+Every configuration field and its default is listed below. Optional TLS paths, the PostgreSQL URL, and optional S3 bucket/region/endpoint/credential values default to unset and are omitted as TOML assignments. All relative paths are resolved from the server process working directory.
 
 ```toml
 listen_addr = "0.0.0.0:7001"
@@ -130,7 +130,7 @@ shutdown_timeout_secs = 30
 ttl_cleanup_interval_secs = 3600
 log_level = "info"
 
-[admin_console]
+[admin]
 enabled = false
 listen_addr = "127.0.0.1:7002"
 metrics_dashboard = true
@@ -142,11 +142,14 @@ enabled = false
 authentication = false
 
 [security.auth]
+backend = "sqlite"
 database_path = "nebulad.db"
 
 [persistence]
 mode = "volatile"
+snapshot_backend = "filesystem"
 snapshot_dir = "snapshots"
+snapshot_s3_prefix = ""
 snapshot_interval_secs = 60
 snapshot_retention = 3
 
@@ -160,19 +163,61 @@ max_connections = 1024
 eviction_policy = "lru"
 ```
 
-The optional admin password and TLS certificate/key paths are unset by default and are intentionally omitted above; set them when enabling password login or TLS. Supported persistence modes are `volatile` and `snapshot`; supported eviction policies are `lru`, `lfu`, and `fifo`.
+### Top-level settings
 
-- `listen_addr`: binary TCP address.
-- `shutdown_timeout_secs`: maximum time to wait for workers to stop cleanly.
-- `ttl_cleanup_interval_secs`: interval for background cleanup of expired entries; must be positive.
-- `log_level`: tracing filter used if `RUST_LOG` is not set.
-- `[tls]`: server certificate and private key for the TCP listener. Both paths are required when enabled.
-- `[security]`: turns on token authentication. Authentication requires TLS.
-- `[security.auth]`: SQLite database path used for users and tokens. Defaults to `nebulad.db` relative to the process working directory.
-- `[admin_console]`: enables the HTTP console. If token authentication is off, a non-empty password is required. With token authentication on, users sign in using API tokens instead. The admin listener shares the configured server TLS certificate when TLS is enabled.
-- `[persistence]`: optional periodic snapshots and startup recovery. Snapshot mode requires a non-empty directory, positive interval, and positive retention.
-- `[metrics]`: enables the plaintext HTTP Prometheus endpoint.
-- `[resource_limits]`: byte limit for cache keys and values, maximum concurrent TCP connections, and eviction policy. The protocol frame limits are fixed at 1 KiB keys and 8 MiB values.
+- `listen_addr`: TCP bind address for the binary cache protocol. Defaults to all interfaces on port `7001`.
+- `shutdown_timeout_secs`: maximum number of seconds to wait for services and workers to stop cleanly. Defaults to `30`.
+- `ttl_cleanup_interval_secs`: interval in seconds between background expired-entry cleanup passes. Must be greater than zero; defaults to `3600`. Expired entries are also removed when accessed.
+- `log_level`: tracing filter used unless `RUST_LOG` is set. Defaults to `info`; accepts the tracing-subscriber `EnvFilter` syntax.
+
+### `[admin]`
+
+- `enabled`: starts the HTTP administration console. Defaults to `false`. Enabling it requires `security.authentication = true`; the console has no password-login mode.
+- `listen_addr`: HTTP(S) bind address for the console. Defaults to `127.0.0.1:7002`.
+- `metrics_dashboard`: enables the metrics and health dashboard within the console. Defaults to `true`; this does not control the standalone metrics endpoint.
+
+### `[tls]`
+
+- `enabled`: enables TLS on the binary TCP listener and, if enabled, the admin console listener. Defaults to `false`.
+- `certificate`: optional path to a PEM server-certificate chain. Required when TLS is enabled.
+- `private_key`: optional path to a PEM private key. Required when TLS is enabled.
+
+The server does not request client certificates. Metrics HTTP remains plaintext even when TLS is enabled.
+
+### `[security]` and `[security.auth]`
+
+- `authentication`: requires a valid API-token `AUTH` request on each TCP connection before cache operations. Defaults to `false`; it requires `tls.enabled = true`.
+- `backend`: authentication database backend, either `sqlite` (default) or `postgres`. The value `postgresql` is also accepted as an alias for `postgres`.
+- `database_path`: SQLite database file path, default `nebulad.db` relative to the working directory. Used only with the SQLite backend; must not be empty when authentication is enabled.
+- `database_url`: PostgreSQL connection string; unset by default and required when the PostgreSQL backend is selected and authentication is enabled. Keep credentials out of checked-in config files; environment-variable substitution can supply them.
+
+### `[persistence]`
+
+- `mode`: `volatile` (default) keeps data only in memory; `snapshot` restores and periodically saves recovery snapshots.
+- `snapshot_backend`: snapshot storage backend, `filesystem` (default) or `s3`.
+- `snapshot_dir`: filesystem snapshot directory, default `snapshots`. Must be non-empty for snapshot mode with the filesystem backend.
+- `snapshot_s3_bucket`: S3 bucket name; unset by default and required for snapshot mode with the S3 backend.
+- `snapshot_s3_region`: optional S3 region. If omitted, the S3 client uses its normal environment/configuration defaults.
+- `snapshot_s3_endpoint`: optional S3-compatible service endpoint. An `http://` endpoint explicitly allows plaintext HTTP; use HTTPS except for trusted local development.
+- `snapshot_s3_access_key_id` and `snapshot_s3_secret_access_key`: optional explicit S3 credentials. They must be configured together. If omitted, the S3 client can use its default credential provider chain/environment.
+- `snapshot_s3_prefix`: object-key prefix for S3 snapshots; defaults to an empty string. Leading and trailing slashes are removed.
+- `snapshot_interval_secs`: interval between snapshots; defaults to `60` and must be positive in snapshot mode.
+- `snapshot_retention`: number of recent snapshots to keep; defaults to `3` and must be positive in snapshot mode.
+
+Snapshot settings are validated at startup; backend storage must be configured when snapshot mode is selected. Snapshot recovery is not a write-ahead log or continuous durability mechanism.
+
+### `[metrics]`
+
+- `enabled`: starts the standalone Prometheus HTTP endpoint. Defaults to `true`.
+- `listen_addr`: metrics HTTP bind address. Defaults to `127.0.0.1:7003`. The endpoint has no built-in authentication or TLS.
+
+### `[resource_limits]`
+
+- `max_cache_size_bytes`: maximum combined key-and-value memory used by the cache; defaults to `67108864` (64 MiB).
+- `max_connections`: maximum concurrent TCP connections; defaults to `1024` and cannot exceed the runtime's supported semaphore limit.
+- `eviction_policy`: eviction strategy when the cache needs space; one of `lru` (default), `lfu`, or `fifo`.
+
+The protocol frame limits are fixed at 1 KiB per key and 8 MiB per value. Unknown TOML fields are rejected. String values throughout the config may use `${NAME}` or `${NAME:-default}` environment substitutions; unset variables without a default fail config loading, and substituted boolean/numeric fields are parsed as their target types.
 
 ## TLS and client authentication
 
@@ -202,50 +247,51 @@ authentication = true
 database_path = "./data/nebulad.db"
 ```
 
-When authentication is enabled, every TCP connection must send an `AUTH` request with an API token before any cache command. `readonly` users may GET; `readwrite` users may GET, SET, and DELETE; `admin` users have read/write access and can administer accounts in the console/local auth CLI. PING is permitted after authentication. Tokens are generated randomly, stored as hashes, and may be expired or revoked. The SDKs expose a token option and require TLS with certificate verification when a token is configured. See the SDK readmes for per-language configuration.
+When authentication is enabled, every TCP connection must send an `AUTH` request with an API token before any cache command. `readonly` users may GET; `readwrite` users may GET, SET, and DELETE; `admin` users have read/write access and can administer accounts through the HTTPS admin API. PING is permitted after authentication. Tokens are generated randomly, stored as hashes, and may be expired or revoked. The SDKs expose a token option and require TLS with certificate verification when a token is configured. See the SDK readmes for per-language configuration.
 
-On the first authenticated startup, the server creates and prints a **one-time administrator bootstrap credential** to stderr. Use the same auth database file from the local CLI to create the initial admin and one-time API token:
+On the first authenticated startup, the server creates and prints a **one-time administrator bootstrap credential** to stderr. Use the CLI against the HTTPS admin API to create the initial admin user and one-time API token:
 
 ```bash
 NEBULA_BOOTSTRAP_TOKEN='credential-printed-by-server' \
-  cargo run -p nebula-client -- --auth-db ./data/nebulad.db bootstrap-admin administrator
+  cargo run -p nebula-client -- --admin-address https://127.0.0.1:7002 --tls-ca ./server-ca.pem bootstrap-admin administrator
 ```
 
-The command prints an API token once. Store it securely. The auth-management commands operate directly on the SQLite database file, rather than through the TCP connection. Continue to use that database path for later administration, and provide the admin token in `NEBULA_TOKEN`:
+The command prints an API token once. Store it securely. For later administration, provide the admin token through `NEBULA_TOKEN`; user/token commands also use the HTTPS admin API:
 
 ```bash
-NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --auth-db ./data/nebulad.db user create app-reader --role readonly
-NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --auth-db ./data/nebulad.db token create app-reader --expires-in 30d
+NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --admin-address https://127.0.0.1:7002 --tls-ca ./server-ca.pem user create app-reader --role readonly
+NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --admin-address https://127.0.0.1:7002 --tls-ca ./server-ca.pem token create app-reader --expires-in 30d
 ```
 
-Supported local commands include user create/list/show/set-role/disable/enable/delete and token create/list/revoke. Roles are `readonly`, `readwrite`, and `admin`; token expiry accepts a duration such as `30d`, `12h`, `60m`, or `300s`. For authenticated cache requests, configure `NEBULA_TOKEN` and use `--tls-ca` or `NEBULA_TLS_CA` with `nebula-client`.
+The CLI supports user create/list/show/set-role/disable/enable/delete and token create/list/revoke. Roles are `readonly`, `readwrite`, and `admin`; token expiry accepts a duration such as `30d`, `12h`, `60m`, or `300s`. Set `NEBULA_ADMIN_ADDR` instead of repeating `--admin-address`, and configure `NEBULA_TOKEN` plus `--tls-ca` or `NEBULA_TLS_CA` for authenticated admin requests. For authenticated cache requests, `NEBULA_TOKEN` and the TLS CA option are also used with the TCP client.
 
 ## Admin console
 
-The web console is disabled by default and listens on `127.0.0.1:7002` when enabled. To use the password login with TLS off the TCP listener may remain plaintext, but the admin console itself is also plaintext in that mode. A password-protected local development configuration looks like this:
+The web console is disabled by default and listens on `127.0.0.1:7002` when enabled. Enabling it requires token authentication and TLS; it has no password-login mode. A local configuration can use the same certificate and authentication backend as the TCP listener:
 
 ```toml
-[admin_console]
+[tls]
 enabled = true
-password = "${NEBULA_ADMIN_PASSWORD}"
+certificate = "./server-cert.pem"
+private_key = "./server-key.pem"
+
+[security]
+authentication = true
+
+[admin]
+enabled = true
 listen_addr = "127.0.0.1:7002"
 metrics_dashboard = true
 ```
 
-Start it with the password supplied through the environment:
-
-```bash
-NEBULA_ADMIN_PASSWORD='replace-with-a-secret' cargo run -p nebula-server -- ./nebulad.toml
-```
-
-Visit `http://127.0.0.1:7002`. When server token authentication is enabled, authenticate with an API token instead of the console password. Console capabilities include:
+After creating an administrator as described above, visit `https://127.0.0.1:7002` and sign in with its API token. The browser/client must trust the configured server certificate. Console capabilities include:
 
 - Browse cache entries with text search and pagination; the UI renders cache content as text, so use an SDK/CLI for arbitrary binary data.
 - Add/update entries with TTL, delete individual entries, and clear the cache.
 - View dashboard metrics and component health when `metrics_dashboard` is enabled.
-- When token authentication is enabled, create/list/delete users, change roles and enabled state, and create/list/revoke API tokens. These management operations require an admin role. Read-only and read-write roles can browse entries; only read-write/admin roles can alter cache entries.
+- Create/list/delete users, change roles and enabled state, and create/list/revoke API tokens. These management operations require an admin role. Read-only and read-write roles can browse entries; only read-write/admin roles can alter cache entries.
 
-Sessions expire after eight hours and use HTTP-only, SameSite cookies. Mutating console requests require the session's CSRF token. Keep the console on loopback or behind trusted access controls. Use TLS for the listener when it handles credentials across an untrusted network; the console has no independent TLS certificate settings and reuses the server TLS certificate.
+Sessions expire after eight hours and use HTTP-only, SameSite cookies. Mutating console requests require the session's CSRF token. Keep the console on loopback or behind trusted access controls. The console has no independent TLS certificate settings and reuses the server TLS certificate.
 
 ## Snapshots and recovery
 
@@ -253,7 +299,7 @@ Persistence defaults to `volatile`, so a process restart loses all cache entries
 
 1. Restores the newest valid snapshot during startup, ignoring expired entries.
 2. Writes snapshots on the configured interval (default 60 seconds).
-3. Keeps the configured number of snapshot files (default three).
+3. Retains the configured number of recent snapshots in the selected backend (default three).
 4. Writes a final snapshot during graceful shutdown.
 
 ```mermaid
@@ -274,7 +320,7 @@ flowchart TD
     click final "./crates/nebula-server/src/application.rs#L464"
 ```
 
-Snapshots are checksummed, synchronized to disk, and written to the configured snapshot directory. They are recovery points, not a write-ahead log or replication: changes since the last successful snapshot can be lost on a crash or forced termination. The configured cache byte limit still applies during restoration; entries that cannot fit are not all guaranteed to be restored. Snapshot writes/restores report component health and metrics.
+Snapshots are checksummed and written to the configured filesystem directory or S3-compatible bucket/prefix. They are recovery points, not a write-ahead log or replication: changes since the last successful snapshot can be lost on a crash or forced termination. The configured cache byte limit still applies during restoration; entries that cannot fit are not all guaranteed to be restored. Snapshot writes/restores report component health and metrics.
 
 ## Metrics and health
 
@@ -284,7 +330,7 @@ Metrics are enabled by default at `http://127.0.0.1:7003/metrics`. The HTTP list
 - Request totals, errors, and duration by operation (`ping`, `set`, `get`, `delete`).
 - Active and authenticated connections, auth success/failure, authorization denials, and token revocations.
 - Cache entry count and key/value memory accounting.
-- Snapshot and recovery counts, failures, durations, last successful snapshot time, and persistence filesystem information when applicable.
+- Snapshot and recovery counts, failures, durations, last successful snapshot time, and filesystem storage information when applicable.
 - Overall and component health.
 
 The optional admin dashboard presents current health, cache and connection state, request/error rates, latency, persistence status, recent failures, and a bounded history of samples. Disabling the dashboard does not disable the standalone exporter.
@@ -301,7 +347,7 @@ cargo run -p nebula-client -- get greeting
 cargo run -p nebula-client -- delete greeting
 ```
 
-TLS uses a CA PEM file, supplied with `--tls-ca` or `NEBULA_TLS_CA`. TCP requests accept text arguments in the CLI; use an SDK or the protocol implementation for binary keys/values. Auth database user/token-management commands are described in [TLS and client authentication](#tls-and-client-authentication).
+TLS uses a CA PEM file, supplied with `--tls-ca` or `NEBULA_TLS_CA`. TCP requests accept text arguments in the CLI; use an SDK or the protocol implementation for binary keys/values. User and token administration uses the HTTPS admin API and is described in [TLS and client authentication](#tls-and-client-authentication).
 
 ## SDKs
 

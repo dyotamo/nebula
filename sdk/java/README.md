@@ -4,7 +4,7 @@ A synchronous Java 17+ client for the NebulaCache v1 binary TCP protocol. The SD
 
 ## Before you start
 
-Start a server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. Token authentication is available only when the server has authentication and TLS enabled; the client must trust the server certificate.
+Start a server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token and TLS with certificate and hostname verification. For user and token management, enable the server's admin listener and use its HTTPS API or console.
 
 ## Build and install
 

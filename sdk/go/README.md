@@ -4,7 +4,7 @@ A dependency-free Go 1.22+ client for the NebulaCache v1 binary TCP protocol. Th
 
 ## Before you start
 
-Start a NebulaCache server using the repository-root setup and configuration instructions in [the main README](./../../README.md#run-the-server). The default client address is `127.0.0.1:7001`. If the server enables TLS authentication, the client needs a trusted certificate authority and an API token. The TCP protocol does not support user/password login.
+Start a NebulaCache server using the repository-root setup and configuration instructions in [the main README](./../../README.md#run-the-server). The default client address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token and TLS with certificate and hostname verification. For user and token management, enable the server's admin listener and use its HTTPS API or console.
 
 ## Install
 
@@ -135,7 +135,7 @@ go run ./examples --tls-ca /path/to/ca.pem
 NEBULA_TLS_CA=/path/to/ca.pem go run ./examples
 ```
 
-The example accepts `--address` and `--tls-ca`; the latter enables TLS and extends the system root set with the PEM CA certificate.
+The example accepts `--address` and `--tls-ca`; the latter enables TLS and extends the system root set with the PEM CA certificate. It does not accept a token option; use `Config.Token` with `NewWithConfig` for authenticated connections.
 
 ## Errors
 

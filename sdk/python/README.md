@@ -4,7 +4,7 @@ A synchronous, dependency-free Python 3.10+ client for the NebulaCache v1 binary
 
 ## Before you start
 
-Start the server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. If server token authentication is enabled, a client must use TLS with certificate and hostname verification and provide an API token.
+Start the server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token and TLS with certificate and hostname verification. For user and token management, enable the server's admin listener and use its HTTPS API or console.
 
 ## Install
 
