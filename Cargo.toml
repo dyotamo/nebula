@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/nebula-protocol", "crates/nebula-core", "crates/nebula-health", "crates/nebula-watchdog", "crates/nebula-auth", "crates/nebula-server", "crates/nebula-client"]
+members = ["crates/nebula-protocol", "crates/nebula-core", "crates/nebula-health", "crates/nebula-watchdog", "crates/nebula-auth", "crates/nebula-server", "crates/nebula-client", "sdk/rust"]
 
 [workspace.package]
 edition = "2021"

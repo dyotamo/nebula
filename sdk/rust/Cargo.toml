@@ -1,0 +1,12 @@
+[package]
+name = "nebulacache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nebula-protocol = { path = "../../crates/nebula-protocol" }
+rustls-pemfile = "2"
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

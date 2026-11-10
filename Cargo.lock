@@ -1235,6 +1235,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nebulacache"
+version = "0.1.0"
+dependencies = [
+ "nebula-protocol",
+ "rustls-pemfile",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
