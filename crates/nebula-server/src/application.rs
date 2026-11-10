@@ -1,3 +1,9 @@
+//! Owns the server's cache, lifecycle, health state, and long-running services.
+//!
+//! Startup validates cross-component requirements, restores persisted cache data, binds all
+//! enabled listeners, and waits for them to report startup before marking the application ready.
+//! Shutdown withdraws readiness, drains services, then writes the final snapshot if configured.
+
 use std::{error::Error, fs::File, io, io::BufReader, sync::Arc, time::Duration};
 
 use nebula_auth::AuthStore;
@@ -24,6 +30,10 @@ use crate::{
     server, systemd, ttl_cleanup,
 };
 
+/// Coordinates the cache server's startup, runtime services, and shutdown.
+///
+/// Use [`Application::new`] to construct the runtime, then [`Application::run`] for the normal
+/// signal-driven lifecycle or [`Application::start`] and [`Application::shutdown`] for embedding.
 pub struct Application {
     config: Config,
     store: std::sync::Arc<CacheStore>,
@@ -37,6 +47,7 @@ pub struct Application {
 }
 
 impl Application {
+    /// Creates an application with its cache limits and optional persistence manager configured.
     pub fn new(config: Config) -> Self {
         let lifecycle = Lifecycle::new();
         let health = HealthManager::new(lifecycle.clone(), config.admin.enabled);
@@ -74,14 +85,17 @@ impl Application {
         }
     }
 
+    /// Returns the current lifecycle state.
     pub fn state(&self) -> ApplicationState {
         self.lifecycle.state()
     }
 
+    /// Returns a cloneable handle for reading and reporting component health.
     pub fn health(&self) -> HealthManager {
         self.health.clone()
     }
 
+    /// Starts the application, waits for an OS shutdown signal, and performs graceful shutdown.
     pub async fn run(mut self) -> Result<(), Box<dyn Error>> {
         let mut signals = ShutdownSignals::new()?;
         self.start().await?;
@@ -98,6 +112,10 @@ impl Application {
         self.shutdown().await
     }
 
+    /// Validates configuration and starts services, transitioning to `Ready` after all listeners start.
+    ///
+    /// Startup is one-shot. On failure, the application transitions to `Failed` and started
+    /// services are stopped before the error is returned.
     pub async fn start(&mut self) -> Result<(), Box<dyn Error>> {
         if self.lifecycle.state() != ApplicationState::Initializing {
             return Err(io::Error::new(
@@ -222,6 +240,8 @@ impl Application {
             }
         }
 
+        // Bind every enabled endpoint before launching tasks so an address conflict cannot leave
+        // a partially running application behind.
         let listener = match TcpListener::bind(self.config.listen_addr).await {
             Ok(listener) => listener,
             Err(err) => return Err(self.fail_startup("bind TCP listener", err).await),
@@ -398,6 +418,8 @@ impl Application {
             None
         };
 
+        // A listener can signal startup and then fail immediately; wait for all signals and check
+        // the task set again below before exposing Ready.
         if let Err(err) = self
             .wait_for_start(tcp_started_rx, admin_started, metrics_started)
             .await
@@ -462,6 +484,10 @@ impl Application {
         Ok(())
     }
 
+    /// Stops accepting work, drains runtime services, and writes a final snapshot when enabled.
+    ///
+    /// Repeated calls after shutdown has begun are harmless. An in-progress shutdown failure
+    /// transitions the application to `Failed`.
     pub async fn shutdown(&mut self) -> Result<(), Box<dyn Error>> {
         match self.lifecycle.state() {
             ApplicationState::Stopped | ApplicationState::Stopping => return Ok(()),
@@ -486,6 +512,8 @@ impl Application {
             }
         }
 
+        // Workers observe Stopping and exit before the final snapshot, avoiding overlap with the
+        // periodic snapshot task and ensuring the last write represents the shutdown state.
         if let Some(err) = self.stop_services().await {
             let _ = self.lifecycle.transition(ApplicationState::Failed);
             error!(error = %err, "application shutdown failed");

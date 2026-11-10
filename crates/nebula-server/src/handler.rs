@@ -1,3 +1,8 @@
+//! Implements the protocol-level behavior for cache requests, independent of socket handling.
+//!
+//! The server delegates each decoded request here so request validation, store operations, and
+//! response status mapping stay in one place.
+
 use std::{sync::Arc, time::Instant};
 
 use nebula_protocol::{Opcode, Request, Response};
@@ -7,10 +12,12 @@ use nebula_core::CacheStore;
 
 use crate::metrics::Metrics;
 
+/// Applies a request to the cache without recording request metrics.
 pub async fn handle(request: Request, store: Arc<CacheStore>) -> Response {
     handle_observed(request, store, None).await
 }
 
+/// Applies a request and records its operation, outcome, and elapsed time.
 pub async fn handle_with_metrics(
     request: Request,
     store: Arc<CacheStore>,
@@ -71,6 +78,7 @@ async fn handle_observed(
     response
 }
 
+/// Emits a debug-level connection event for the remote peer.
 pub fn log_connection(peer: std::net::SocketAddr) {
     debug!(%peer, "client connected");
 }

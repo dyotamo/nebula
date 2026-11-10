@@ -20,7 +20,9 @@ import (
 )
 
 const (
+	// DefaultAddress is the local binary-protocol endpoint.
 	DefaultAddress  = "127.0.0.1:7001"
+	// DefaultTimeout is the default connect, request, and acquisition timeout.
 	DefaultTimeout  = 5 * time.Second
 	maxKeyLength    = 1024
 	maxValueLength  = 8 * 1024 * 1024
@@ -31,20 +33,35 @@ const (
 
 var protocolMagic = [4]byte{'N', 'E', 'B', 'U'}
 
+// Config controls the connection pool, deadlines, and optional TLS authentication.
+// Start with DefaultConfig; the zero value is not valid.
 type Config struct {
+	// Address is host:port, with brackets required around IPv6 hosts.
 	Address        string
+	// MinPoolSize is the pool size targeted lazily during acquisition.
 	MinPoolSize    int
+	// MaxPoolSize bounds established connections and in-progress dials together.
 	MaxPoolSize    int
+	// ConnectTimeout bounds each dial, including the TLS handshake when enabled.
 	ConnectTimeout time.Duration
+	// RequestTimeout bounds a request's writes and reads, and each AUTH exchange.
 	RequestTimeout time.Duration
+	// AcquireTimeout bounds pool acquisition, including waiting and dialing.
+	// AUTH uses its own RequestTimeout and is not canceled by this deadline.
 	AcquireTimeout time.Duration
+	// IdleTimeout retires unused connections when the pool is next acquired.
 	IdleTimeout    time.Duration
+	// MaxLifetime retires aged connections during acquisition or release, not mid-request.
 	MaxLifetime    time.Duration
+	// MaxRetries limits additional GET attempts after transient transport failures.
 	MaxRetries     int
+	// TLSConfig enables TLS when non-nil and is cloned for each dial.
 	TLSConfig      *tls.Config
+	// Token enables per-connection AUTH when non-empty and requires verified TLS.
 	Token          string
 }
 
+// DefaultConfig returns a valid configuration with a lazy pool of at most ten connections.
 func DefaultConfig() Config {
 	return Config{
 		Address:        DefaultAddress,
@@ -64,6 +81,10 @@ type pooledConnection struct {
 	idleSince time.Time
 }
 
+// NebulaCache is a concurrency-safe client for the version 1 binary TCP protocol.
+// Connections are opened lazily and carry at most one in-flight request each.
+// Keys must be non-empty UTF-8 of at most 1024 bytes; values are limited to 8 MiB.
+// Construct clients with New, NewWithTimeout, or NewWithConfig, then call Close.
 type NebulaCache struct {
 	address     string
 	endpoint    string
@@ -85,6 +106,8 @@ type response struct {
 	value  []byte
 }
 
+// New creates a client with defaults and an optional host:port address.
+// It does not connect to the server until the first operation.
 func New(address ...string) (*NebulaCache, error) {
 	if len(address) > 1 {
 		return nil, fmt.Errorf("New accepts at most one address")
@@ -98,6 +121,7 @@ func New(address ...string) (*NebulaCache, error) {
 	return NewWithTimeout(target, DefaultTimeout)
 }
 
+// NewWithTimeout sets the connect and request timeouts; acquisition keeps its default.
 func NewWithTimeout(address string, timeout time.Duration) (*NebulaCache, error) {
 	if timeout <= 0 {
 		return nil, fmt.Errorf("timeout must be greater than zero")
@@ -110,6 +134,7 @@ func NewWithTimeout(address string, timeout time.Duration) (*NebulaCache, error)
 	return NewWithConfig(config)
 }
 
+// NewWithConfig validates config and creates a client without opening connections.
 func NewWithConfig(config Config) (*NebulaCache, error) {
 	if config.MinPoolSize < 0 || config.MaxPoolSize <= 0 || config.MinPoolSize > config.MaxPoolSize {
 		return nil, fmt.Errorf("pool sizes must satisfy 0 <= minPoolSize <= maxPoolSize and maxPoolSize > 0")
@@ -144,6 +169,8 @@ func NewWithConfig(config Config) (*NebulaCache, error) {
 	}, nil
 }
 
+// Close permanently closes the client, interrupts active connections, and wakes waiters.
+// Repeated calls are safe and return nil.
 func (c *NebulaCache) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -161,6 +188,7 @@ func (c *NebulaCache) Close() error {
 	return nil
 }
 
+// notify broadcasts a pool state change; the caller must hold c.mu.
 func (c *NebulaCache) notify() {
 	close(c.changed)
 	c.changed = make(chan struct{})
@@ -220,6 +248,7 @@ func (c *NebulaCache) acquire() (*pooledConnection, error) {
 	}
 }
 
+// fill consumes dial slots reserved under c.mu so concurrent acquisitions cannot exceed capacity.
 func (c *NebulaCache) fill(ctx context.Context, count int) error {
 	for remaining := count; remaining > 0; remaining-- {
 		dialer := net.Dialer{Timeout: c.config.ConnectTimeout}
@@ -275,6 +304,7 @@ func (c *NebulaCache) release(connection *pooledConnection, healthy bool) {
 	c.notify()
 }
 
+// Ping checks that the server returns a successful PONG response.
 func (c *NebulaCache) Ping() error {
 	result, err := c.request(4, nil, nil, 0)
 	if err != nil {
@@ -292,10 +322,13 @@ func (c *NebulaCache) Ping() error {
 	return nil
 }
 
+// Set stores raw bytes without expiration. It is not automatically retried.
 func (c *NebulaCache) Set(key string, value []byte) error {
 	return c.SetWithTTL(key, value, 0)
 }
 
+// SetWithTTL stores raw bytes with a TTL in seconds; zero disables expiration.
+// Writes are not retried because a transport failure may occur after the server applies them.
 func (c *NebulaCache) SetWithTTL(key string, value []byte, ttlSecs uint64) error {
 	encodedKey, err := encodeKey(key)
 	if err != nil {
@@ -318,10 +351,12 @@ func (c *NebulaCache) SetWithTTL(key string, value []byte, ttlSecs uint64) error
 	return nil
 }
 
+// SetString stores a valid UTF-8 string without expiration.
 func (c *NebulaCache) SetString(key, value string) error {
 	return c.SetStringWithTTL(key, value, 0)
 }
 
+// SetStringWithTTL stores a valid UTF-8 string with a TTL in seconds; zero disables expiration.
 func (c *NebulaCache) SetStringWithTTL(key, value string, ttlSecs uint64) error {
 	if !utf8.ValidString(value) {
 		return fmt.Errorf("value must be valid UTF-8")
@@ -330,6 +365,8 @@ func (c *NebulaCache) SetStringWithTTL(key, value string, ttlSecs uint64) error 
 	return c.SetWithTTL(key, []byte(value), ttlSecs)
 }
 
+// Get returns raw bytes and whether the key exists; a miss returns (nil, false, nil).
+// Only transient transport failures are eligible for bounded, jittered retries.
 func (c *NebulaCache) Get(key string) ([]byte, bool, error) {
 	encodedKey, err := encodeKey(key)
 	if err != nil {
@@ -352,6 +389,8 @@ func (c *NebulaCache) Get(key string) ([]byte, bool, error) {
 	return result.value, true, nil
 }
 
+// Delete returns whether a key was removed; a missing key returns (false, nil).
+// Deletions are not automatically retried.
 func (c *NebulaCache) Delete(key string) (bool, error) {
 	encodedKey, err := encodeKey(key)
 	if err != nil {
@@ -374,6 +413,8 @@ func (c *NebulaCache) Delete(key string) (bool, error) {
 	return true, nil
 }
 
+// request retries only GET, using a shared ten-token budget refilled at one token per second.
+// Jittered exponential backoff is canceled by Close; server and protocol errors are not retried.
 func (c *NebulaCache) request(opcode byte, key, value []byte, ttlSecs uint64) (response, error) {
 	for attempt := 0; ; attempt++ {
 		result, err := c.requestOnce(opcode, key, value, ttlSecs)
@@ -435,6 +476,8 @@ func transientTransportError(err error) bool {
 	return false
 }
 
+// requestOnce reuses a connection only after a complete, validated response.
+// Server error statuses still leave framing intact and allow reuse.
 func (c *NebulaCache) requestOnce(opcode byte, key, value []byte, ttlSecs uint64) (response, error) {
 	connection, err := c.acquire()
 	if err != nil {
@@ -502,6 +545,8 @@ func authenticateConnection(connection net.Conn, token string, timeout time.Dura
 	return connection.SetDeadline(time.Time{})
 }
 
+// readResponse reads big-endian version 1 framing and validates lengths before allocating.
+// Truncated frames remain transport errors, allowing GET to retry them.
 func readResponse(reader io.Reader) (response, error) {
 	var header [responseHeader]byte
 	if _, err := io.ReadFull(reader, header[:]); err != nil {

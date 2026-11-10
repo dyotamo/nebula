@@ -1,3 +1,8 @@
+//! TCP client for the NebulaCache binary protocol.
+//!
+//! Each operation opens a fresh connection. When a token is configured, that connection is
+//! authenticated before the requested cache operation is sent.
+
 use std::{
     fs::File,
     io::{self, BufReader},
@@ -16,6 +21,7 @@ use tokio_rustls::{
     TlsConnector,
 };
 
+/// Errors returned by cache operations, including transport, protocol, or server failures.
 #[derive(Debug, Error)]
 pub(super) enum ClientError {
     #[error("connection failed: {0}")]
@@ -26,6 +32,7 @@ pub(super) enum ClientError {
     Server { status: Status, message: String },
 }
 
+/// Cache-protocol client configuration shared across individual TCP operations.
 pub(super) struct Client {
     address: String,
     server_name: String,
@@ -34,6 +41,7 @@ pub(super) struct Client {
 }
 
 impl Client {
+    /// Creates a client; token authentication is accepted only when a trusted TLS CA is supplied.
     pub(super) fn new(
         address: impl Into<String>,
         tls_ca: Option<impl AsRef<Path>>,
@@ -62,11 +70,13 @@ impl Client {
         })
     }
 
+    /// Checks that the server responds successfully to a protocol ping.
     pub(super) async fn ping(&self) -> Result<(), ClientError> {
         let response = self.send(Request::ping()).await?;
         self.ensure_ok(response.status, response.value)
     }
 
+    /// Stores bytes under `key`; zero TTL means no expiration.
     pub(super) async fn set(
         &self,
         key: impl AsRef<[u8]>,
@@ -84,6 +94,7 @@ impl Client {
         self.ensure_ok(response.status, response.value)
     }
 
+    /// Returns a stored value, or `None` when the key is absent or expired.
     pub(super) async fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, ClientError> {
         let response = self
             .send(Request {
@@ -100,6 +111,7 @@ impl Client {
         }
     }
 
+    /// Deletes a key and returns `true` only when an entry was removed.
     pub(super) async fn delete(&self, key: impl AsRef<[u8]>) -> Result<bool, ClientError> {
         let response = self
             .send(Request {
@@ -128,6 +140,8 @@ impl Client {
         }
     }
 
+    // Keep authentication and the requested operation on the same connection because the server
+    // binds the authenticated identity to that connection's lifetime.
     async fn send_on<S>(
         mut stream: S,
         request: &Request,

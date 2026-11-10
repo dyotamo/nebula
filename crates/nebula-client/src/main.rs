@@ -1,3 +1,8 @@
+//! Command-line interface for cache operations and administrator management.
+//!
+//! Cache commands use the binary TCP protocol, while user and token commands use the HTTPS admin
+//! API. Global connection options can also be supplied through the corresponding `NEBULA_*` env vars.
+
 use std::{
     error::Error,
     io,
@@ -125,6 +130,7 @@ async fn main() {
     }
 }
 
+/// Parses options and dispatches cache, user-management, and token-management commands.
 async fn run() -> Result<(), Box<dyn Error>> {
     let Cli {
         address,
@@ -266,6 +272,7 @@ fn print_user(user: &admin::User) {
     );
 }
 
+/// Converts a relative `s`, `m`, `h`, or `d` duration into an absolute Unix timestamp.
 fn expiration_time(value: &str) -> Result<i64, Box<dyn Error>> {
     let (amount, unit) = value.split_at(
         value

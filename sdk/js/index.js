@@ -17,6 +17,22 @@ const STATUS_NAMES = new Map([
   [5, 'FORBIDDEN'],
 ]);
 
+/**
+ * Connection pool and transport settings. All durations are positive milliseconds.
+ * @typedef {Object} NebulaCacheOptions
+ * @property {number} [minPoolSize=0] Pool size targeted after the first acquisition.
+ * @property {number} [maxPoolSize=10] Maximum connections, including pending connects.
+ * @property {number} [connectTimeout=5000] TCP/TLS connection deadline.
+ * @property {number} [requestTimeout=5000] Deadline for each request or AUTH exchange.
+ * @property {number} [acquireTimeout=5000] Maximum time waiting for a usable connection.
+ * @property {number} [idleTimeout=60000] Idle duration before a connection is retired.
+ * @property {number} [maxLifetime=300000] Connection age limit; busy connections retire on release.
+ * @property {number} [maxRetries=2] Additional GET attempts for transient transport failures.
+ * @property {import('node:tls').ConnectionOptions} [tls] Enables TLS when provided.
+ * @property {string} [token] Non-empty UTF-8 token of at most 1024 bytes; requires verified TLS.
+ */
+
+/** Base class for SDK transport, protocol, and server-response errors. */
 class NebulaCacheError extends Error {
   constructor(message) {
     super(message);
@@ -24,17 +40,34 @@ class NebulaCacheError extends Error {
   }
 }
 
+/** Transport, connection acquisition, or client-closure failure. */
 class CacheConnectionError extends NebulaCacheError {}
+/** Malformed framing, unknown status, or an unexpected successful PING payload. */
 class CacheProtocolError extends NebulaCacheError {}
 
+/** Server error or unexpected authentication result, with numeric `status`. */
 class CacheResponseError extends NebulaCacheError {
+  /**
+   * @param {number} status Numeric protocol status.
+   * @param {string} message Decoded server error or authentication failure description.
+   */
   constructor(status, message) {
     super(`NebulaCache returned status ${status}: ${message}`);
     this.status = status;
   }
 }
 
+/**
+ * Asynchronous version 1 binary TCP client with one in-flight request per connection.
+ * Public operations reject with SDK errors; invalid inputs use TypeError or RangeError.
+ * Constructing a client does not open sockets. Call close() when finished.
+ */
 class NebulaCache {
+  /**
+   * @param {string} [address="127.0.0.1:7001"] Host:port, with brackets around IPv6 hosts.
+   * @param {number|NebulaCacheOptions} [timeout=5000] Connect/request timeout in
+   * milliseconds, or pool options. A numeric timeout leaves acquireTimeout at its default.
+   */
   constructor(address = '127.0.0.1:7001', timeout = 5000) {
     const parsedAddress = parseAddress(address);
     this.options = parseOptions(timeout);
@@ -51,6 +84,10 @@ class NebulaCache {
     this._retryUpdatedAt = Date.now();
   }
 
+  /**
+   * Checks for a successful PONG response; does not retry.
+   * @returns {Promise<boolean>} True when the response is valid.
+   */
   async ping() {
     const { status, value } = await this._request(4);
     ensureOk(status, value);
@@ -61,6 +98,14 @@ class NebulaCache {
     return true;
   }
 
+  /**
+   * Stores a value without retrying writes whose server-side outcome may be unknown.
+   * @param {string} key Non-empty key, at most 1024 UTF-8 bytes.
+   * @param {string|Uint8Array} value UTF-8 text or raw bytes, at most 8 MiB.
+   * @param {number|bigint} [ttlSecs=0] Unsigned 64-bit TTL in seconds; zero disables
+   * expiration. Numbers must be safe integers; use bigint for larger TTLs.
+   * @returns {Promise<void>} Resolves after the server acknowledges the write.
+   */
   async set(key, value, ttlSecs = 0) {
     const encodedKey = encodeKey(key);
     const encodedValue = encodeValue(value);
@@ -73,6 +118,11 @@ class NebulaCache {
     ensureOk(status, responseValue);
   }
 
+  /**
+   * Fetches raw bytes, retrying only transient transport failures within the retry budget.
+   * @param {string} key Non-empty key, at most 1024 UTF-8 bytes.
+   * @returns {Promise<Buffer|null>} The value, or null for NOT_FOUND.
+   */
   async get(key) {
     const encodedKey = encodeKey(key);
     const { status, value } = await this._request(2, encodedKey);
@@ -84,6 +134,11 @@ class NebulaCache {
     return value;
   }
 
+  /**
+   * Removes a key without automatically retrying the deletion.
+   * @param {string} key Non-empty key, at most 1024 UTF-8 bytes.
+   * @returns {Promise<boolean>} True if removed, false for NOT_FOUND.
+   */
   async delete(key) {
     const encodedKey = encodeKey(key);
     const { status, value } = await this._request(3, encodedKey);
@@ -95,6 +150,10 @@ class NebulaCache {
     return true;
   }
 
+  /**
+   * Permanently closes the client, rejects pending work, and destroys pooled sockets.
+   * @returns {Promise<void>} Resolves when sockets close; repeated calls share this promise.
+   */
   close() {
     if (this._closePromise) {
       return this._closePromise;
@@ -133,6 +192,7 @@ class NebulaCache {
     });
   }
 
+  /** @private Assigns idle connections to FIFO waiters and counts connects against pool capacity. */
   _drain() {
     if (this._closed) {
       return;
@@ -224,6 +284,7 @@ class NebulaCache {
     }
   }
 
+  /** @private Returns a framed connection to the pool; idle sockets/timers do not keep Node alive. */
   _release(entry) {
     if (entry.state === 'closed') {
       return;
@@ -275,6 +336,7 @@ class NebulaCache {
     }
   }
 
+  /** @private Consumes the shared ten-token retry budget, refilled at one token per second. */
   _takeRetryToken() {
     const now = Date.now();
     this._retryTokens = Math.min(this._retryCapacity, this._retryTokens + (now - this._retryUpdatedAt) / 1000);
@@ -286,6 +348,7 @@ class NebulaCache {
     return true;
   }
 
+  /** @private Full-jitter exponential backoff, capped at one second and canceled by close(). */
   _retryDelay(attempt) {
     return new Promise((resolve, reject) => {
       const cancel = (error) => {
@@ -301,6 +364,7 @@ class NebulaCache {
     });
   }
 
+  /** @private Encodes big-endian framing once; only GET transport failures may be replayed. */
   async _request(opcode, key = Buffer.alloc(0), value = Buffer.alloc(0), ttlSecs = 0n) {
     const header = Buffer.alloc(REQUEST_HEADER_LENGTH);
     MAGIC.copy(header, 0);
@@ -323,6 +387,11 @@ class NebulaCache {
     }
   }
 
+  /**
+   * @private
+   * Reassembles fragmented header/body chunks under one request deadline. Invalid or
+   * excess bytes discard the socket; complete server-error responses allow reuse.
+   */
   _exchange(entry, request, opcode) {
     return new Promise((resolve, reject) => {
       if (this._closed || entry.state === 'closed') {
@@ -533,6 +602,7 @@ function encodeTtl(ttlSecs) {
   return ttlSecs;
 }
 
+/** Validates protocol metadata and the size limit before accepting response body bytes. */
 function parseResponseHeader(header) {
   if (!header.subarray(0, 4).equals(MAGIC)) {
     throw new CacheProtocolError('response has invalid magic bytes');

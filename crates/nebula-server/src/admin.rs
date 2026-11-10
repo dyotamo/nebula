@@ -1,3 +1,15 @@
+//! Admin console HTML and JSON API for cache, user, token, and dashboard management.
+//!
+//! All routes require lifecycle `Ready`; otherwise middleware returns HTTP 503.
+//! The HTML page, login, and bootstrap routes do not require an existing session.
+//! Protected reads require an unexpired admin session cookie; cache, user, and token
+//! mutations also require `x-nebula-csrf`. API bearer tokens are accepted only by login.
+//! Bootstrap instead delegates credential validation to the authentication store.
+//!
+//! Sessions are process-local, expire eight hours after login without renewal, and
+//! retain the login-time role without rechecking user or API-token changes. The
+//! `nebula_admin_session` cookie is HttpOnly, SameSite=Strict, and scoped to `/`,
+//! with no Secure attribute. Login and session lookup return the separate CSRF token.
 use std::{
     io,
     sync::Arc,
@@ -151,6 +163,9 @@ struct TokenView {
     revoked: bool,
 }
 
+/// Serves the admin console on a bound listener with one-second watchdog heartbeats.
+/// Signals startup before polling the server and gracefully stops on terminal lifecycle
+/// states or closure of the lifecycle channel.
 pub(crate) async fn run(
     listener: TcpListener,
     store: Arc<CacheStore>,
@@ -199,6 +214,7 @@ fn router(
     health: HealthManager,
     dashboard_enabled: bool,
 ) -> Router {
+    // Allow hex expansion of the value plus fixed JSON/key overhead.
     let body_limit = limits.max_value_len.saturating_mul(2).saturating_add(4096);
     let state = Arc::new(ConsoleState {
         store,
@@ -211,6 +227,8 @@ fn router(
         dashboard_enabled,
     });
 
+    // Entries support list/set/clear and per-key delete; users and tokens expose
+    // admin management. Each protected handler applies its own read/write check.
     Router::new()
         .route("/", get(index))
         .route("/api/metrics", get(dashboard_metrics))
@@ -241,6 +259,7 @@ async fn dashboard_metrics(State(state): State<Arc<ConsoleState>>, headers: Head
     if !admin_authorized(&state, &headers, false) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    // Authenticate first; disabling the dashboard does not disable other routes.
     if !state.dashboard_enabled {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -261,12 +280,14 @@ async fn require_ready(
     request: Request,
     next: Next,
 ) -> Response {
+    // This gate includes the HTML, login, and bootstrap routes, even when degraded.
     if *lifecycle.borrow() != ApplicationState::Ready {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     next.run(request).await
 }
 
+// Degraded state blocks requests but does not stop the listener.
 async fn wait_for_shutdown(mut lifecycle: watch::Receiver<ApplicationState>) {
     loop {
         if matches!(
@@ -301,6 +322,7 @@ async fn login(
         },
         None => None,
     };
+    // Valid non-admin credentials count as a failed console authentication.
     let admin_role = role.as_ref().is_some_and(|role| role.is_admin());
     state.metrics.record_authentication(
         admin_role,
@@ -315,6 +337,7 @@ async fn login(
             .into_response();
     };
 
+    // Generate independent 256-bit session and CSRF secrets, encoded as hex.
     let mut session_bytes = [0_u8; 32];
     let mut csrf_bytes = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut session_bytes);
@@ -346,6 +369,7 @@ async fn session(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> 
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if Instant::now() >= session.expires_at || !session.role.is_admin() {
+        // Release the DashMap read guard before removing from the same map.
         drop(session);
         state.sessions.remove(&token);
         return StatusCode::UNAUTHORIZED.into_response();
@@ -362,6 +386,8 @@ async fn logout(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> R
     let Some(token) = session_token(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    // Logout checks the stored CSRF token, not expiry or role, so an expired
+    // session can still be removed and its cookie cleared.
     let csrf_valid = state.sessions.get(&token).is_some_and(|session| {
         headers
             .get("x-nebula-csrf")
@@ -390,6 +416,7 @@ async fn bootstrap_admin(
     let Some(auth_store) = state.auth_store.as_deref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    // Bootstrap needs no session or CSRF token and returns an API token, not a cookie.
     match auth_store.bootstrap_admin(&request.credential, &request.username) {
         Ok((user, token)) => {
             tracing::info!(action = "admin_bootstrapped", username = %user.username);
@@ -614,6 +641,7 @@ async fn create_token(
     let Some(auth_store) = state.auth_store.as_deref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    // Creation returns the plaintext secret; listing exposes only token metadata.
     match auth_store.create_token(&username, request.expires_at) {
         Ok(token) => {
             tracing::info!(action = "token_created", username = %username, token_id = %token.metadata.id);
@@ -656,6 +684,8 @@ async fn list_entries(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    // Sort raw keys before paging; search uses case-insensitive, lossy UTF-8
+    // key/value text, while response keys and values remain lossless hex strings.
     let search = query.search.trim().to_lowercase();
     let mut entries = state.store.snapshot();
     entries.sort_by(|left, right| left.0.cmp(&right.0));
@@ -671,6 +701,7 @@ async fn list_entries(
     });
 
     let matching = entries.len();
+    // Clamp page size and page number, retaining page 1 even for no matches.
     let page_size = query.page_size.clamp(1, 100);
     let page_count = matching.div_ceil(page_size).max(1);
     let page = query.page.max(1).min(page_count);
@@ -717,6 +748,7 @@ async fn set_entry(
     let Ok(request) = serde_json::from_slice::<SetEntryRequest>(&body) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    // JSON carries hex bytes; decoded sizes are checked against protocol limits.
     let (Ok(key), Ok(value)) = (decode_hex(&request.key), decode_hex(&request.value)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -727,6 +759,7 @@ async fn set_entry(
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
 
+    // A missing TTL defaults to zero, which the cache treats as no expiration.
     state.store.set(key, value, request.ttl_secs);
     StatusCode::NO_CONTENT.into_response()
 }
@@ -750,6 +783,8 @@ async fn delete_entry(
     }
 }
 
+// Authorize from the cookie and cached login-time role, not the auth store.
+// Failed checks leave sessions in place; session lookup removes expired entries.
 fn admin_authorized(state: &ConsoleState, headers: &HeaderMap, write: bool) -> bool {
     let Some(token) = session_token(headers) else {
         return false;
@@ -760,6 +795,7 @@ fn admin_authorized(state: &ConsoleState, headers: &HeaderMap, write: bool) -> b
     if Instant::now() >= session.expires_at || !session.role.is_admin() {
         return false;
     }
+    // Reads need no CSRF header; protected mutations require the session token.
     !write
         || headers
             .get("x-nebula-csrf")
@@ -780,6 +816,8 @@ fn session_token(headers: &HeaderMap) -> Option<String> {
 fn constant_time_eq(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
     let right = right.as_bytes();
+    // Accumulate length and byte differences without an early mismatch return.
+    // The iteration count still depends on the input lengths.
     let mut difference = left.len() ^ right.len();
     for index in 0..left.len().max(right.len()) {
         difference |= usize::from(

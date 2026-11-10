@@ -1,3 +1,13 @@
+//! Process-local protocol, authentication, connection, and persistence metrics.
+//!
+//! Relaxed atomic counters are read independently, so snapshots are not transactional.
+//! Recording accepts nanosecond durations; Prometheus exports seconds and dashboard
+//! averages use milliseconds. Histograms have cumulative bounds from 1 ms to 1 s.
+//!
+//! Dashboard calls sample history on demand, at most once every five seconds, keeping
+//! the latest 360 points without backfilling gaps. Rates use only the last two points;
+//! latency is a lifetime mean, not an interval mean. Prometheus scrapes do not sample
+//! dashboard history. The separate `/metrics` listener has no auth or readiness gate.
 use std::{
     collections::VecDeque,
     fmt::Write as _,
@@ -47,48 +57,83 @@ struct PersistenceMetrics {
     recovery_duration_buckets: [AtomicU64; 8],
 }
 
+/// A dashboard history sample of cumulative counters and current gauges.
 #[derive(Clone, Serialize)]
 pub struct HistoryPoint {
+    /// Whole seconds since this metrics instance was created.
     pub elapsed_secs: u64,
+    /// Cumulative recorded ping, set, get, and delete requests.
     pub requests_total: u64,
+    /// Cumulative recorded requests marked unsuccessful.
     pub errors_total: u64,
+    /// Open TCP connections at sampling time.
     pub active_connections: u64,
+    /// Cache entry count reported by the store at sampling time.
     pub cache_entries: usize,
+    /// Lifetime mean request latency in milliseconds, or zero without requests.
     pub latency_ms: f64,
 }
 
+/// A health component reduced to a stable category and status string.
 #[derive(Clone, Serialize)]
 pub struct ComponentView {
+    /// Component category; worker and persistence instance names are omitted.
     pub name: String,
+    /// Health status: healthy, degraded, or unhealthy; reason text is omitted.
     pub status: String,
 }
 
+/// Dashboard counters, gauges, lifetime means, and bounded sampled history.
 #[derive(Clone, Serialize)]
 pub struct DashboardSnapshot {
+    /// Always true for generated snapshots; the admin handler handles unavailability.
     pub available: bool,
+    /// Whole seconds since this metrics instance was created.
     pub uptime_secs: u64,
+    /// Lowercase lifecycle state name.
     pub state: String,
+    /// Overall health: healthy, degraded, or unhealthy.
     pub health: String,
+    /// Cumulative recorded ping, set, get, and delete requests.
     pub requests_total: u64,
+    /// Cumulative recorded requests marked unsuccessful.
     pub errors_total: u64,
+    /// Request counter delta per second over the last two history points, or zero.
     pub requests_per_second: f64,
+    /// Error counter delta per second over the last two history points, or zero.
     pub errors_per_second: f64,
+    /// Lifetime mean request latency in milliseconds, or zero without requests.
     pub avg_latency_ms: f64,
+    /// Current open TCP connection count.
     pub active_connections: u64,
+    /// Current cache entry count reported by the store.
     pub cache_entries: usize,
+    /// Approximate bytes held by cache keys and values.
     pub cache_memory_bytes: usize,
+    /// Recorded snapshot attempts, including failures.
     pub snapshot_count: u64,
+    /// Recorded unsuccessful snapshot attempts.
     pub snapshot_failures: u64,
+    /// Mean duration of all snapshot attempts in milliseconds, or zero without attempts.
     pub snapshot_duration_ms: f64,
+    /// Unix seconds at the last recorded snapshot success; zero is represented as None.
     pub last_snapshot_success_timestamp_secs: Option<u64>,
+    /// Recorded recovery attempts, including failures.
     pub recovery_count: u64,
+    /// Recorded unsuccessful recovery attempts.
     pub recovery_failures: u64,
+    /// Mean duration of all recovery attempts in milliseconds, or zero without attempts.
     pub recovery_duration_ms: f64,
+    /// Current health components with category names and status strings.
     pub components: Vec<ComponentView>,
+    /// Recent failure messages supplied by the health manager.
     pub recent_failures: Vec<String>,
+    /// Up to 360 on-demand samples, ordered oldest to newest.
     pub history: Vec<HistoryPoint>,
 }
 
+/// Shared metric accumulators and demand-sampled dashboard history.
+/// Counter and gauge updates use relaxed atomics; callers supply operation outcomes.
 pub struct Metrics {
     started: Instant,
     operations: [OperationMetrics; 4],
@@ -108,6 +153,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    /// Creates shared, zeroed metrics with an uptime origin of now and empty history.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             started: Instant::now(),
@@ -128,6 +174,8 @@ impl Metrics {
         })
     }
 
+    /// Records an outcome and nanosecond latency for ping, set, get, or delete.
+    /// Unknown operation names are ignored; failed requests also contribute latency.
     pub fn record_request(&self, operation: &str, success: bool, elapsed_ns: u64) {
         let Some(index) = OPERATIONS
             .iter()
@@ -151,14 +199,17 @@ impl Metrics {
         }
     }
 
+    /// Increments the open TCP connection gauge.
     pub fn connection_opened(&self) {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Decrements the open TCP connection gauge; callers must balance opens and closes.
     pub fn connection_closed(&self) {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Records an authentication outcome and duration in nanoseconds, including failures.
     pub fn record_authentication(&self, success: bool, elapsed_ns: u64) {
         if success {
             self.auth_success.fetch_add(1, Ordering::Relaxed);
@@ -171,6 +222,7 @@ impl Metrics {
         record_buckets(&self.auth_duration_buckets, elapsed_ns);
     }
 
+    /// Counts an authorization check and, when disallowed, a denial.
     pub fn authorization_check(&self, allowed: bool) {
         self.authz_checks.fetch_add(1, Ordering::Relaxed);
         if !allowed {
@@ -178,18 +230,23 @@ impl Metrics {
         }
     }
 
+    /// Increments the authenticated TCP connection gauge.
     pub fn authenticated_connection_opened(&self) {
         self.auth_active_connections.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Decrements the authenticated TCP gauge; callers must balance increments.
     pub fn authenticated_connection_closed(&self) {
         self.auth_active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Counts a token revocation reported by the caller.
     pub fn record_revocation(&self) {
         self.auth_revocations.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records a snapshot attempt and nanosecond duration, including failed attempts.
+    /// Success updates the last-success timestamp to the current Unix time in seconds.
     pub fn record_snapshot(&self, elapsed_ns: u64, success: bool) {
         self.persistence.snapshots.fetch_add(1, Ordering::Relaxed);
         self.persistence
@@ -211,6 +268,7 @@ impl Metrics {
         }
     }
 
+    /// Records a recovery attempt and nanosecond duration, including failed attempts.
     pub fn record_recovery(&self, elapsed_ns: u64, success: bool) {
         self.persistence.recoveries.fetch_add(1, Ordering::Relaxed);
         self.persistence
@@ -224,6 +282,9 @@ impl Metrics {
         }
     }
 
+    /// Reads dashboard metrics and appends a history point if five seconds have elapsed.
+    /// The first call samples immediately; history is capped at 360 points. Rates use
+    /// the latest two samples, while latency and persistence durations are lifetime means.
     pub fn dashboard_snapshot(
         &self,
         store: &CacheStore,
@@ -240,6 +301,7 @@ impl Metrics {
             latency_sum_ns as f64 / request_count as f64 / 1_000_000.0
         };
         let now = Instant::now();
+        // Hold both locks through sampling so concurrent dashboard calls share the cadence.
         let mut history_guard = self
             .history
             .lock()
@@ -324,6 +386,9 @@ impl Metrics {
         }
     }
 
+    /// Renders Prometheus text with cumulative counters, gauges, and second-based histograms.
+    /// An optional persistence directory adds `.nbs` file counts and, when available,
+    /// filesystem free bytes. This does not update dashboard history.
     pub fn render_prometheus(
         &self,
         store: &CacheStore,
@@ -492,6 +557,7 @@ impl Metrics {
                 "nebula_health_status{{component=\"{component_label}\"}} {healthy}"
             );
         }
+        // With no persistence components, the all-components check reports healthy.
         let persistence_healthy = if snapshot.components.iter().all(|(component, status)| {
             !matches!(component, HealthComponent::Persistence(_))
                 || *status == ComponentHealth::Healthy
@@ -502,6 +568,7 @@ impl Metrics {
         };
         let _ = writeln!(output, "# HELP nebula_persistence_healthy Whether persistence is healthy.\n# TYPE nebula_persistence_healthy gauge\nnebula_persistence_healthy {persistence_healthy}");
         if let Some(directory) = persistence_directory {
+            // Directory read failure reports zero; failed entries are skipped.
             let files = std::fs::read_dir(directory)
                 .map(|entries| {
                     entries
@@ -536,6 +603,7 @@ impl Metrics {
     }
 }
 
+// Increment every matching upper bound to maintain cumulative Prometheus buckets.
 fn record_buckets(buckets: &[AtomicU64; 8], elapsed_ns: u64) {
     let elapsed_secs = elapsed_ns as f64 / 1_000_000_000.0;
     for (bucket, bound) in buckets.iter().zip(LATENCY_BUCKETS) {
@@ -575,6 +643,9 @@ struct ExporterState {
     persistence_directory: Option<PathBuf>,
 }
 
+/// Serves unauthenticated GET `/metrics` without the admin readiness middleware.
+/// Signals startup before polling, sends one-second watchdog heartbeats, and drains
+/// on stopping, stopped, failed, or closure of the lifecycle channel.
 pub(crate) async fn run_exporter(
     listener: TcpListener,
     metrics: Arc<Metrics>,
@@ -652,6 +723,7 @@ fn rate(history: &[HistoryPoint], value: impl Fn(&HistoryPoint) -> u64) -> f64 {
     if history.len() < 2 {
         return 0.0;
     }
+    // Only the latest interval matters; saturate counter decreases and avoid zero divisors.
     let first = &history[history.len() - 2];
     let last = &history[history.len() - 1];
     let elapsed = last.elapsed_secs.saturating_sub(first.elapsed_secs).max(1);
@@ -669,6 +741,7 @@ fn lifecycle_name(state: ApplicationState) -> &'static str {
     }
 }
 
+// Collapse instance-specific names into bounded categories for dashboard and metric labels.
 fn component_name(component: &HealthComponent) -> &'static str {
     match component {
         HealthComponent::TcpServer => "tcp_server",
@@ -703,6 +776,7 @@ fn metric(output: &mut String, name: &str, help: &str, kind: &str, value: &str) 
 fn available_disk_bytes(path: &Path) -> Option<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
+    // A not-yet-created directory uses its nearest existing directory ancestor.
     let path = path.ancestors().find(|candidate| candidate.is_dir())?;
     let path = CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -710,6 +784,7 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
     if result != 0 {
         return None;
     }
+    // A successful statvfs call initialized stats; use blocks available to unprivileged users.
     let stats = unsafe { stats.assume_init() };
     Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
 }

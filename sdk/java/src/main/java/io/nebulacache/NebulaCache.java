@@ -27,6 +27,15 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Thread-safe pooled client for the NebulaCache binary TCP protocol.
+ * Connections are opened lazily. Keys use UTF-8 and must occupy 1–1024 bytes;
+ * values may contain up to 8 MiB. Only GET requests may be retried after
+ * transient I/O failures, subject to configuration and a shared retry budget.
+ * Operations report transport, protocol, and server failures through
+ * {@link NebulaCacheException}; operations after closure throw
+ * {@link IllegalStateException}.
+ */
 public final class NebulaCache implements AutoCloseable {
     private static final byte[] MAGIC = new byte[] {'N', 'E', 'B', 'U'};
     private static final int VERSION = 1;
@@ -42,19 +51,56 @@ public final class NebulaCache implements AutoCloseable {
     private final Object poolLock = new Object();
     private final ArrayDeque<Connection> idle = new ArrayDeque<>();
     private final Set<Connection> connections = new HashSet<>();
+    /**
+     * Daemon scheduler that closes sockets when an exchange exceeds its request deadline.
+     */
     private final ScheduledThreadPoolExecutor deadlines;
     private boolean closed;
     private double retryTokens = 10;
     private long retryRefill = System.nanoTime();
 
+    /**
+     * Immutable pool, timeout, retry, TLS, and authentication settings.
+     * All durations must be non-null and positive.
+     *
+     * @param minPoolSize minimum connection count replenished during acquisition, not at construction
+     * @param maxPoolSize maximum connection count, including connections being established
+     * @param connectTimeout positive TCP connect timeout and TLS handshake read timeout
+     * @param requestTimeout positive deadline for each request/response exchange, including authentication
+     * @param acquireTimeout positive acquisition budget, checked while waiting and establishing connections
+     * @param idleTimeout positive idle age beyond which an idle connection is discarded on acquisition
+     * @param maxLifetime positive connection age limit checked on acquisition and release
+     * @param maxRetries non-negative maximum additional attempts for transient GET failures
+     * @param tlsEnabled whether to use TLS with default trust settings and hostname verification
+     * @param token optional UTF-8 authentication token; null disables authentication,
+     *     otherwise TLS is required and the token must occupy 1–1024 bytes
+     */
     public record Config(int minPoolSize, int maxPoolSize, Duration connectTimeout,
             Duration requestTimeout, Duration acquireTimeout, Duration idleTimeout,
             Duration maxLifetime, int maxRetries, boolean tlsEnabled, String token) {
+        /**
+         * Creates an unauthenticated, non-TLS configuration with pool sizes 0–10,
+         * five-second connect/request/acquire timeouts, a 60-second idle timeout,
+         * a 300-second lifetime, and at most two GET retries.
+         */
         public Config() {
             this(0, 10, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT,
                     Duration.ofSeconds(60), Duration.ofSeconds(300), 2, false, null);
         }
 
+        /**
+         * Creates a configuration without token authentication.
+         *
+         * @param minPoolSize minimum connection count replenished during acquisition, not at construction
+         * @param maxPoolSize maximum connection count, including connections being established
+         * @param connectTimeout positive TCP connect timeout and TLS handshake read timeout
+         * @param requestTimeout positive deadline for each request/response exchange, including authentication
+         * @param acquireTimeout positive acquisition budget, checked while waiting and establishing connections
+         * @param idleTimeout positive idle age beyond which an idle connection is discarded on acquisition
+         * @param maxLifetime positive connection age limit checked on acquisition and release
+         * @param maxRetries non-negative maximum additional attempts for transient GET failures
+         * @param tlsEnabled whether to enable TLS and hostname verification
+         */
         public Config(int minPoolSize, int maxPoolSize, Duration connectTimeout,
                 Duration requestTimeout, Duration acquireTimeout, Duration idleTimeout,
                 Duration maxLifetime, int maxRetries, boolean tlsEnabled) {
@@ -62,6 +108,18 @@ public final class NebulaCache implements AutoCloseable {
                     idleTimeout, maxLifetime, maxRetries, tlsEnabled, null);
         }
 
+        /**
+         * Creates a configuration without TLS or token authentication.
+         *
+         * @param minPoolSize minimum connection count replenished during acquisition, not at construction
+         * @param maxPoolSize maximum connection count, including connections being established
+         * @param connectTimeout positive TCP connect timeout and TLS handshake read timeout
+         * @param requestTimeout positive deadline for each request/response exchange, including authentication
+         * @param acquireTimeout positive acquisition budget, checked while waiting and establishing connections
+         * @param idleTimeout positive idle age beyond which an idle connection is discarded on acquisition
+         * @param maxLifetime positive connection age limit checked on acquisition and release
+         * @param maxRetries non-negative maximum additional attempts for transient GET failures
+         */
         public Config(int minPoolSize, int maxPoolSize, Duration connectTimeout,
                 Duration requestTimeout, Duration acquireTimeout, Duration idleTimeout,
                 Duration maxLifetime, int maxRetries) {
@@ -69,6 +127,22 @@ public final class NebulaCache implements AutoCloseable {
                     idleTimeout, maxLifetime, maxRetries, false, null);
         }
 
+        /**
+         * Validates all settings before constructing the configuration.
+         *
+         * @param minPoolSize minimum connection count replenished during acquisition, not at construction
+         * @param maxPoolSize maximum connection count, including connections being established
+         * @param connectTimeout positive TCP connect timeout and TLS handshake read timeout
+         * @param requestTimeout positive deadline for each request/response exchange, including authentication
+         * @param acquireTimeout positive acquisition budget, checked while waiting and establishing connections
+         * @param idleTimeout positive idle age beyond which an idle connection is discarded on acquisition
+         * @param maxLifetime positive connection age limit checked on acquisition and release
+         * @param maxRetries non-negative maximum additional attempts for transient GET failures
+         * @param tlsEnabled whether to enable TLS and hostname verification
+         * @param token optional authentication token requiring TLS and 1–1024 UTF-8 bytes
+         * @throws IllegalArgumentException if pool sizes, retries, durations, or token settings are invalid
+         * @throws NullPointerException if any duration is null
+         */
         public Config {
             if (minPoolSize < 0 || maxPoolSize < 1 || minPoolSize > maxPoolSize) {
                 throw new IllegalArgumentException("pool sizes must satisfy 0 <= minPoolSize <= maxPoolSize, maxPoolSize >= 1");
@@ -90,19 +164,47 @@ public final class NebulaCache implements AutoCloseable {
         }
     }
 
+    /**
+     * Creates a lazy client for {@code 127.0.0.1:7001} with default settings.
+     */
     public NebulaCache() {
         this("127.0.0.1:7001");
     }
 
+    /**
+     * Creates a lazy client with default settings.
+     *
+     * @param address endpoint in {@code host:port} or {@code [IPv6]:port} form
+     * @throws IllegalArgumentException if the address is malformed or its port is outside 1–65535
+     * @throws NullPointerException if address is null
+     */
     public NebulaCache(String address) {
         this(address, new Config());
     }
 
+    /**
+     * Creates a lazy client with the given connect and request timeouts.
+     * Other settings, including the five-second acquisition timeout, use defaults.
+     *
+     * @param address endpoint in {@code host:port} or {@code [IPv6]:port} form
+     * @param timeout positive connect and request timeout
+     * @throws IllegalArgumentException if the address or timeout is invalid
+     * @throws NullPointerException if address or timeout is null
+     */
     public NebulaCache(String address, Duration timeout) {
         this(address, new Config(0, 10, timeout, timeout, DEFAULT_TIMEOUT,
                 Duration.ofSeconds(60), Duration.ofSeconds(300), 2));
     }
 
+    /**
+     * Creates a lazy client with the supplied settings and a daemon deadline scheduler.
+     * No network connection is established until an operation acquires one.
+     *
+     * @param address endpoint in {@code host:port} or {@code [IPv6]:port} form
+     * @param config pool, timeout, retry, TLS, and authentication settings
+     * @throws IllegalArgumentException if the address is malformed or its port is outside 1–65535
+     * @throws NullPointerException if address or config is null
+     */
     public NebulaCache(String address, Config config) {
         this.address = Objects.requireNonNull(address, "address");
         Address parsedAddress = parseAddress(address);
@@ -136,6 +238,15 @@ public final class NebulaCache implements AutoCloseable {
         return (int) Math.min(Integer.MAX_VALUE, Math.max(1, TimeUnit.NANOSECONDS.toMillis(nanos)));
     }
 
+    /**
+     * Runs a PING, SET, GET, and DELETE smoke test against a running server.
+     * Uses a unique temporary key and prints results to standard output.
+     *
+     * @param args optional {@code --tls} flag and endpoint; defaults to {@code 127.0.0.1:7001}
+     * @throws IllegalArgumentException if arguments are unsupported or the endpoint is invalid
+     * @throws NebulaCacheException if a cache operation fails
+     * @throws IllegalStateException if the stored smoke-test value cannot be retrieved
+     */
     public static void main(String[] args) {
         String address = "127.0.0.1:7001";
         boolean addressSet = false;
@@ -171,6 +282,13 @@ public final class NebulaCache implements AutoCloseable {
         }
     }
 
+    /**
+     * Checks server responsiveness without retrying the request.
+     *
+     * @return true after a successful response containing exactly {@code PONG}
+     * @throws CacheProtocolException if a successful response does not contain {@code PONG}
+     * @throws NebulaCacheException if the request fails
+     */
     public boolean ping() {
         Response response = request(4, new byte[0], new byte[0], 0L);
         ensureOk(response);
@@ -180,32 +298,106 @@ public final class NebulaCache implements AutoCloseable {
         return true;
     }
 
+    /**
+     * Stores a UTF-8 string without expiration.
+     * The request is not retried.
+     *
+     * @param key non-empty key occupying at most 1024 UTF-8 bytes
+     * @param value non-null string occupying at most 8 MiB in UTF-8
+     * @throws IllegalArgumentException if the key or value exceeds protocol limits
+     * @throws NullPointerException if key or value is null
+     * @throws NebulaCacheException if the request fails
+     */
     public void set(String key, String value) {
         set(key, value, BigInteger.ZERO);
     }
 
+    /**
+     * Stores a defensive copy of a binary value without expiration.
+     * The request is not retried.
+     *
+     * @param key non-empty key occupying at most 1024 UTF-8 bytes
+     * @param value non-null value of at most 8 MiB; empty values are allowed
+     * @throws IllegalArgumentException if the key or value exceeds protocol limits
+     * @throws NullPointerException if key or value is null
+     * @throws NebulaCacheException if the request fails
+     */
     public void set(String key, byte[] value) {
         set(key, value, BigInteger.ZERO);
     }
 
+    /**
+     * Stores a UTF-8 string with an expiration in seconds.
+     * The request is not retried.
+     *
+     * @param key non-empty key occupying at most 1024 UTF-8 bytes
+     * @param value non-null string occupying at most 8 MiB in UTF-8
+     * @param ttlSecs non-negative expiration in seconds; zero disables expiration
+     * @throws IllegalArgumentException if the key or value exceeds protocol limits, or TTL is out of range
+     * @throws NullPointerException if key or value is null
+     * @throws NebulaCacheException if the request fails
+     */
     public void set(String key, String value, long ttlSecs) {
         set(key, value, BigInteger.valueOf(ttlSecs));
     }
 
+    /**
+     * Stores a defensive copy of a binary value with an expiration in seconds.
+     * The request is not retried.
+     *
+     * @param key non-empty key occupying at most 1024 UTF-8 bytes
+     * @param value non-null value of at most 8 MiB; empty values are allowed
+     * @param ttlSecs non-negative expiration in seconds; zero disables expiration
+     * @throws IllegalArgumentException if the key or value exceeds protocol limits, or TTL is out of range
+     * @throws NullPointerException if key or value is null
+     * @throws NebulaCacheException if the request fails
+     */
     public void set(String key, byte[] value, long ttlSecs) {
         set(key, value, BigInteger.valueOf(ttlSecs));
     }
 
+    /**
+     * Stores a UTF-8 string with an expiration in seconds.
+     * The request is not retried.
+     *
+     * @param key non-empty key occupying at most 1024 UTF-8 bytes
+     * @param value non-null string occupying at most 8 MiB in UTF-8
+     * @param ttlSecs integer from 0 through 2<sup>64</sup> − 1; zero disables expiration
+     * @throws IllegalArgumentException if the key or value exceeds protocol limits, or TTL is out of range
+     * @throws NullPointerException if key or value or ttlSecs is null
+     * @throws NebulaCacheException if the request fails
+     */
     public void set(String key, String value, BigInteger ttlSecs) {
         Objects.requireNonNull(value, "value");
         setBytes(key, value.getBytes(StandardCharsets.UTF_8), ttlSecs);
     }
 
+    /**
+     * Stores a defensive copy of a binary value with an expiration in seconds.
+     * The request is not retried.
+     *
+     * @param key non-empty key occupying at most 1024 UTF-8 bytes
+     * @param value non-null value of at most 8 MiB; empty values are allowed
+     * @param ttlSecs integer from 0 through 2<sup>64</sup> − 1; zero disables expiration
+     * @throws IllegalArgumentException if the key or value exceeds protocol limits, or TTL is out of range
+     * @throws NullPointerException if key or value or ttlSecs is null
+     * @throws NebulaCacheException if the request fails
+     */
     public void set(String key, byte[] value, BigInteger ttlSecs) {
         Objects.requireNonNull(value, "value");
         setBytes(key, value.clone(), ttlSecs);
     }
 
+    /**
+     * Retrieves a binary value, retrying eligible transient I/O failures within configured limits.
+     * Protocol errors, server errors, and pool acquisition timeouts are not retried.
+     *
+     * @param key non-empty key occupying at most 1024 UTF-8 bytes
+     * @return the value, including an empty byte array, or an empty optional if not found
+     * @throws IllegalArgumentException if the key is empty or exceeds the byte limit
+     * @throws NullPointerException if key is null
+     * @throws NebulaCacheException if the request fails
+     */
     public Optional<byte[]> get(String key) {
         Response response = request(2, encodeKey(key), new byte[0], 0L);
         if (response.status() == 1) {
@@ -215,6 +407,15 @@ public final class NebulaCache implements AutoCloseable {
         return Optional.of(response.value());
     }
 
+    /**
+     * Deletes a key without retrying the request.
+     *
+     * @param key non-empty key occupying at most 1024 UTF-8 bytes
+     * @return true if deleted, or false if the key was not found
+     * @throws IllegalArgumentException if the key is empty or exceeds the byte limit
+     * @throws NullPointerException if key is null
+     * @throws NebulaCacheException if the request fails
+     */
     public boolean delete(String key) {
         Response response = request(3, encodeKey(key), new byte[0], 0L);
         if (response.status() == 1) {
@@ -238,6 +439,11 @@ public final class NebulaCache implements AutoCloseable {
         ensureOk(response);
     }
 
+    /**
+     * Leases one connection per attempt and discards it on a transport or protocol failure.
+     * Only transient GET I/O failures are retried, with bounded jittered backoff
+     * and a client-wide token budget; acquisition timeouts are excluded.
+     */
     private Response request(int opcode, byte[] key, byte[] value, long ttlSecs) {
         for (int attempt = 0; ; attempt++) {
             Connection connection = null;
@@ -268,6 +474,11 @@ public final class NebulaCache implements AutoCloseable {
         }
     }
 
+    /**
+     * Exchanges one protocol frame under a whole-request deadline that also covers writes.
+     * The scheduled task closes the socket; synchronizing cancellation on the connection
+     * prevents a completed exchange's timeout from closing a subsequently reused socket.
+     */
     private Response exchange(Connection connection, int opcode, byte[] key, byte[] value, long ttlSecs)
             throws IOException {
         ScheduledFuture<?> timeout;
@@ -308,6 +519,12 @@ public final class NebulaCache implements AutoCloseable {
         }
     }
 
+    /**
+     * Reserves pool slots under the pool lock before opening connections outside it.
+     * Replenishes the configured minimum on demand, returning one connection and pooling
+     * the rest only after all reservations connect successfully. Failed acquisition
+     * releases every reservation; expiration is checked lazily, not by a background reaper.
+     */
     private Connection acquire() throws IOException {
         long started = System.nanoTime();
         List<Connection> reserved = new ArrayList<>();
@@ -420,6 +637,9 @@ public final class NebulaCache implements AutoCloseable {
                         || error instanceof EOFException);
     }
 
+    /**
+     * Consumes from a client-wide bucket holding at most ten retries and refilling one per second.
+     */
     private boolean takeRetryToken() {
         synchronized (poolLock) {
             long now = System.nanoTime();
@@ -463,6 +683,10 @@ public final class NebulaCache implements AutoCloseable {
         }
     }
 
+    /**
+     * Closes idle and leased sockets, stops the deadline scheduler, and wakes pool waiters.
+     * This method is idempotent; subsequent operations fail with {@link IllegalStateException}.
+     */
     @Override
     public void close() {
         synchronized (poolLock) {
@@ -499,6 +723,11 @@ public final class NebulaCache implements AutoCloseable {
         }
     }
 
+    /**
+     * Validates response magic, version, status, and the 8 MiB length limit before allocation.
+     * Malformed headers raise protocol errors; truncated responses become socket errors
+     * so eligible GET requests can retry them.
+     */
     private static Response readResponse(DataInputStream input) throws IOException {
         try {
             byte[] magic = new byte[MAGIC.length];

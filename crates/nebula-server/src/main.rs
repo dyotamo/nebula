@@ -1,3 +1,5 @@
+//! Binary entry point: load server settings, initialize tracing, and run the application lifecycle.
+
 use nebula_server::{application::Application, config::Config};
 use tracing_subscriber::EnvFilter;
 

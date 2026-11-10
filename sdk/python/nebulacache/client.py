@@ -1,3 +1,5 @@
+"""Pooled synchronous binary-protocol client and accepted CacheValue input types."""
+
 from __future__ import annotations
 
 import errno
@@ -39,7 +41,14 @@ class _PooledConnection:
 
 
 class NebulaCache:
-    """Synchronous client for the NebulaCache binary TCP protocol."""
+    """Thread-safe synchronous client for the NebulaCache binary TCP protocol.
+
+    Operations raise CacheConnectionError for transport failures, pool acquisition
+    timeouts, or a closed client; CacheProtocolError for malformed responses; and
+    CacheResponseError for unsuccessful server statuses other than handled misses.
+    Keys must be non-empty strings of at most 1024 UTF-8 bytes: invalid types raise
+    TypeError, and empty or oversized keys raise ValueError.
+    """
 
     def __init__(
         self,
@@ -57,6 +66,39 @@ class NebulaCache:
         ssl_context: ssl.SSLContext | None = None,
         token: str | None = None,
     ) -> None:
+        """Configure a lazy connection pool without opening sockets.
+
+        Args:
+            address: Host and port, default "127.0.0.1:7001"; use [host]:port
+                for IPv6. Ports must be in the range 1 through 65535.
+            timeout: Default connect/request timeout in seconds (5.0), used
+                when the corresponding override is None.
+            min_pool_size: Pool target filled during acquisition, not eagerly
+                or in the background (default 0).
+            max_pool_size: Maximum pooled connections, including connections
+                being established (default 10).
+            connect_timeout: TCP connection timeout in seconds; defaults to timeout.
+            request_timeout: Per-attempt send/response budget in seconds;
+                defaults to timeout. Pool acquisition and retry delays are separate.
+            acquire_timeout: Pool acquisition timeout in seconds (default 5.0);
+                also caps each TCP connection timeout by the remaining budget.
+            idle_timeout: Idle expiry in seconds (default 60.0), checked on acquisition.
+            max_lifetime: Connection lifetime in seconds (default 300.0), checked
+                for idle connections on acquisition and for checked-out ones on release.
+            max_retries: Additional attempts for transient GET transport failures
+                (default 2); zero disables retries. Other operations are not retried.
+            ssl_context: Optional TLS context; None uses plaintext TCP.
+            token: Optional non-empty UTF-8 authentication token, at most 1024
+                bytes. Requires TLS certificate and hostname verification and
+                authenticates each new connection before use; None skips authentication.
+
+        Raises:
+            ValueError: Invalid address, non-finite or non-positive timeouts,
+                invalid pool sizes/retry count, or invalid token/TLS configuration.
+                Counts must be non-negative integers, with 0 <= min <= max and max > 0;
+                booleans are not accepted as durations or counts.
+            TypeError: ssl_context is neither an SSLContext nor None.
+        """
         self.host, self.port = self._parse_address(address)
         connect_timeout = timeout if connect_timeout is None else connect_timeout
         request_timeout = timeout if request_timeout is None else request_timeout
@@ -112,6 +154,10 @@ class NebulaCache:
         self._retry_updated_at = time.monotonic()
 
     def close(self) -> None:
+        """Permanently close the pool, interrupt active I/O, and wake waiters.
+
+        Repeated calls are safe; subsequent valid operations raise CacheConnectionError.
+        """
         with self._condition:
             self._closed.set()
             for connection in self._connections:
@@ -139,6 +185,13 @@ class NebulaCache:
                 self._close_socket(connection.socket)
 
     def _acquire(self) -> _PooledConnection:
+        """Borrow an idle socket or grow the pool, waiting when capacity is exhausted.
+
+        Expire idle sockets and lazily fill the minimum target before reusing one.
+        Reserve capacity under the condition, but connect/TLS/authenticate outside
+        its lock. The acquisition deadline is rechecked after connection setup;
+        it is not a single end-to-end deadline for TCP, TLS, and authentication.
+        """
         deadline = time.monotonic() + self.acquire_timeout
         while True:
             with self._condition:
@@ -195,6 +248,7 @@ class NebulaCache:
                 self._condition.notify_all()
 
     def _release(self, connection: _PooledConnection, healthy: bool) -> None:
+        """Return a healthy socket to idle, or discard it if failed, expired, or closed."""
         with self._condition:
             if connection not in self._connections:
                 return
@@ -208,6 +262,12 @@ class NebulaCache:
             self._condition.notify_all()
 
     def _authenticate(self, connection: socket.socket) -> None:
+        """Send the configured token with opcode 5 before pooling a TLS socket.
+
+        Require status OK and the exact AUTH_RESULT payload, otherwise raise
+        CacheResponseError. Send and response each use request_timeout separately;
+        clear the socket timeout only after successful authentication.
+        """
         token = self.token.encode("utf-8")
         header = _REQUEST_HEADER.pack(_MAGIC, _VERSION, 5, 0, len(token), 0)
         connection.settimeout(self.request_timeout)
@@ -218,6 +278,7 @@ class NebulaCache:
         connection.settimeout(None)
 
     def _take_retry_token(self) -> bool:
+        """Spend a shared retry token unless closed or empty; refill one/second up to 10."""
         with self._condition:
             now = time.monotonic()
             self._retry_tokens = min(10.0, self._retry_tokens + now - self._retry_updated_at)
@@ -242,6 +303,11 @@ class NebulaCache:
         }
 
     def ping(self) -> bool:
+        """Return True for a successful PONG response; never return False or retry.
+
+        Raise CacheProtocolError for an OK response without PONG, or the shared
+        connection/response exceptions for transport or server failures.
+        """
         status, value = self._request(4)
         self._ensure_ok(status, value)
         if value != b"PONG":
@@ -249,6 +315,17 @@ class NebulaCache:
         return True
 
     def set(self, key: str, value: CacheValue, ttl_secs: int = 0) -> None:
+        """Store or replace a value, returning None on success; do not retry.
+
+        Encode strings as UTF-8; accept bytes, bytearray, or memoryview as binary.
+        Values may be empty but must not exceed 8 MiB after encoding. ttl_secs
+        is an integer number of seconds in 0..2**64-1; zero (the default) means
+        no expiration. Booleans are not valid TTLs.
+
+        Raise TypeError for unsupported key/value types and ValueError for invalid
+        key/value lengths or TTLs, in addition to the shared operation exceptions.
+        A transport failure does not imply that the write was not applied.
+        """
         encoded_key = self._encode_key(key)
         if isinstance(value, str):
             encoded_value = value.encode("utf-8")
@@ -270,6 +347,12 @@ class NebulaCache:
         self._ensure_ok(status, response_value)
 
     def get(self, key: str) -> bytes | None:
+        """Return raw bytes, or None when the server reports a missing/expired key.
+
+        An empty stored value returns b"", not None. Transient transport failures
+        may be retried within max_retries and the shared retry budget; validation,
+        protocol, and server errors raise the shared operation exceptions.
+        """
         encoded_key = self._encode_key(key)
         status, value = self._request(2, encoded_key)
         if status == 1:
@@ -278,6 +361,11 @@ class NebulaCache:
         return value
 
     def delete(self, key: str) -> bool:
+        """Return True on deletion, or False when the server reports NOT_FOUND.
+
+        Do not retry; raise the shared validation, connection, protocol, or server
+        exceptions on failure. A transport failure can leave the outcome unknown.
+        """
         encoded_key = self._encode_key(key)
         status, value = self._request(3, encoded_key)
         if status == 1:
@@ -328,6 +416,14 @@ class NebulaCache:
         value: bytes = b"",
         ttl_secs: int = 0,
     ) -> tuple[int, bytes]:
+        """Exchange one frame per borrowed socket, returning the raw status and bytes.
+
+        Retain sockets after complete valid responses, including server errors;
+        discard them after transport/protocol failures or invalid PONG payloads.
+        Only transient GET OSErrors are retried, using capped exponential full
+        jitter and the shared token bucket. Wrap terminal OSErrors in
+        CacheConnectionError; protocol, pool, and authentication response errors propagate.
+        """
         header = _REQUEST_HEADER.pack(
             _MAGIC,
             _VERSION,
@@ -373,6 +469,12 @@ class NebulaCache:
 
     @staticmethod
     def _read_response(connection: socket.socket, deadline: float | None = None) -> tuple[int, bytes]:
+        """Read a frame, validating magic, version, known status, and the 8 MiB limit.
+
+        Return status and bytes without interpreting server errors. Invalid headers
+        raise CacheProtocolError before reading the body; an optional absolute
+        monotonic deadline covers both header and body reads.
+        """
         header = NebulaCache._receive_exactly(connection, _RESPONSE_HEADER.size, deadline)
         magic, version, status, value_len = _RESPONSE_HEADER.unpack(header)
         if magic != _MAGIC:
@@ -389,6 +491,12 @@ class NebulaCache:
     def _receive_exactly(
         connection: socket.socket, length: int, deadline: float | None = None
     ) -> bytes:
+        """Accumulate exactly length bytes, raising ConnectionResetError on early EOF.
+
+        Recompute the socket timeout from an absolute monotonic deadline before
+        each read, raising TimeoutError when exhausted. None leaves the existing
+        socket timeout unchanged; zero length returns b"" without reading.
+        """
         chunks = bytearray()
         while len(chunks) < length:
             if deadline is not None:

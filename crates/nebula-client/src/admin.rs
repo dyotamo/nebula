@@ -1,9 +1,15 @@
+//! HTTP client for the administrator API.
+//!
+//! Login creates a server-side session; subsequent state-changing requests include both the
+//! session cookie and CSRF token. Credential-bearing endpoints require HTTPS.
+
 use std::{error::Error, io, path::Path};
 
 use reqwest::{header, Method, Response, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// Authenticated HTTP session for the admin API.
 pub(super) struct AdminClient {
     base_url: Url,
     client: reqwest::Client,
@@ -11,28 +17,42 @@ pub(super) struct AdminClient {
     csrf_token: Option<String>,
 }
 
+/// User metadata returned by the admin API.
 #[derive(Debug, Deserialize)]
 pub(super) struct User {
+    /// User's unique login name.
     pub username: String,
+    /// Assigned role name.
     pub role: String,
+    /// Whether the account can authenticate.
     pub enabled: bool,
+    /// Creation time as Unix seconds.
     pub created_at: i64,
 }
 
+/// Non-secret token metadata returned by list operations.
 #[derive(Debug, Deserialize)]
 pub(super) struct Token {
+    /// Token identifier used for revocation.
     pub id: String,
+    /// Creation time as Unix seconds.
     pub created_at: i64,
+    /// Expiration time as Unix seconds, or absent for a non-expiring token.
     pub expires_at: Option<i64>,
+    /// Whether the token has been revoked.
     pub revoked: bool,
 }
 
+/// Token creation result; the secret token value is only returned at creation time.
 #[derive(Debug, Deserialize)]
 pub(super) struct CreatedToken {
+    /// Identifier for future listing and revocation.
     pub id: String,
+    /// Secret bearer token that must be saved by the caller.
     pub token: String,
 }
 
+/// First-administrator bootstrap result, including the newly issued bearer token.
 #[derive(Debug, Deserialize)]
 pub(super) struct BootstrapResult {
     pub user: User,
@@ -50,6 +70,7 @@ struct LoginResponse {
 }
 
 impl AdminClient {
+    /// Builds an admin client and optionally trusts a PEM CA for HTTPS connections.
     pub(super) fn new(
         address: &str,
         tls_ca: Option<impl AsRef<Path>>,
@@ -89,6 +110,7 @@ impl AdminClient {
         })
     }
 
+    /// Exchanges an administrator token for the session cookie and CSRF token used on later calls.
     pub(super) async fn authenticate(&mut self, token: &str) -> Result<(), Box<dyn Error>> {
         self.require_https()?;
         let response = self
@@ -111,11 +133,13 @@ impl AdminClient {
         Ok(())
     }
 
+    /// Ends the current server-side session and clears it by logging out over the API.
     pub(super) async fn logout(&self) -> Result<(), Box<dyn Error>> {
         self.request(Method::POST, &["api", "logout"], None).await?;
         Ok(())
     }
 
+    /// Exchanges the one-time bootstrap credential for the first administrator and token.
     pub(super) async fn bootstrap_admin(
         &self,
         credential: &str,
@@ -130,6 +154,7 @@ impl AdminClient {
         .await
     }
 
+    /// Creates a user with the requested role.
     pub(super) async fn create_user(
         &self,
         username: &str,
@@ -143,16 +168,19 @@ impl AdminClient {
         .await
     }
 
+    /// Lists all users visible to the authenticated administrator.
     pub(super) async fn list_users(&self) -> Result<Vec<User>, Box<dyn Error>> {
         self.json_request(Method::GET, &["api", "users"], None)
             .await
     }
 
+    /// Returns the user record for `username`.
     pub(super) async fn show_user(&self, username: &str) -> Result<User, Box<dyn Error>> {
         self.json_request(Method::GET, &["api", "users", username], None)
             .await
     }
 
+    /// Changes the role assigned to `username`.
     pub(super) async fn set_user_role(
         &self,
         username: &str,
@@ -167,6 +195,7 @@ impl AdminClient {
         Ok(())
     }
 
+    /// Enables or disables `username` without deleting its records.
     pub(super) async fn set_user_enabled(
         &self,
         username: &str,
@@ -181,12 +210,14 @@ impl AdminClient {
         Ok(())
     }
 
+    /// Deletes the user identified by `username`.
     pub(super) async fn delete_user(&self, username: &str) -> Result<(), Box<dyn Error>> {
         self.request(Method::DELETE, &["api", "users", username], None)
             .await?;
         Ok(())
     }
 
+    /// Creates a token for `username`, optionally expiring at an absolute Unix timestamp.
     pub(super) async fn create_token(
         &self,
         username: &str,
@@ -200,11 +231,13 @@ impl AdminClient {
         .await
     }
 
+    /// Lists token metadata for `username`; raw token values are never returned here.
     pub(super) async fn list_tokens(&self, username: &str) -> Result<Vec<Token>, Box<dyn Error>> {
         self.json_request(Method::GET, &["api", "users", username, "tokens"], None)
             .await
     }
 
+    /// Revokes the token identified by `token_id`.
     pub(super) async fn revoke_token(&self, token_id: &str) -> Result<(), Box<dyn Error>> {
         self.request(Method::DELETE, &["api", "tokens", token_id], None)
             .await?;

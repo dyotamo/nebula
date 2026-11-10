@@ -1,3 +1,9 @@
+//! Stores and restores cache snapshots using a local filesystem or object-store backend.
+//!
+//! Snapshot files contain a versioned header, CRC32 checksum, and serialized entries. Recovery
+//! chooses the newest valid snapshot, preserving each entry's absolute expiration time; retention
+//! removes older valid snapshots only after a new snapshot has been written.
+
 use std::{
     fs, io,
     sync::{
@@ -32,6 +38,7 @@ use crate::{
     metrics::Metrics,
 };
 
+// Header layout: four-byte magic, big-endian format version, then big-endian CRC32.
 const MAGIC: &[u8; 4] = b"NBSC";
 const FORMAT_VERSION: u32 = 1;
 const HEADER_LEN: usize = 12;
@@ -39,6 +46,7 @@ const SNAPSHOT_PREFIX: &str = "snapshot-";
 const SNAPSHOT_EXTENSION: &str = ".nbs";
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Coordinates snapshot I/O, health reporting, metrics, and snapshot serialization access.
 #[derive(Clone)]
 pub(crate) struct PersistenceManager {
     storage: Result<Arc<dyn ObjectStore>, String>,
@@ -100,6 +108,7 @@ impl Drop for PersistenceRecorder {
 }
 
 impl PersistenceManager {
+    /// Builds a persistence manager and records storage initialization errors for later reporting.
     pub(crate) fn new(
         options: PersistenceOptions,
         interval: Duration,
@@ -178,6 +187,10 @@ impl PersistenceManager {
         }
     }
 
+    /// Restores the newest valid snapshot, returning `false` when no snapshot exists.
+    ///
+    /// Corrupt candidates are skipped if another valid snapshot is available. If snapshot files
+    /// exist but none can be decoded, recovery fails rather than silently starting empty.
     pub(crate) async fn restore(&self, store: Arc<CacheStore>) -> io::Result<bool> {
         let mut recorder = PersistenceRecorder::new(Arc::clone(&self.metrics), false);
         info!(storage = %self.storage_label, "cache snapshot restoration started");
@@ -232,8 +245,12 @@ impl PersistenceManager {
         Ok(true)
     }
 
+    /// Captures the cache, writes a new snapshot, then prunes older snapshots to retention.
+    ///
+    /// Concurrent snapshot operations are serialized so naming, writes, and retention cannot race.
     pub(crate) async fn snapshot(&self, store: Arc<CacheStore>) -> io::Result<()> {
         let mut recorder = PersistenceRecorder::new(Arc::clone(&self.metrics), true);
+        // Serialize snapshot writes and retention so concurrent ticks cannot prune one another's output.
         let _operation = Arc::clone(&self.operation).lock_owned().await;
         let object_store = match &self.storage {
             Ok(storage) => Arc::clone(storage),
@@ -275,6 +292,7 @@ impl PersistenceManager {
         }
     }
 
+    /// Writes periodic snapshots until the application enters a terminal lifecycle state.
     pub(crate) async fn run(
         self,
         store: Arc<CacheStore>,
@@ -432,6 +450,7 @@ async fn load_latest_from_store(
             format!("no valid snapshots found: {}", failures.join("; ")),
         ));
     }
+    // The embedded timestamp is authoritative; object names need not sort chronologically.
     snapshots.sort_by_key(|(_, payload)| payload.created_at);
     Ok(snapshots.pop())
 }
@@ -581,6 +600,7 @@ fn read_snapshot(path: &Path) -> io::Result<SnapshotPayload> {
     decode_snapshot(&bytes)
 }
 
+// Validate the envelope before deserializing so truncated or corrupted data is never restored.
 fn decode_snapshot(bytes: &[u8]) -> io::Result<SnapshotPayload> {
     if bytes.len() < HEADER_LEN || &bytes[..4] != MAGIC {
         return Err(io::Error::new(
@@ -674,6 +694,7 @@ impl Timestamp {
     }
 }
 
+// CRC-32 with the reflected IEEE polynomial used to detect accidental snapshot corruption.
 fn crc32(bytes: &[u8]) -> u32 {
     let mut checksum = !0_u32;
     for byte in bytes {

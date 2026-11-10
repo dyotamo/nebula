@@ -1,3 +1,8 @@
+//! Implements the small subset of the systemd notification protocol used by the service.
+//!
+//! Notifications are sent over `NOTIFY_SOCKET`; watchdog pings are enabled only when systemd
+//! advertises a valid watchdog interval for this process.
+
 use std::{io, time::Duration};
 
 use nebula_health::{
@@ -6,6 +11,7 @@ use nebula_health::{
 };
 use tokio::sync::watch;
 
+/// Sends a systemd datagram notification, returning `false` when no notification socket is set.
 pub fn notify(message: &str) -> io::Result<bool> {
     let Ok(socket_path) = std::env::var("NOTIFY_SOCKET") else {
         return Ok(false);
@@ -71,6 +77,7 @@ pub fn notify(message: &str) -> io::Result<bool> {
     }
 }
 
+/// Returns a safe ping interval derived from systemd's watchdog environment, if active.
 pub fn watchdog_interval() -> Option<Duration> {
     let usec = std::env::var("WATCHDOG_USEC").ok()?.parse::<u64>().ok()?;
     if usec == 0 {
@@ -84,6 +91,7 @@ pub fn watchdog_interval() -> Option<Duration> {
     Some(Duration::from_micros(usec / 2).max(Duration::from_millis(100)))
 }
 
+/// Sends `WATCHDOG=1` only while the application is ready and every health component is healthy.
 pub async fn run_watchdog(
     lifecycle: Lifecycle,
     health: HealthManager,

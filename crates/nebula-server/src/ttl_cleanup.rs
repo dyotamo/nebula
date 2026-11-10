@@ -1,3 +1,5 @@
+//! Periodically removes expired entries while the application is active.
+
 use std::{sync::Arc, time::Duration};
 
 use nebula_core::CacheStore;
@@ -5,6 +7,7 @@ use nebula_health::lifecycle::ApplicationState;
 use tokio::time::{interval_at, Instant, MissedTickBehavior};
 use tracing::info;
 
+/// Runs expiration cleanup on a fixed interval until lifecycle shutdown is signaled.
 pub(crate) async fn run(
     store: Arc<CacheStore>,
     interval: Duration,

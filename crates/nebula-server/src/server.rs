@@ -1,3 +1,8 @@
+//! Accepts TCP connections and serves NebulaCache protocol frames.
+//!
+//! Connection admission is bounded by a semaphore, and each connection observes the shared
+//! application lifecycle so requests stop being served as soon as readiness is withdrawn.
+
 use std::{io, sync::Arc, time::Duration};
 
 use nebula_protocol::{
@@ -20,11 +25,18 @@ use nebula_watchdog::WorkerHeartbeat;
 
 use crate::{handler, metrics::Metrics};
 
+/// Limits applied to incoming protocol frames and concurrently accepted connections.
 pub(crate) struct ServerLimits {
+    /// Maximum lengths accepted by the protocol frame decoder and encoder.
     pub frame: FrameLimits,
+    /// Number of concurrent connections permitted by the listener.
     pub max_connections: usize,
 }
 
+/// Runs the listener until shutdown, then waits for all accepted connection tasks to finish.
+///
+/// Authentication is rejected unless TLS is enabled, preventing bearer tokens from crossing a
+/// plaintext connection.
 pub(crate) async fn run(
     listener: TcpListener,
     store: Arc<CacheStore>,
@@ -74,12 +86,15 @@ pub(crate) async fn run(
                     break;
                 }
             }
+            // Stop admitting new sockets while degraded; already accepted connections are
+            // separately told to stop when their lifecycle receiver changes.
             accepted = listener.accept(), if state == ApplicationState::Ready => {
                 let (socket, peer) = accepted?;
                 if *lifecycle.borrow() != ApplicationState::Ready {
                     drop(socket);
                     continue;
                 }
+                // Recheck after accept because readiness may have changed while accept completed.
                 let connection_permit = match Arc::clone(&connection_slots).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
@@ -96,6 +111,8 @@ pub(crate) async fn run(
                 let tls_acceptor = tls_acceptor.clone();
                 let auth_store = auth_store.clone();
                 connections.spawn(async move {
+                    // These guards keep admission capacity and connection metrics balanced across
+                    // every return path, including TLS and protocol errors.
                     let _connection_permit = connection_permit;
                     let _active_connection = ActiveConnection(metrics.clone());
                     if let Some(acceptor) = tls_acceptor {
@@ -144,6 +161,10 @@ impl Drop for ActiveConnection {
     }
 }
 
+/// Reads and responds to requests on one stream until it closes or the application stops.
+///
+/// With authentication enabled, the first frame must authenticate successfully; the resulting
+/// identity is then checked against each operation's required role.
 async fn serve_connection<S>(
     mut socket: S,
     store: Arc<CacheStore>,
@@ -185,6 +206,8 @@ where
             return Ok(());
         }
 
+        // Authentication is a one-time connection handshake; once identity is set, later AUTH
+        // frames are denied and each operation is checked against that identity's role.
         let (response, close_after_response) = if let Some(auth_store) = auth_store.as_ref() {
             match identity.as_ref() {
                 None => {
