@@ -272,6 +272,79 @@
       padding: 32px clamp(20px, 4vw, 54px) 56px
     }
 
+    .admin-page {
+      display: none
+    }
+
+    .admin-page.active {
+      display: block
+    }
+
+    .page-heading {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 18px;
+      margin: 0 0 22px
+    }
+
+    .page-heading h1 {
+      margin: 7px 0 5px;
+      color: var(--text);
+      font-size: clamp(26px, 3vw, 32px);
+      font-weight: 680;
+      letter-spacing: -.045em
+    }
+
+    .page-heading p {
+      margin: 0;
+      color: var(--secondary);
+      font-size: 13px
+    }
+
+    .config-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin: 0 0 28px
+    }
+
+    .config-card {
+      position: relative;
+      min-height: 124px;
+      padding: 19px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: linear-gradient(135deg, var(--surface), color-mix(in srgb, var(--primary) 8%, var(--surface)))
+    }
+
+    .config-card::after {
+      position: absolute;
+      right: -20px;
+      bottom: -48px;
+      width: 130px;
+      height: 130px;
+      border: 1px solid color-mix(in srgb, var(--primary) 25%, transparent);
+      border-radius: 50%;
+      content: ""
+    }
+
+    .config-value {
+      margin-top: 13px;
+      color: var(--text);
+      font-size: 20px;
+      font-weight: 650;
+      letter-spacing: -.03em;
+      text-transform: capitalize
+    }
+
+    .config-detail {
+      margin-top: 5px;
+      color: var(--secondary);
+      font-size: 11px
+    }
+
     .intro {
       margin: 0 0 18px
     }
@@ -300,9 +373,9 @@
 
     .metrics {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-      margin: 0 0 28px
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin: 0 0 24px
     }
 
     .metric,
@@ -544,27 +617,40 @@
 
     .health-list {
       display: grid;
-      gap: 0;
-      padding: 4px 17px
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 9px;
+      padding: 14px 17px
     }
 
     .health-row {
       display: flex;
-      min-height: 38px;
+      min-height: 58px;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      border-bottom: 1px solid var(--line);
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
       color: var(--secondary);
-      font-size: 12px
+      background: var(--elevated);
+      font-size: 11px
     }
 
-    .health-row:last-child {
-      border-bottom: 0
+    #recent-failures {
+      grid-template-columns: 1fr;
+      padding-top: 0
+    }
+
+    #recent-failures:empty {
+      display: none
     }
 
     .health-ok {
-      color: var(--success)
+      color: var(--success-text)
+    }
+
+    .health-degraded {
+      color: var(--warning-text)
     }
 
     .health-bad,
@@ -1122,6 +1208,10 @@
         grid-template-columns: 204px minmax(0, 1fr)
       }
 
+      .metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr))
+      }
+
       .runtime-metrics {
         grid-template-columns: repeat(2, minmax(0, 1fr))
       }
@@ -1187,6 +1277,10 @@
         grid-template-columns: minmax(0, 1fr)
       }
 
+      .health-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr))
+      }
+
       .runtime-section > .section-heading,
       .runtime-metrics {
         grid-column: 1
@@ -1234,6 +1328,16 @@
     }
 
     @media (max-width: 520px) {
+      .config-grid,
+      .health-list {
+        grid-template-columns: 1fr
+      }
+
+      .page-heading {
+        align-items: flex-start;
+        flex-direction: column
+      }
+
       .top-context {
         display: none
       }
@@ -1371,12 +1475,10 @@
           </svg></div><span>NebulaCache</span>
       </div>
       <div class="rail-caption">OPERATIONS</div>
-      <nav class="rail-nav" aria-label="Console sections">
-        <a href="#overview" aria-current="location"><span class="nav-mark">01</span>Cache overview</a>
-        <a href="#runtime"><span class="nav-mark">02</span>Runtime metrics</a>
-        <a href="#health"><span class="nav-mark">03</span>Component health</a>
-        <a href="#entries-section"><span class="nav-mark">04</span>Entries</a>
-        <a href="#users-section" id="users-nav" hidden><span class="nav-mark">05</span>Users &amp; tokens</a>
+      <nav class="rail-nav" aria-label="Console pages">
+        <a href="#dashboard-page" aria-current="page"><span class="nav-mark">01</span>Dashboard</a>
+        <a href="#entries-page"><span class="nav-mark">02</span>Entries</a>
+        <a href="#users-page" id="users-nav" hidden><span class="nav-mark">03</span>Users &amp; tokens</a>
       </nav>
       <div class="rail-meta"><span class="rail-meta-mark"></span><span>Embedded admin console</span></div>
     </aside>
@@ -1387,24 +1489,48 @@
           <div class="status"><span class="dot"></span>Node connected</div>
           <button class="button theme-toggle" id="theme-toggle" type="button" aria-label="Dark theme" aria-pressed="true">Dark mode</button>
           <button class="button" id="refresh" type="button">Refresh data</button>
+          <button class="button" id="logout" type="button">Sign out</button>
         </div>
       </header>
       <main id="dashboard" style="display:none">
-      <div class="intro" id="overview">
-        <div class="eyebrow">Cache operations</div>
-        <h1>Cache overview</h1>
-        <p>Monitor node activity and manage the data held in this cache.</p>
-      </div>
-      <div class="metrics">
-        <div class="metric">
-          <div class="metric-label">Cache entries</div>
-          <div class="metric-value" id="entry-count">—</div>
+      <section class="admin-page active" id="dashboard-page" aria-labelledby="dashboard-title">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">Cache operations</div>
+            <h1 id="dashboard-title">Dashboard</h1>
+            <p>Live view of your cache node, configured storage, and runtime health.</p>
+          </div>
         </div>
-        <div class="metric">
-          <div class="metric-label">Console session</div>
-          <div class="metric-value session-state">Authenticated</div>
+        <div class="metrics">
+          <div class="metric">
+            <div><div class="metric-label">Cache entries</div><div class="metric-value" id="entry-count">—</div></div>
+            <span class="nav-mark">DATA</span>
+          </div>
+          <div class="metric">
+            <div><div class="metric-label">Cache memory</div><div class="metric-value" id="overview-memory">—</div></div>
+            <span class="nav-mark">RAM</span>
+          </div>
+          <div class="metric">
+            <div><div class="metric-label">Capacity</div><div class="metric-value" id="cache-capacity">—</div></div>
+            <span class="nav-mark">LIMIT</span>
+          </div>
+          <div class="metric">
+            <div><div class="metric-label">Node uptime</div><div class="metric-value" id="overview-uptime">—</div></div>
+            <span class="nav-mark">LIVE</span>
+          </div>
         </div>
-      </div>
+        <div class="config-grid" aria-label="Configured storage backends">
+          <article class="config-card">
+            <div class="metric-label">Persistence backend</div>
+            <div class="config-value" id="persistence-backend">Loading…</div>
+            <div class="config-detail" id="persistence-mode">Cache persistence configuration</div>
+          </article>
+          <article class="config-card">
+            <div class="metric-label">Authentication storage</div>
+            <div class="config-value" id="auth-backend">Loading…</div>
+            <div class="config-detail" id="auth-storage-state">Authentication configuration</div>
+          </article>
+        </div>
       <section class="runtime-section" id="runtime" aria-label="Runtime metrics and persistence">
       <h2 class="section-heading">Runtime &amp; persistence</h2>
       <div class="runtime-metrics" id="runtime-metrics">
@@ -1449,10 +1575,44 @@
         <div class="health-list" id="component-health"></div>
         <div class="health-list" id="recent-failures"></div>
       </section>
-      <section class="panel" id="users-section" style="display:none; margin-bottom:20px">
+      </section>
+      <section class="admin-page" id="entries-page" aria-labelledby="entries-title">
+        <div class="page-heading">
+          <div><div class="eyebrow">Cache data</div><h1 id="entries-title">Entries</h1><p>Browse, search, create, edit, or remove cached values.</p></div>
+        </div>
+      <section class="panel entries-panel" id="entries-section">
+        <div class="panel-head">
+          <div><div class="panel-title">Cache entries</div><div class="panel-sub">Keys and values are shown as UTF-8 where possible.</div></div>
+          <div class="actions"><button class="button primary" id="add">New entry</button><button class="button danger" id="clear-cache">Clear cache</button></div>
+        </div>
+        <div class="list-controls">
+          <input class="search-input" id="search" type="search" placeholder="Search keys and values..." aria-label="Search cache entries">
+          <div class="result-count" id="result-count"></div>
+        </div>
+        <div class="table-scroll-note" aria-hidden="true">Scroll horizontally for full values; actions stay in view.</div>
+        <div class="table-wrap" role="region" aria-label="Cache entries table" tabindex="0">
+          <table>
+            <thead>
+              <tr><th scope="col">Key</th><th scope="col">Value</th><th scope="col" class="hide-mobile">Expiry</th><th scope="col" class="actions-heading">Actions</th></tr>
+            </thead>
+            <tbody id="entries"></tbody>
+          </table>
+          <div class="empty" id="empty" style="display:none"><strong id="empty-title">Your cache is empty</strong><span id="empty-message">Create an entry to get started.</span></div>
+        </div>
+        <div class="pagination">
+          <div class="pagination-status" id="pagination-status"></div>
+          <div class="pagination-actions"><button class="button" id="previous-page">Previous</button><span class="pagination-status" id="page-status"></span><button class="button" id="next-page">Next</button></div>
+        </div>
+      </section>
+      </section>
+      <section class="admin-page" id="users-page" aria-labelledby="users-title">
+        <div class="page-heading">
+          <div><div class="eyebrow">Access control</div><h1 id="users-title">Users &amp; tokens</h1><p>Manage access roles, account status, and API credentials.</p></div>
+          <button class="button" id="refresh-users" type="button">Refresh users</button>
+        </div>
+      <section class="panel" id="users-section" style="margin-bottom:20px">
         <div class="panel-head">
           <div><div class="panel-title">Users</div><div class="panel-sub">Create accounts and update their access roles or status.</div></div>
-          <button class="button" id="refresh-users" type="button">Refresh users</button>
         </div>
         <form class="admin-form" id="user-form">
           <div class="field"><label for="new-username">Username</label><input id="new-username" required autocomplete="off" maxlength="64"></div>
@@ -1460,6 +1620,10 @@
           <button class="button primary" type="submit">Create user</button>
         </form>
         <div class="admin-list" id="user-list" aria-live="polite"></div>
+        <div class="pagination">
+          <div class="pagination-status" id="user-pagination-status"></div>
+          <div class="pagination-actions"><button class="button" id="previous-user-page" type="button">Previous</button><span class="pagination-status" id="user-page-status"></span><button class="button" id="next-user-page" type="button">Next</button></div>
+        </div>
         <div class="panel-head">
           <div><div class="panel-title">API tokens</div><div class="panel-sub">Tokens are displayed only once when created.</div></div>
         </div>
@@ -1470,44 +1634,11 @@
         </form>
         <div class="token-output" id="token-output" role="status"></div>
         <div class="admin-list" id="token-list" aria-live="polite"></div>
-      </section>
-      <section class="panel entries-panel" id="entries-section">
-        <div class="panel-head">
-          <div>
-            <div class="panel-title">Entries</div>
-            <div class="panel-sub">Keys and values are shown as UTF-8 where possible.</div>
-          </div>
-          <div class="actions"><button class="button primary"
-              id="add">New entry</button><button class="button danger" id="clear-cache">Clear cache</button><button
-              class="button" id="logout">Sign out</button></div>
-        </div>
-        <div class="list-controls">
-          <input class="search-input" id="search" type="search" placeholder="Search keys and values..."
-            aria-label="Search cache entries">
-          <div class="result-count" id="result-count"></div>
-        </div>
-        <div class="table-scroll-note" aria-hidden="true">Scroll horizontally for full values; actions stay in view.</div>
-        <div class="table-wrap" role="region" aria-label="Cache entries table" tabindex="0">
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Key</th>
-                <th scope="col">Value</th>
-                <th scope="col" class="hide-mobile">Expiry</th>
-                <th scope="col" class="actions-heading">Actions</th>
-              </tr>
-            </thead>
-            <tbody id="entries"></tbody>
-          </table>
-          <div class="empty" id="empty" style="display:none"><strong id="empty-title">Your cache is empty</strong><span
-              id="empty-message">Create an entry to get started.</span></div>
-        </div>
         <div class="pagination">
-          <div class="pagination-status" id="pagination-status"></div>
-          <div class="pagination-actions"><button class="button" id="previous-page">Previous</button>
-            <span class="pagination-status" id="page-status"></span><button class="button" id="next-page">Next</button>
-          </div>
+          <div class="pagination-status" id="token-pagination-status"></div>
+          <div class="pagination-actions"><button class="button" id="previous-token-page" type="button">Previous</button><span class="pagination-status" id="token-page-status"></span><button class="button" id="next-token-page" type="button">Next</button></div>
         </div>
+      </section>
       </section>
     </main>
     <div class="login-wrap" id="login-screen">
@@ -1599,14 +1730,20 @@
     setTheme(document.documentElement.dataset.theme || (systemTheme.matches ? 'light' : 'dark'));
 
     let entries = [];
+    let allUsers = [];
+    let allTokens = [];
     let editing = null;
     let currentPage = 1;
+    let currentUserPage = 1;
+    let currentTokenPage = 1;
     const pageSize = 20;
+    const adminPageSize = 10;
     let searchTimer;
     let runtimeRefreshTimer;
     let modalReturnFocus = null;
     let csrfToken = null;
     let currentRole = null;
+    let activePage = 'dashboard-page';
 
     function hex(bytes) {
       return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
@@ -1651,7 +1788,6 @@
       $('topbar').setAttribute('aria-hidden', 'true');
       csrfToken = null;
       currentRole = null;
-      $('users-section').style.display = 'none';
       $('users-nav').hidden = true;
       $('login-screen').style.display = 'grid';
       $('admin-token').focus();
@@ -1664,11 +1800,48 @@
       $('topbar').inert = false;
       $('topbar').removeAttribute('aria-hidden');
       $('dashboard').style.display = 'block';
-      const canManageUsers = currentRole === 'admin';
-      $('users-section').style.display = canManageUsers ? 'block' : 'none';
-      $('users-nav').hidden = !canManageUsers;
-      if (canManageUsers) refreshUsers();
+      $('users-nav').hidden = currentRole !== 'admin';
+      loadDashboardConfig();
+      activatePage();
       if (!runtimeRefreshTimer) runtimeRefreshTimer = setInterval(refreshRuntimeMetrics, 5000);
+    }
+
+    function activatePage() {
+      const requestedPage = location.hash.slice(1);
+      const allowedPages = currentRole === 'admin'
+        ? ['dashboard-page', 'entries-page', 'users-page']
+        : ['dashboard-page', 'entries-page'];
+      activePage = allowedPages.includes(requestedPage) ? requestedPage : 'dashboard-page';
+      if (location.hash !== `#${activePage}`) history.replaceState(null, '', `#${activePage}`);
+      document.querySelectorAll('.admin-page').forEach(page => {
+        page.classList.toggle('active', page.id === activePage);
+      });
+      document.querySelectorAll('.rail-nav a').forEach(link => {
+        if (link.hash === `#${activePage}`) link.setAttribute('aria-current', 'page');
+        else link.removeAttribute('aria-current');
+      });
+      refreshCurrentPage();
+    }
+
+    function refreshCurrentPage() {
+      if (activePage === 'dashboard-page') refreshRuntimeMetrics();
+      if (activePage === 'entries-page') refreshEntries();
+      if (activePage === 'users-page' && currentRole === 'admin') refreshUsers();
+    }
+
+    async function loadDashboardConfig() {
+      const response = await api('/api/config');
+      if (!response.ok) return;
+      const config = await response.json();
+      $('persistence-backend').textContent = config.persistence_backend;
+      $('persistence-mode').textContent = config.persistence_mode === 'snapshot'
+        ? `${config.persistence_mode} persistence enabled`
+        : 'Volatile mode · cache clears when the process stops';
+      $('auth-backend').textContent = config.auth_backend;
+      $('auth-storage-state').textContent = config.authentication_enabled
+        ? 'Authentication enabled · users and tokens stored here'
+        : 'Protocol authentication is disabled';
+      $('cache-capacity').textContent = formatBytes(config.max_cache_size_bytes);
     }
 
     function formatBytes(value) {
@@ -1752,6 +1925,9 @@
       $('latency').textContent = `${data.avg_latency_ms.toFixed(2)} ms`;
       $('connections').textContent = data.active_connections.toLocaleString();
       $('cache-memory').textContent = formatBytes(data.cache_memory_bytes);
+      $('entry-count').textContent = data.cache_entries.toLocaleString();
+      $('overview-memory').textContent = formatBytes(data.cache_memory_bytes);
+      $('overview-uptime').textContent = formatUptime(data.uptime_secs);
       $('uptime').textContent = formatUptime(data.uptime_secs);
       $('lifecycle-health').textContent = `${data.state} / ${data.health}`;
       const lastSnapshot = data.last_snapshot_success_timestamp_secs
@@ -1765,7 +1941,9 @@
         const name = document.createElement('span');
         name.textContent = component.name.replaceAll('_', ' ');
         const status = document.createElement('strong');
-        status.className = component.status === 'healthy' ? 'health-ok' : 'health-bad';
+        status.className = component.status === 'healthy'
+          ? 'health-ok'
+          : component.status === 'degraded' ? 'health-degraded' : 'health-bad';
         status.textContent = component.status;
         row.append(name, status);
         $('component-health').append(row);
@@ -1787,7 +1965,7 @@
       renderHistory(data.history);
     }
 
-    async function refresh(page = currentPage) {
+    async function refreshEntries(page = currentPage) {
       currentPage = page;
       const params = new URLSearchParams({
         page: String(currentPage),
@@ -1854,7 +2032,6 @@
         row.append(key, value, ttl, actions);
         $('entries').append(row);
       }
-      refreshRuntimeMetrics();
     }
 
     function toast(message) {
@@ -1869,10 +2046,27 @@
         if (response.status !== 401) toast('Unable to load users');
         return;
       }
-      const users = await response.json();
       const previousSelection = $('token-user').value;
-      $('user-list').replaceChildren();
+      allUsers = await response.json();
+      currentUserPage = Math.min(currentUserPage, Math.max(1, Math.ceil(allUsers.length / adminPageSize)));
       $('token-user').replaceChildren();
+      for (const user of allUsers) $('token-user').add(new Option(user.username, user.username));
+      if (allUsers.some(user => user.username === previousSelection)) $('token-user').value = previousSelection;
+      renderUsers();
+      await refreshTokens();
+    }
+
+    function renderUsers() {
+      const pageCount = Math.max(1, Math.ceil(allUsers.length / adminPageSize));
+      const start = (currentUserPage - 1) * adminPageSize;
+      const users = allUsers.slice(start, start + adminPageSize);
+      $('user-list').replaceChildren();
+      $('user-pagination-status').textContent = allUsers.length
+        ? `Showing ${start + 1}–${Math.min(start + adminPageSize, allUsers.length)} of ${allUsers.length} users`
+        : 'No users to show';
+      $('user-page-status').textContent = `Page ${currentUserPage} of ${pageCount}`;
+      $('previous-user-page').disabled = currentUserPage <= 1;
+      $('next-user-page').disabled = currentUserPage >= pageCount;
       for (const user of users) {
         const row = document.createElement('div');
         row.className = 'admin-row';
@@ -1882,8 +2076,7 @@
         const role = document.createElement('select');
         role.setAttribute('aria-label', `Role for ${user.username}`);
         for (const [value, label] of [['readonly', 'Read only'], ['readwrite', 'Read and write'], ['admin', 'Administrator']]) {
-          const option = new Option(label, value, false, user.role === value);
-          role.add(option);
+          role.add(new Option(label, value, false, user.role === value));
         }
         role.onchange = async () => {
           const result = await api(`/api/users/${encodeURIComponent(user.username)}/role`, {
@@ -1926,22 +2119,39 @@
         actions.append(enabled, remove);
         row.append(username, role, status, actions);
         $('user-list').append(row);
-        $('token-user').add(new Option(user.username, user.username));
       }
-      if (users.some(user => user.username === previousSelection)) $('token-user').value = previousSelection;
-      await refreshTokens();
     }
 
     async function refreshTokens() {
       const username = $('token-user').value;
       $('token-list').replaceChildren();
-      if (!username) return;
+      if (!username) {
+        allTokens = [];
+        renderTokens();
+        return;
+      }
       const response = await api(`/api/users/${encodeURIComponent(username)}/tokens`);
       if (!response.ok) {
         if (response.status !== 401) toast('Unable to load tokens');
         return;
       }
-      for (const token of await response.json()) {
+      allTokens = await response.json();
+      currentTokenPage = Math.min(currentTokenPage, Math.max(1, Math.ceil(allTokens.length / adminPageSize)));
+      renderTokens();
+    }
+
+    function renderTokens() {
+      const pageCount = Math.max(1, Math.ceil(allTokens.length / adminPageSize));
+      const start = (currentTokenPage - 1) * adminPageSize;
+      const tokens = allTokens.slice(start, start + adminPageSize);
+      $('token-list').replaceChildren();
+      $('token-pagination-status').textContent = allTokens.length
+        ? `Showing ${start + 1}–${Math.min(start + adminPageSize, allTokens.length)} of ${allTokens.length} tokens`
+        : 'No tokens to show';
+      $('token-page-status').textContent = `Page ${currentTokenPage} of ${pageCount}`;
+      $('previous-token-page').disabled = currentTokenPage <= 1;
+      $('next-token-page').disabled = currentTokenPage >= pageCount;
+      for (const token of tokens) {
         const row = document.createElement('div');
         row.className = 'admin-row';
         const id = document.createElement('code');
@@ -2009,7 +2219,7 @@
       const response = await api(`/api/entries/${entry.key}`, { method: 'DELETE' });
       if (response.ok) {
         toast('Entry deleted');
-        refresh();
+        refreshEntries();
       } else {
         toast('Unable to delete entry');
       }
@@ -2032,7 +2242,6 @@
       csrfToken = credentials.csrf_token;
       currentRole = credentials.role;
       showDashboard();
-      refresh();
     };
 
     $('bootstrap-form').onsubmit = async event => {
@@ -2097,8 +2306,27 @@
       toast('Token created');
       refreshTokens();
     };
-    $('token-user').onchange = refreshTokens;
+    $('token-user').onchange = () => {
+      currentTokenPage = 1;
+      refreshTokens();
+    };
     $('refresh-users').onclick = refreshUsers;
+    $('previous-user-page').onclick = () => {
+      currentUserPage--;
+      renderUsers();
+    };
+    $('next-user-page').onclick = () => {
+      currentUserPage++;
+      renderUsers();
+    };
+    $('previous-token-page').onclick = () => {
+      currentTokenPage--;
+      renderTokens();
+    };
+    $('next-token-page').onclick = () => {
+      currentTokenPage++;
+      renderTokens();
+    };
 
     $('entry-form').onsubmit = async event => {
       event.preventDefault();
@@ -2116,7 +2344,7 @@
         const wasEditing = !!editing;
         closeEntry();
         toast(wasEditing ? 'Entry updated' : 'Entry created');
-        refresh();
+        refreshEntries();
       } else {
         $('entry-error').textContent = response.status === 413
           ? 'Key or value exceeds the node limits.'
@@ -2125,7 +2353,7 @@
     };
 
     $('add').onclick = () => openEntry();
-    $('refresh').onclick = () => refresh();
+    $('refresh').onclick = refreshCurrentPage;
     $('clear-cache').onclick = async () => {
       if (!confirm('Clear every cache entry? This cannot be undone.')) return;
 
@@ -2137,14 +2365,15 @@
 
       $('search').value = '';
       toast('Cache cleared');
-      refresh(1);
+      refreshEntries(1);
+      refreshRuntimeMetrics();
     };
     $('search').oninput = () => {
       clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => refresh(1), 180);
+      searchTimer = setTimeout(() => refreshEntries(1), 180);
     };
-    $('previous-page').onclick = () => refresh(currentPage - 1);
-    $('next-page').onclick = () => refresh(currentPage + 1);
+    $('previous-page').onclick = () => refreshEntries(currentPage - 1);
+    $('next-page').onclick = () => refreshEntries(currentPage + 1);
     $('logout').onclick = async () => {
       await api('/api/logout', { method: 'POST' });
       showLogin();
@@ -2179,18 +2408,9 @@
       }
     });
 
-    function updateActiveSection() {
-      const currentSection = location.hash || '#overview';
-      document.querySelectorAll('.rail-nav a').forEach(link => {
-        if (link.getAttribute('href') === currentSection) {
-          link.setAttribute('aria-current', 'location');
-        } else {
-          link.removeAttribute('aria-current');
-        }
-      });
-    }
-    window.addEventListener('hashchange', updateActiveSection);
-    updateActiveSection();
+    window.addEventListener('hashchange', () => {
+      if ($('dashboard').style.display !== 'none') activatePage();
+    });
 
     api('/api/session').then(async response => {
       if (!response.ok) {
@@ -2201,7 +2421,6 @@
       csrfToken = session.csrf_token;
       currentRole = session.role;
       showDashboard();
-      refresh();
     });
   </script>
 </body>

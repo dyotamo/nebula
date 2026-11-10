@@ -309,7 +309,25 @@ impl Application {
             let admin_lifecycle_state = self.lifecycle.clone();
             let admin_health = self.health.clone();
             let admin_metrics = Arc::clone(&self.metrics);
-            let dashboard_enabled = self.config.admin.metrics_dashboard;
+            let dashboard = admin::DashboardOptions {
+                enabled: self.config.admin.metrics_dashboard,
+                config: admin::DashboardConfig {
+                    persistence_mode: match self.config.persistence.mode {
+                        PersistenceMode::Volatile => "volatile",
+                        PersistenceMode::Snapshot => "snapshot",
+                    },
+                    persistence_backend: match self.config.persistence.snapshot_backend {
+                        SnapshotBackend::Filesystem => "filesystem",
+                        SnapshotBackend::S3 => "s3",
+                    },
+                    auth_backend: match self.config.security.auth.backend {
+                        AuthStorageBackend::Sqlite => "sqlite",
+                        AuthStorageBackend::Postgres => "postgresql",
+                    },
+                    authentication_enabled: self.config.security.authentication,
+                    max_cache_size_bytes: self.config.resource_limits.max_cache_size_bytes,
+                },
+            };
             let admin_auth_store = auth_store.clone();
             let admin_heartbeat = self.watchdog.register_worker(
                 "admin",
@@ -328,7 +346,7 @@ impl Application {
                     admin_heartbeat,
                     admin_metrics,
                     admin_health.clone(),
-                    dashboard_enabled,
+                    dashboard,
                     started_tx,
                 )
                 .await;

@@ -54,6 +54,21 @@ struct ConsoleSession {
     csrf_token: String,
 }
 
+#[derive(Clone, Serialize)]
+pub(crate) struct DashboardConfig {
+    pub(crate) persistence_mode: &'static str,
+    pub(crate) persistence_backend: &'static str,
+    pub(crate) auth_backend: &'static str,
+    pub(crate) authentication_enabled: bool,
+    pub(crate) max_cache_size_bytes: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct DashboardOptions {
+    pub(crate) enabled: bool,
+    pub(crate) config: DashboardConfig,
+}
+
 #[derive(Clone)]
 struct ConsoleState {
     store: Arc<CacheStore>,
@@ -64,6 +79,7 @@ struct ConsoleState {
     health: HealthManager,
     lifecycle: watch::Receiver<ApplicationState>,
     dashboard_enabled: bool,
+    dashboard_config: DashboardConfig,
 }
 
 #[derive(Deserialize)]
@@ -175,7 +191,7 @@ pub(crate) async fn run(
     heartbeat: WorkerHeartbeat,
     metrics: Arc<Metrics>,
     health: HealthManager,
-    dashboard_enabled: bool,
+    dashboard: DashboardOptions,
     started: oneshot::Sender<()>,
 ) -> io::Result<()> {
     info!(address = %listener.local_addr()?, "NebulaCache admin console listening");
@@ -186,7 +202,7 @@ pub(crate) async fn run(
         lifecycle.clone(),
         metrics,
         health,
-        dashboard_enabled,
+        dashboard,
     );
     let shutdown = wait_for_shutdown(lifecycle);
     let mut server = Box::pin(async move {
@@ -212,7 +228,7 @@ fn router(
     lifecycle: watch::Receiver<ApplicationState>,
     metrics: Arc<Metrics>,
     health: HealthManager,
-    dashboard_enabled: bool,
+    dashboard: DashboardOptions,
 ) -> Router {
     // Allow hex expansion of the value plus fixed JSON/key overhead.
     let body_limit = limits.max_value_len.saturating_mul(2).saturating_add(4096);
@@ -224,7 +240,8 @@ fn router(
         metrics,
         health,
         lifecycle: lifecycle.clone(),
-        dashboard_enabled,
+        dashboard_enabled: dashboard.enabled,
+        dashboard_config: dashboard.config,
     });
 
     // Entries support list/set/clear and per-key delete; users and tokens expose
@@ -232,6 +249,7 @@ fn router(
     Router::new()
         .route("/", get(index))
         .route("/api/metrics", get(dashboard_metrics))
+        .route("/api/config", get(dashboard_configuration))
         .route("/api/login", post(login))
         .route("/api/session", get(session))
         .route("/api/logout", post(logout))
@@ -273,6 +291,16 @@ async fn dashboard_metrics(State(state): State<Arc<ConsoleState>>, headers: Head
             .dashboard_snapshot(&state.store, *state.lifecycle.borrow(), &state.health),
     )
     .into_response()
+}
+
+async fn dashboard_configuration(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+) -> Response {
+    if !admin_authorized(&state, &headers, false) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(&state.dashboard_config).into_response()
 }
 
 async fn require_ready(
@@ -869,7 +897,7 @@ mod tests {
         dashboard_metrics, decode_hex, delete_entry, encode_hex, list_entries, list_tokens, login,
         revoke_token, router, session, set_entry, show_user, wait_for_shutdown,
         BootstrapAdminRequest, ConsoleSession, ConsoleState, CreateTokenRequest, CreateUserRequest,
-        ListEntriesQuery, LoginRequest, SESSION_COOKIE,
+        DashboardConfig, DashboardOptions, ListEntriesQuery, LoginRequest, SESSION_COOKIE,
     };
     use crate::metrics::Metrics;
     use axum::{
@@ -906,7 +934,16 @@ mod tests {
                     receiver.clone(),
                     Metrics::new(),
                     HealthManager::new(health_lifecycle, false),
-                    true,
+                    DashboardOptions {
+                        enabled: true,
+                        config: DashboardConfig {
+                            persistence_mode: "volatile",
+                            persistence_backend: "filesystem",
+                            auth_backend: "sqlite",
+                            authentication_enabled: true,
+                            max_cache_size_bytes: 64 * 1024 * 1024,
+                        },
+                    },
                 ),
             )
             .with_graceful_shutdown(wait_for_shutdown(receiver))
@@ -942,6 +979,13 @@ mod tests {
             health: HealthManager::new(lifecycle.clone(), false),
             lifecycle: lifecycle.subscribe(),
             dashboard_enabled: true,
+            dashboard_config: DashboardConfig {
+                persistence_mode: "volatile",
+                persistence_backend: "filesystem",
+                auth_backend: "sqlite",
+                authentication_enabled: true,
+                max_cache_size_bytes: 64 * 1024 * 1024,
+            },
         });
 
         let anonymous = list_entries(
@@ -1081,6 +1125,13 @@ mod tests {
             health: HealthManager::new(lifecycle.clone(), false),
             lifecycle: lifecycle.subscribe(),
             dashboard_enabled: true,
+            dashboard_config: DashboardConfig {
+                persistence_mode: "volatile",
+                persistence_backend: "filesystem",
+                auth_backend: "sqlite",
+                authentication_enabled: true,
+                max_cache_size_bytes: 64 * 1024 * 1024,
+            },
         });
 
         let denied_login = login(
@@ -1142,6 +1193,13 @@ mod tests {
             health: HealthManager::new(lifecycle.clone(), false),
             lifecycle: lifecycle.subscribe(),
             dashboard_enabled: true,
+            dashboard_config: DashboardConfig {
+                persistence_mode: "volatile",
+                persistence_backend: "filesystem",
+                auth_backend: "sqlite",
+                authentication_enabled: true,
+                max_cache_size_bytes: 64 * 1024 * 1024,
+            },
         });
 
         let response = bootstrap_admin(
@@ -1188,6 +1246,13 @@ mod tests {
             health: HealthManager::new(lifecycle.clone(), false),
             lifecycle: lifecycle.subscribe(),
             dashboard_enabled: true,
+            dashboard_config: DashboardConfig {
+                persistence_mode: "volatile",
+                persistence_backend: "filesystem",
+                auth_backend: "sqlite",
+                authentication_enabled: true,
+                max_cache_size_bytes: 64 * 1024 * 1024,
+            },
         });
         let authenticated = login(
             State(Arc::clone(&state)),
