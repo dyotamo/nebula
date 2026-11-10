@@ -247,6 +247,10 @@ class NebulaCacheTests(unittest.TestCase):
         with self.assertRaises(CacheConnectionError):
             NebulaCache("127.0.0.1:1", timeout=0.1).ping()
 
+    def test_token_authentication_can_use_plaintext(self) -> None:
+        cache = self.make_cache(token="token")
+        self.assertEqual(cache.token, "token")
+
     def test_server_error_exposes_protocol_status(self) -> None:
         with self.assertRaises(CacheResponseError) as raised:
             self.cache.get("failure")

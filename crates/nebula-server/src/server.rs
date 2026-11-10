@@ -35,8 +35,7 @@ pub(crate) struct ServerLimits {
 
 /// Runs the listener until shutdown, then waits for all accepted connection tasks to finish.
 ///
-/// Authentication is rejected unless TLS is enabled, preventing bearer tokens from crossing a
-/// plaintext connection.
+/// Optional token authentication is handled after any configured TLS handshake.
 pub(crate) async fn run(
     listener: TcpListener,
     store: Arc<CacheStore>,
@@ -48,12 +47,6 @@ pub(crate) async fn run(
     metrics: Arc<Metrics>,
     started: oneshot::Sender<()>,
 ) -> io::Result<()> {
-    if auth_store.is_some() && tls_acceptor.is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "authentication requires TLS",
-        ));
-    }
     info!(address = %listener.local_addr()?, "NebulaCache node listening");
     let _ = started.send(());
     let ServerLimits {

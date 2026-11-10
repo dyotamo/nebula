@@ -2,7 +2,7 @@ use std::{env, error::Error, io, path::PathBuf, process};
 
 use nebulacache::{Config, NebulaCache};
 
-const USAGE: &str = "Usage: cache_cli [--address HOST:PORT] [--tls-ca PEM] <ping|set|get|delete> [arguments]\n\nCommands:\n  ping\n  set <key> <value> [--ttl SECONDS]\n  get <key>\n  delete <key>\n\nEnvironment:\n  NEBULA_ADDR      Server address (default: 127.0.0.1:7001)\n  NEBULA_TLS_CA    PEM CA file; enables TLS\n  NEBULA_TOKEN     API token for TLS-authenticated servers";
+const USAGE: &str = "Usage: cache_cli [--address HOST:PORT] [--tls-ca PEM] <ping|set|get|delete> [arguments]\n\nCommands:\n  ping\n  set <key> <value> [--ttl SECONDS]\n  get <key>\n  delete <key>\n\nEnvironment:\n  NEBULA_ADDR      Server address (default: 127.0.0.1:7001)\n  NEBULA_TLS_CA    PEM CA file; enables TLS\n  NEBULA_TOKEN     API token for authenticated servers (TLS is optional)";
 
 #[tokio::main]
 async fn main() {

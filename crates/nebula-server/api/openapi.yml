@@ -3,8 +3,10 @@ info:
   title: NebulaCache Admin API
   version: 0.1.0
   description: >-
-    Administrative API served by the optional admin component. Enable
-    `security.authentication`, TLS, and `admin.enabled` to use this API.
+    Administrative API served over HTTP by the optional admin component. Enable
+    `security.authentication` and `admin.enabled` to use this API. TLS is an
+    optional transport layer for the TCP cache protocol. The admin listener does
+    not terminate TLS; expose it remotely through a TLS-terminating reverse proxy.
     Bootstrap the first administrator with the one-time credential printed at
     server startup, then sign in with the returned API token. Token secrets are
     returned only when a token is created and must be stored securely.
@@ -302,7 +304,8 @@ paths:
               required: [role]
               properties:
                 role:
-                  $ref: '#/components/schemas/Role'
+                  allOf:
+                    - $ref: '#/components/schemas/Role'
                   description: New role to assign to the user.
                   example: readwrite
             example:

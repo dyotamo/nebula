@@ -57,7 +57,7 @@ type Config struct {
 	MaxRetries     int
 	// TLSConfig enables TLS when non-nil and is cloned for each dial.
 	TLSConfig      *tls.Config
-	// Token enables per-connection AUTH when non-empty and requires verified TLS.
+	// Token enables per-connection AUTH when non-empty.
 	Token          string
 }
 
@@ -147,9 +147,6 @@ func NewWithConfig(config Config) (*NebulaCache, error) {
 	}
 	if config.Address == "" {
 		return nil, fmt.Errorf("address must be a host:port string")
-	}
-	if config.Token != "" && (config.TLSConfig == nil || config.TLSConfig.InsecureSkipVerify) {
-		return nil, fmt.Errorf("token authentication requires TLS with certificate verification enabled")
 	}
 	host, port, err := parseAddress(config.Address)
 	if err != nil {

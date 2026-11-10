@@ -1,9 +1,9 @@
 //! HTTP client for the administrator API.
 //!
 //! Login creates a server-side session; subsequent state-changing requests include both the
-//! session cookie and CSRF token. Credential-bearing endpoints require HTTPS.
+//! session cookie and CSRF token.
 
-use std::{error::Error, io, path::Path};
+use std::{error::Error, io};
 
 use reqwest::{header, Method, Response, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -70,11 +70,8 @@ struct LoginResponse {
 }
 
 impl AdminClient {
-    /// Builds an admin client and optionally trusts a PEM CA for HTTPS connections.
-    pub(super) fn new(
-        address: &str,
-        tls_ca: Option<impl AsRef<Path>>,
-    ) -> Result<Self, Box<dyn Error>> {
+    /// Builds an admin client for the given HTTP or HTTPS URL.
+    pub(super) fn new(address: &str) -> Result<Self, Box<dyn Error>> {
         let mut base_url = Url::parse(address)?;
         if !matches!(base_url.scheme(), "http" | "https") || base_url.host().is_none() {
             return Err(io::Error::new(
@@ -85,26 +82,9 @@ impl AdminClient {
         }
         base_url.set_query(None);
         base_url.set_fragment(None);
-        let mut builder = reqwest::Client::builder();
-        if let Some(path) = tls_ca {
-            let content = std::fs::read(path)?;
-            let certificates =
-                rustls_pemfile::certs(&mut content.as_slice()).collect::<Result<Vec<_>, _>>()?;
-            if certificates.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "TLS CA file contains no certificates",
-                )
-                .into());
-            }
-            for certificate in certificates {
-                builder = builder
-                    .add_root_certificate(reqwest::Certificate::from_der(certificate.as_ref())?);
-            }
-        }
         Ok(Self {
             base_url,
-            client: builder.build()?,
+            client: reqwest::Client::new(),
             cookie: None,
             csrf_token: None,
         })
@@ -112,7 +92,6 @@ impl AdminClient {
 
     /// Exchanges an administrator token for the session cookie and CSRF token used on later calls.
     pub(super) async fn authenticate(&mut self, token: &str) -> Result<(), Box<dyn Error>> {
-        self.require_https()?;
         let response = self
             .client
             .post(self.endpoint(&["api", "login"])?)
@@ -145,7 +124,6 @@ impl AdminClient {
         credential: &str,
         username: &str,
     ) -> Result<BootstrapResult, Box<dyn Error>> {
-        self.require_https()?;
         self.json_request(
             Method::POST,
             &["api", "bootstrap-admin"],
@@ -284,17 +262,6 @@ impl AdminClient {
         }
         Ok(endpoint)
     }
-
-    fn require_https(&self) -> Result<(), Box<dyn Error>> {
-        if self.base_url.scheme() != "https" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "HTTPS is required for administrative credentials",
-            )
-            .into());
-        }
-        Ok(())
-    }
 }
 
 async fn ensure_success(response: Response) -> Result<Response, Box<dyn Error>> {
@@ -304,4 +271,50 @@ async fn ensure_success(response: Response) -> Result<Response, Box<dyn Error>> 
     let status = response.status();
     let message = response.text().await.unwrap_or_default();
     Err(io::Error::other(format!("admin API returned {status}: {message}")).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    use super::AdminClient;
+
+    #[test]
+    fn accepts_https_admin_address_for_tls_terminating_proxy() {
+        assert!(AdminClient::new("https://admin.example").is_ok());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_sends_credentials_over_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let bytes_read = socket.read(&mut request).await.unwrap();
+            assert!(String::from_utf8_lossy(&request[..bytes_read])
+                .starts_with("POST /api/bootstrap-admin HTTP/1.1"));
+
+            let body = r#"{"user":{"username":"administrator","role":"admin","enabled":true,"created_at":1},"token":{"id":"token-id","token":"token-secret"}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client = AdminClient::new(&format!("http://{address}")).unwrap();
+
+        let result = client
+            .bootstrap_admin("bootstrap-credential", "administrator")
+            .await
+            .unwrap();
+
+        assert_eq!(result.user.username, "administrator");
+        assert_eq!(result.token.token, "token-secret");
+        server.await.unwrap();
+    }
 }

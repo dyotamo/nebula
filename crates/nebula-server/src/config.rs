@@ -57,7 +57,7 @@ pub struct ResourceLimitsOptions {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SecurityOptions {
-    /// Requires a valid token before cache requests; requires TLS to be enabled as well.
+    /// Requires a valid token before TCP cache requests; TLS is optional.
     pub authentication: bool,
     /// Backend connection details for user and token records.
     pub auth: AuthStorageOptions,
@@ -163,7 +163,7 @@ pub struct MetricsOptions {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdminOptions {
-    /// Starts the admin listener when true; authentication must also be enabled.
+    /// Starts the HTTP admin listener and enables its token-backed user store when true.
     pub enabled: bool,
     /// Address on which the admin API and browser console are served.
     pub listen_addr: SocketAddr,
@@ -307,14 +307,6 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "security.authentication must be enabled when admin.enabled is true",
-            )
-            .into());
-        }
-
-        if config.security.authentication && !config.tls.enabled {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "tls.enabled must be true when security.authentication is enabled",
             )
             .into());
         }
@@ -917,24 +909,46 @@ eviction_policy = "lfu"
     }
 
     #[test]
-    fn admin_requires_token_authentication() {
+    fn tcp_authentication_can_be_enabled_without_tls() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
-        fs::write(&path, "[admin]\nenabled = true\n").unwrap();
+        fs::write(&path, "[security]\nauthentication = true\n").unwrap();
 
-        let error = Config::load(Args {
+        let config = Config::load(Args {
             config: Some(path.clone()),
         })
-        .err()
         .unwrap();
 
         fs::remove_file(path).unwrap();
-        assert!(error
-            .to_string()
-            .contains("security.authentication must be enabled"));
+        assert!(config.security.authentication);
+        assert!(!config.tls.enabled);
+    }
+
+    #[test]
+    fn admin_can_be_enabled_with_authentication_and_without_tls() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("nebula-config-{unique}.toml"));
+        fs::write(
+            &path,
+            "[admin]\nenabled = true\n\n[security]\nauthentication = true\n",
+        )
+        .unwrap();
+
+        let config = Config::load(Args {
+            config: Some(path.clone()),
+        })
+        .unwrap();
+
+        fs::remove_file(path).unwrap();
+        assert!(config.admin.enabled);
+        assert!(config.security.authentication);
+        assert!(!config.tls.enabled);
     }
 
     #[test]

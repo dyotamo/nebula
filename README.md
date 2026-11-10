@@ -35,7 +35,7 @@ NebulaCache combines a small, explicit server model with practical cache control
 - **Bounded memory with configurable eviction:** set a cache-wide memory limit and choose LRU, LFU, or FIFO eviction. Entries that still cannot fit are rejected rather than silently exceeding the limit.
 - **TTL expiration:** assign per-entry expiration in seconds, with expiration checked on reads and by a background cleanup worker.
 - **Compact binary protocol:** a versioned TCP protocol supports opaque values up to 8 MiB, with Rust, Go, Java, JavaScript, and Python clients.
-- **Optional TLS and token authentication:** TLS can protect TCP clients and the admin console; API-token authentication adds role-based read/write access and requires TLS.
+- **Optional TLS and token authentication:** TLS can protect TCP clients; API-token authentication adds role-based read/write access and can be used with or without TLS.
 - **Recovery snapshots:** periodically save and restore snapshots using a local filesystem or S3-compatible storage, with retention controls.
 - **Built-in operations visibility:** Prometheus metrics, component health reporting, a watchdog, and an optional web console with a metrics dashboard.
 - **Async Rust client:** connection pooling, configurable timeouts, verified TLS, token authentication, and bounded retries for GET requests.
@@ -82,7 +82,7 @@ flowchart TD
 | `nebula-health`   | Application lifecycle and component health state.                                                                                                                                 |
 | `nebula-watchdog` | Background-worker heartbeat monitoring.                                                                                                                                           |
 | `nebula-server`   | TCP/TLS listener, optional authentication, HTTP admin console, Prometheus exporter, persistence, and graceful lifecycle management. The package exposes the `nebulad` executable. |
-| `nebula-client`   | Rust command-line client for cache operations and HTTPS admin API user/token management.                                                                                           |
+| `nebula-client`   | Rust command-line client for cache operations and HTTP admin API user/token management.                                                                                            |
 
 Each cache key and value is opaque bytes at the protocol level. TTL is an unsigned integer number of seconds: `0` means no expiration. Entries expire on reads and are also removed by the periodic cleanup worker. Keys are limited to 1,024 bytes and values to 8 MiB. By default, total key-plus-value memory is capped at 64 MiB; LRU eviction is used when needed. Cache capacity and connection counts can be configured.
 
@@ -188,13 +188,13 @@ eviction_policy = "lru"
 
 ### `[admin]`
 
-- `enabled`: starts the HTTP administration console. Defaults to `false`. Enabling it requires `security.authentication = true`; the console has no password-login mode.
-- `listen_addr`: HTTP(S) bind address for the console. Defaults to `127.0.0.1:7002`.
+- `enabled`: starts the HTTP administration console. Defaults to `false`; enabling it requires `security.authentication = true` and the console has no password-login mode.
+- `listen_addr`: HTTP bind address for the console. Defaults to `127.0.0.1:7002`.
 - `metrics_dashboard`: enables the metrics and health dashboard within the console. Defaults to `true`; this does not control the standalone metrics endpoint.
 
 ### `[tls]`
 
-- `enabled`: enables TLS on the binary TCP listener and, if enabled, the admin console listener. Defaults to `false`.
+- `enabled`: enables TLS on the binary TCP listener. Defaults to `false`.
 - `certificate`: optional path to a PEM server-certificate chain. Required when TLS is enabled.
 - `private_key`: optional path to a PEM private key. Required when TLS is enabled.
 
@@ -202,10 +202,10 @@ The server does not request client certificates. Metrics HTTP remains plaintext 
 
 ### `[security]` and `[security.auth]`
 
-- `authentication`: requires a valid API-token `AUTH` request on each TCP connection before cache operations. Defaults to `false`; it requires `tls.enabled = true`.
+- `authentication`: requires a valid API-token `AUTH` request on each TCP connection before cache operations. Defaults to `false`; TLS is optional.
 - `backend`: authentication database backend, either `sqlite` (default) or `postgres`. The value `postgresql` is also accepted as an alias for `postgres`.
-- `database_path`: SQLite database file path, default `nebulad.db` relative to the working directory. Used only with the SQLite backend; must not be empty when authentication is enabled.
-- `database_url`: PostgreSQL connection string; unset by default and required when the PostgreSQL backend is selected and authentication is enabled. Keep credentials out of checked-in config files; environment-variable substitution can supply them.
+- `database_path`: SQLite database file path, default `nebulad.db` relative to the working directory. Used only with the SQLite backend; must not be empty when TCP authentication or the admin console is enabled.
+- `database_url`: PostgreSQL connection string; unset by default and required when the PostgreSQL backend is selected and TCP authentication or the admin console is enabled. Keep credentials out of checked-in config files; environment-variable substitution can supply them.
 
 ### `[persistence]`
 
@@ -246,9 +246,9 @@ certificate = "/etc/nebula/server-cert.pem"
 private_key = "/etc/nebula/server-key.pem"
 ```
 
-The server does not request TLS client certificates. TLS applies to the binary TCP listener and, when the admin console is enabled, the admin HTTP listener as well. Metrics HTTP remains plaintext. Clients must trust the server certificate and verify its hostname.
+The server does not request TLS client certificates. TLS applies only to the binary TCP listener. Metrics HTTP remains plaintext. TCP clients must trust the server certificate and verify its hostname.
 
-Token authentication is separately disabled by default. Enable it with TLS:
+TCP token authentication is disabled by default. The following example enables TLS as an optional transport-protection layer:
 
 ```toml
 [tls]
@@ -263,34 +263,29 @@ authentication = true
 database_path = "./data/nebulad.db"
 ```
 
-When authentication is enabled, every TCP connection must send an `AUTH` request with an API token before any cache command. `readonly` users may GET; `readwrite` users may GET, SET, and DELETE; `admin` users have read/write access and can administer accounts through the HTTPS admin API. PING is permitted after authentication. Tokens are generated randomly, stored as hashes, and may be expired or revoked. The SDKs expose a token option and require TLS with certificate verification when a token is configured. See the SDK readmes for per-language configuration.
+When TCP authentication is enabled, every TCP connection must send an `AUTH` request with an API token before any cache command. `readonly` users may GET; `readwrite` users may GET, SET, and DELETE; `admin` users have read/write access and can administer accounts through the HTTP admin API. PING is permitted after authentication. Tokens are generated randomly, stored as hashes, and may be expired or revoked. TLS is optional for TCP authentication; SDKs expose a token option and can use TLS when configured. See the SDK readmes for per-language configuration.
 
-On the first authenticated startup, the server creates and prints a **one-time administrator bootstrap credential** to stderr. Use the CLI against the HTTPS admin API to create the initial admin user and one-time API token:
+On the first startup with TCP authentication or the admin console enabled, the server creates and prints a **one-time administrator bootstrap credential** to stderr. Use the CLI against the HTTP admin API to create the initial admin user and one-time API token:
 
 ```bash
 NEBULA_BOOTSTRAP_TOKEN='credential-printed-by-server' \
-  cargo run -p nebula-client -- --admin-address https://127.0.0.1:7002 --tls-ca ./server-ca.pem bootstrap-admin administrator
+  cargo run -p nebula-client -- --admin-address http://127.0.0.1:7002 bootstrap-admin administrator
 ```
 
-The command prints an API token once. Store it securely. For later administration, provide the admin token through `NEBULA_TOKEN`; user/token commands also use the HTTPS admin API:
+The command prints an API token once. Store it securely. For later administration, provide the admin token through `NEBULA_TOKEN`; user/token commands also use the HTTP admin API:
 
 ```bash
-NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --admin-address https://127.0.0.1:7002 --tls-ca ./server-ca.pem user create app-reader --role readonly
-NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --admin-address https://127.0.0.1:7002 --tls-ca ./server-ca.pem token create app-reader --expires-in 30d
+NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --admin-address http://127.0.0.1:7002 user create app-reader --role readonly
+NEBULA_TOKEN='admin-api-token' cargo run -p nebula-client -- --admin-address http://127.0.0.1:7002 token create app-reader --expires-in 30d
 ```
 
-The CLI supports user create/list/show/set-role/disable/enable/delete and token create/list/revoke. Roles are `readonly`, `readwrite`, and `admin`; token expiry accepts a duration such as `30d`, `12h`, `60m`, or `300s`. Set `NEBULA_ADMIN_ADDR` instead of repeating `--admin-address`, and configure `NEBULA_TOKEN` plus `--tls-ca` or `NEBULA_TLS_CA` for authenticated admin requests. For authenticated cache requests, `NEBULA_TOKEN` and the TLS CA option are also used with the TCP client.
+The CLI supports user create/list/show/set-role/disable/enable/delete and token create/list/revoke. Roles are `readonly`, `readwrite`, and `admin`; token expiry accepts a duration such as `30d`, `12h`, `60m`, or `300s`. Set `NEBULA_ADMIN_ADDR` instead of repeating `--admin-address`, and configure `NEBULA_TOKEN` for authenticated admin requests. For authenticated cache requests, configure `NEBULA_TOKEN`; `--tls-ca` or `NEBULA_TLS_CA` optionally enables TLS for the TCP client.
 
 ## Admin console
 
-The web console is disabled by default and listens on `127.0.0.1:7002` when enabled. Enabling it requires token authentication and TLS; it has no password-login mode. A local configuration can use the same certificate and authentication backend as the TCP listener:
+The web console is disabled by default and listens on `127.0.0.1:7002` when enabled. The listener serves HTTP only; it does not configure or terminate TLS. It uses token authentication and has no password-login mode. Enabling it also enables token authentication for TCP clients; TCP TLS remains optional. For remote browser and CLI access, place the console behind a TLS-terminating reverse proxy and have the proxy set the session cookie's `Secure` attribute:
 
 ```toml
-[tls]
-enabled = true
-certificate = "./server-cert.pem"
-private_key = "./server-key.pem"
-
 [security]
 authentication = true
 
@@ -300,14 +295,14 @@ listen_addr = "127.0.0.1:7002"
 metrics_dashboard = true
 ```
 
-After creating an administrator as described above, visit `https://127.0.0.1:7002` and sign in with its API token. The browser/client must trust the configured server certificate. Console capabilities include:
+After creating an administrator as described above, visit `http://127.0.0.1:7002` locally or use the HTTPS URL exposed by your TLS-terminating proxy. Configure the CLI's `--admin-address` or `NEBULA_ADMIN_ADDR` with that `https://` URL; it uses standard TLS certificate and hostname verification and does not need the proxy's private key or a server-side TLS configuration. Console capabilities include:
 
 - Browse cache entries with text search and pagination; the UI renders cache content as text, so use an SDK/CLI for arbitrary binary data.
 - Add/update entries with TTL, delete individual entries, and clear the cache.
 - View dashboard metrics and component health when `metrics_dashboard` is enabled.
 - Create/list/delete users, change roles and enabled state, and create/list/revoke API tokens. These management operations require an admin role. Read-only and read-write roles can browse entries; only read-write/admin roles can alter cache entries.
 
-Sessions expire after eight hours and use HTTP-only, SameSite cookies. Mutating console requests require the session's CSRF token. Keep the console on loopback or behind trusted access controls. The console has no independent TLS certificate settings and reuses the server TLS certificate.
+Sessions expire after eight hours and use HTTP-only, SameSite cookies. Mutating console requests require the session's CSRF token. The listener and admin REST API use plain HTTP; for remote use, terminate TLS at a trusted reverse proxy and configure the proxy to add the `Secure` cookie attribute. Keep the unencrypted proxy-to-server hop on a trusted network. The CLI uses the scheme in its admin URL as provided; it does not negotiate an HTTP-to-HTTPS upgrade with the API.
 
 ## Snapshots and recovery
 
@@ -363,11 +358,11 @@ cargo run -p nebula-client -- get greeting
 cargo run -p nebula-client -- delete greeting
 ```
 
-TLS uses a CA PEM file, supplied with `--tls-ca` or `NEBULA_TLS_CA`. TCP requests accept text arguments in the CLI; use an SDK or the protocol implementation for binary keys/values. User and token administration uses the HTTPS admin API and is described in [TLS and client authentication](#tls-and-client-authentication).
+TCP TLS uses a CA PEM file, supplied with `--tls-ca` or `NEBULA_TLS_CA`. This option applies to the TCP cache connection, not the admin API. TCP requests accept text arguments in the CLI; use an SDK or the protocol implementation for binary keys/values. User and token administration uses the HTTP admin API; when it is exposed through a TLS proxy, set `--admin-address` or `NEBULA_ADMIN_ADDR` to the proxy's `https://` URL.
 
 ## SDKs
 
-All five SDKs provide the cache operations appropriate to each language: ping, set, get, delete, TTLs, and optional TLS. They support token authentication over verified TLS and distinguish missing keys. The Rust SDK is asynchronous and additionally provides connection pooling, configurable timeouts, and bounded GET retries.
+All five SDKs provide the cache operations appropriate to each language: ping, set, get, delete, TTLs, and optional TLS. They support token authentication with or without TLS and distinguish missing keys. Use TLS when sending tokens over untrusted networks. The Rust SDK is asynchronous and additionally provides connection pooling, configurable timeouts, and bounded GET retries.
 
 - Rust: [SDK guide](./sdk/rust/README.md)
 - Go: [SDK guide](./sdk/go/README.md)
@@ -433,14 +428,14 @@ The fixed response header is 10 bytes, followed by the response value:
 | `UNAUTHORIZED`     |     4 | Authentication failed or is required.                              |
 | `FORBIDDEN`        |     5 | Authenticated role cannot perform the operation.                   |
 
-Keys are limited to 1,024 bytes and values to 8 MiB. `SET` requires a non-empty key. `AUTH` requires an empty key, a non-empty UTF-8 token of at most 1,024 bytes in the value field, and TTL `0`. A successful `AUTH` returns `OK` with `AUTH_RESULT`. When authentication is enabled, the server requires `AUTH` before cache operations on every connection; authentication also requires TLS. The store treats keys and values as opaque bytes, and TTL values are unsigned seconds.
+Keys are limited to 1,024 bytes and values to 8 MiB. `SET` requires a non-empty key. `AUTH` requires an empty key, a non-empty UTF-8 token of at most 1,024 bytes in the value field, and TTL `0`. A successful `AUTH` returns `OK` with `AUTH_RESULT`. When authentication is enabled, the server requires `AUTH` before cache operations on every connection. TLS is optional; without it, TCP traffic and authentication tokens are sent in plaintext. The store treats keys and values as opaque bytes, and TTL values are unsigned seconds.
 
 ## Operational and security boundaries
 
 - This is a single-node cache. Independent server processes do not synchronize or share cache contents.
 - Snapshot persistence is periodic recovery, not continuous durability, replication, or transactional storage.
-- TCP client authentication is opt-in. When enabled it requires TLS, and all clients must authenticate on each connection.
-- TCP and console TLS share the configured server certificate. Metrics HTTP is plaintext and unauthenticated.
+- TCP client authentication is opt-in. When enabled, all clients must authenticate on each connection; TLS is optional and plaintext connections expose tokens to network observers.
+- The admin console uses HTTP and token authentication; metrics HTTP is plaintext and unauthenticated.
 - Default TCP bind is all interfaces. Use trusted networking and explicit security configuration before exposing any listener.
 - Under systemd, the server sends readiness notification through `NOTIFY_SOCKET` and supports `WATCHDOG_USEC` heartbeats while the service and its health components are healthy.
 - Cache `SET` can fail when an item exceeds the configured cache capacity; eviction policy is applied to make room for new values when possible.

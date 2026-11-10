@@ -4,7 +4,7 @@ A dependency-free Node.js 18+ client for the NebulaCache v1 binary TCP protocol.
 
 ## Before you start
 
-Start a server using [the repository's server instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token and TLS with certificate and hostname verification. For user and token management, enable the server's admin listener and use its HTTPS API or console.
+Start a server using [the repository's server instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
 
 ## Install
 
@@ -58,7 +58,7 @@ The options object accepts `minPoolSize`, `maxPoolSize`, `connectTimeout`, `requ
 
 ## TLS and token authentication
 
-Pass normal Node.js TLS connection options in `tls`. Certificate verification is enabled unless explicitly disabled. To add a private CA, supply its PEM bytes as `ca`. When authentication is enabled on the server, also pass the API token in `token`; each new TLS pool connection authenticates before use. Supplying a token without TLS, or with `rejectUnauthorized: false`, is rejected.
+Pass normal Node.js TLS connection options in `tls` to encrypt TCP connections. Certificate verification is enabled unless explicitly disabled. To add a private CA, supply its PEM bytes as `ca`. When authentication is enabled on the server, also pass the API token in `token`; each new connection authenticates before use. TLS is optional for token authentication, but plaintext connections expose tokens and cache traffic.
 
 ```js
 const fs = require('node:fs');
@@ -70,7 +70,7 @@ const cache = new NebulaCache('cache.example:7001', {
 });
 ```
 
-Do not disable certificate validation or commit tokens/CA private keys. Omit `tls` only for a plaintext server with authentication disabled.
+Do not disable certificate validation or commit tokens/CA private keys. Omit `tls` to use plaintext TCP; only do so on a trusted network, since tokens and cache traffic will not be encrypted.
 
 ## Pooling and retries
 

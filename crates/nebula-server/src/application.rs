@@ -173,15 +173,6 @@ impl Application {
                 .await);
         }
 
-        if self.config.security.authentication && !self.config.tls.enabled {
-            return Err(self
-                .fail_startup(
-                    "configure authentication",
-                    io::Error::new(io::ErrorKind::InvalidInput, "authentication requires TLS"),
-                )
-                .await);
-        }
-
         let auth_store = if self.config.security.authentication {
             let opened_store = match self.config.security.auth.backend {
                 AuthStorageBackend::Sqlite => {
@@ -714,7 +705,10 @@ mod tests {
     use nebula_health::{
         lifecycle::ApplicationState, ApplicationHealth, ComponentHealth, HealthComponent,
     };
-    use tokio::net::TcpListener;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
 
     use crate::config::{Config, PersistenceMode};
 
@@ -748,6 +742,32 @@ mod tests {
         app.shutdown().await.unwrap();
         app.shutdown().await.unwrap();
         assert_eq!(app.state(), ApplicationState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn admin_console_serves_http_without_tcp_authentication_or_tls() {
+        let admin_reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let admin_address = admin_reservation.local_addr().unwrap();
+        drop(admin_reservation);
+
+        let mut config = test_config("127.0.0.1:0".parse().unwrap());
+        config.admin.enabled = true;
+        config.admin.listen_addr = admin_address;
+        config.security.authentication = true;
+        config.security.auth.database_path = ":memory:".into();
+        let mut app = Application::new(config);
+
+        app.start().await.unwrap();
+        let mut socket = TcpStream::connect(admin_address).await.unwrap();
+        socket
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        socket.read_to_end(&mut response).await.unwrap();
+
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        app.shutdown().await.unwrap();
     }
 
     #[tokio::test]

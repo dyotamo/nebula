@@ -4,7 +4,7 @@ A dependency-free Go 1.22+ client for the NebulaCache v1 binary TCP protocol. Th
 
 ## Before you start
 
-Start a NebulaCache server using the repository-root setup and configuration instructions in [the main README](./../../README.md#run-the-server). The default client address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token and TLS with certificate and hostname verification. For user and token management, enable the server's admin listener and use its HTTPS API or console.
+Start a NebulaCache server using the repository-root setup and configuration instructions in [the main README](./../../README.md#run-the-server). The default client address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
 
 ## Install
 
@@ -76,7 +76,7 @@ Keys must be non-empty UTF-8 strings no longer than 1,024 encoded bytes. Values 
 
 ## TLS and token authentication
 
-For a TLS-enabled server, provide a standard Go `tls.Config`. Add a private CA to the trusted root pool; do not disable certificate or hostname verification. Set `Config.Token` to an API token when server authentication is enabled. The SDK sends AUTH after establishing TLS on each new pooled connection.
+To encrypt TCP connections, provide a standard Go `tls.Config`. Add a private CA to the trusted root pool; do not disable certificate or hostname verification. Set `Config.Token` to an API token when server authentication is enabled. The SDK sends AUTH on each new pooled connection; authentication works with or without TLS. Use TLS when the network is not trusted because plaintext TCP exposes tokens and cache traffic.
 
 ```go
 package main
@@ -111,7 +111,7 @@ func connect() (*nebulacache.NebulaCache, error) {
 }
 ```
 
-Import `fmt` if using the error formatting shown. Leave `TLSConfig` nil for plaintext connections only when authentication is disabled. Supplying a token without verified TLS is rejected by the SDK.
+Import `fmt` if using the error formatting shown. Leave `TLSConfig` nil to use plaintext TCP. TLS is optional for token authentication, but plaintext connections expose tokens and cache traffic.
 
 ## Pooling, timeouts, and retries
 

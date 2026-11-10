@@ -4,7 +4,7 @@ A synchronous, dependency-free Python 3.10+ client for the NebulaCache v1 binary
 
 ## Before you start
 
-Start the server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token and TLS with certificate and hostname verification. For user and token management, enable the server's admin listener and use its HTTPS API or console.
+Start the server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
 
 ## Install
 
@@ -46,7 +46,7 @@ Keys must be non-empty UTF-8 strings up to 1,024 encoded bytes. Values may be up
 
 ## TLS and token authentication
 
-Pass a standard-library `ssl.SSLContext` using `ssl_context`. For a private CA, create a verifying context with `ssl.create_default_context(cafile=...)`. If server authentication is enabled, also pass `token`; the SDK authenticates each newly opened connection before issuing cache requests. Tokens require TLS with certificate and hostname verification enabled. Do not use an unverified context for authenticated connections.
+Pass a standard-library `ssl.SSLContext` using `ssl_context` to encrypt TCP connections. For a private CA, create a verifying context with `ssl.create_default_context(cafile=...)`. If server authentication is enabled, also pass `token`; the SDK authenticates each newly opened connection before issuing cache requests. TLS is optional for token authentication, but plaintext connections expose tokens and cache traffic. Do not use an unverified context when TLS is enabled.
 
 ```python
 import os
@@ -64,7 +64,7 @@ finally:
     cache.close()
 ```
 
-Omit `ssl_context` and `token` only when connecting to a trusted plaintext node with authentication disabled.
+Omit `ssl_context` to use plaintext TCP. Authentication can still be enabled, but use plaintext only on a trusted network because tokens and cache traffic are unencrypted.
 
 ## Pooling, timeouts, and retries
 

@@ -195,6 +195,11 @@ async function fixture(t, onRequest, options = {}) {
   return { client: createClient(), createClient, address, sockets, accepted, requests };
 }
 
+test('allows token authentication without TLS', async () => {
+  const authenticated = new NebulaCache(`127.0.0.1:${serverAddress.port}`, { token: 'token' });
+  await authenticated.close();
+});
+
 test('reports connection and server errors', async (t) => {
   const unavailable = net.createServer();
   await new Promise((resolve) => unavailable.listen(0, '127.0.0.1', resolve));

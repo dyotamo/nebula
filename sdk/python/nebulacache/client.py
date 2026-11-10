@@ -89,12 +89,11 @@ class NebulaCache:
                 (default 2); zero disables retries. Other operations are not retried.
             ssl_context: Optional TLS context; None uses plaintext TCP.
             token: Optional non-empty UTF-8 authentication token, at most 1024
-                bytes. Requires TLS certificate and hostname verification and
-                authenticates each new connection before use; None skips authentication.
+                bytes. Authenticates each new connection before use; None skips authentication.
 
         Raises:
             ValueError: Invalid address, non-finite or non-positive timeouts,
-                invalid pool sizes/retry count, or invalid token/TLS configuration.
+                invalid pool sizes/retry count, or invalid token configuration.
                 Counts must be non-negative integers, with 0 <= min <= max and max > 0;
                 booleans are not accepted as durations or counts.
             TypeError: ssl_context is neither an SSLContext nor None.
@@ -141,8 +140,6 @@ class NebulaCache:
         if token is not None:
             if not isinstance(token, str) or not token or len(token.encode("utf-8")) > 1024:
                 raise ValueError("token must be a non-empty string no longer than 1024 bytes")
-            if ssl_context is None or ssl_context.verify_mode == ssl.CERT_NONE or not ssl_context.check_hostname:
-                raise ValueError("token authentication requires TLS with certificate verification enabled")
         self.ssl_context = ssl_context
         self.token = token
         self._condition = threading.Condition()
@@ -262,7 +259,7 @@ class NebulaCache:
             self._condition.notify_all()
 
     def _authenticate(self, connection: socket.socket) -> None:
-        """Send the configured token with opcode 5 before pooling a TLS socket.
+        """Send the configured token with opcode 5 before pooling the socket.
 
         Require status OK and the exact AUTH_RESULT payload, otherwise raise
         CacheResponseError. Send and response each use request_timeout separately;

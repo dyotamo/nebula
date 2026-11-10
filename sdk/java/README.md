@@ -4,7 +4,7 @@ A synchronous Java 17+ client for the NebulaCache v1 binary TCP protocol. The SD
 
 ## Before you start
 
-Start a server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token and TLS with certificate and hostname verification. For user and token management, enable the server's admin listener and use its HTTPS API or console.
+Start a server using [the repository's server setup instructions](./../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides PING, SET, GET, and DELETE over the binary TCP protocol; it does not provide user or token administration. When server token authentication is enabled, each new connection needs an API token; TLS is optional. For user and token management, enable the server's HTTP admin listener and access it locally or through a TLS-terminating reverse proxy.
 
 ## Build and install
 
@@ -75,7 +75,7 @@ Keys must be non-empty and no longer than 1,024 UTF-8 bytes; values may be up to
 
 ## TLS and token authentication
 
-The TLS client uses the JVM's default trust store, validates the certificate and hostname, and negotiates TLS for the TCP connection. Import a private CA into a trust store used by the JVM when necessary. For token authentication, set both `tlsEnabled` and `token` in the `NebulaCache.Config`; the SDK sends AUTH over each new TLS connection. A token without TLS is rejected.
+When `tlsEnabled` is true, the client uses the JVM's default trust store, validates the certificate and hostname, and negotiates TLS for the TCP connection. Import a private CA into a trust store used by the JVM when necessary. Set `token` when server token authentication is enabled; the SDK sends AUTH on each new connection. TLS is optional for token authentication, but plaintext connections expose tokens and cache traffic.
 
 ```java
 import io.nebulacache.NebulaCache;

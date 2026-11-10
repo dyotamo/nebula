@@ -516,6 +516,18 @@ func TestPoolConfigValidation(t *testing.T) {
 	}
 }
 
+func TestTokenAuthenticationCanUsePlaintext(t *testing.T) {
+	config := DefaultConfig()
+	config.Token = "token"
+	client, err := NewWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPoolReusesSequentialConnections(t *testing.T) {
 	for _, constructor := range []string{"New", "NewWithTimeout", "NewWithConfig"} {
 		t.Run(constructor, func(t *testing.T) {

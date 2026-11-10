@@ -29,7 +29,7 @@ const STATUS_NAMES = new Map([
  * @property {number} [maxLifetime=300000] Connection age limit; busy connections retire on release.
  * @property {number} [maxRetries=2] Additional GET attempts for transient transport failures.
  * @property {import('node:tls').ConnectionOptions} [tls] Enables TLS when provided.
- * @property {string} [token] Non-empty UTF-8 token of at most 1024 bytes; requires verified TLS.
+ * @property {string} [token] Non-empty UTF-8 token of at most 1024 bytes.
  */
 
 /** Base class for SDK transport, protocol, and server-response errors. */
@@ -499,9 +499,6 @@ function parseOptions(options) {
   if (result.token !== undefined) {
     if (typeof result.token !== 'string' || result.token.length === 0 || Buffer.byteLength(result.token, 'utf8') > 1024) {
       throw new TypeError('token must be a non-empty string no longer than 1024 bytes');
-    }
-    if (result.tls === undefined || result.tls.rejectUnauthorized === false) {
-      throw new TypeError('token authentication requires TLS with certificate verification enabled');
     }
   }
   for (const name of ['minPoolSize', 'maxPoolSize', 'maxRetries']) {

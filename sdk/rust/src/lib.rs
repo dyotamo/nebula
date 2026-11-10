@@ -141,11 +141,6 @@ impl NebulaCache {
                     "token must be non-empty and no longer than 1024 UTF-8 bytes".to_owned(),
                 ));
             }
-            if config.tls_ca_path.is_none() {
-                return Err(NebulaCacheError::InvalidInput(
-                    "token authentication requires TLS with a trusted CA".to_owned(),
-                ));
-            }
         }
         let tls_connector = config
             .tls_ca_path
@@ -645,6 +640,12 @@ mod tests {
             NebulaCache::with_config(config),
             Err(NebulaCacheError::InvalidInput(_))
         ));
+        let token_client = NebulaCache::with_config(Config {
+            token: Some("token".to_owned()),
+            ..Config::default()
+        })
+        .unwrap();
+        token_client.close().await;
         client.close().await;
     }
 }

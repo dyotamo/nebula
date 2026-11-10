@@ -142,6 +142,10 @@ class NebulaCacheTest {
         assertEquals(Duration.ofSeconds(300), defaults.maxLifetime());
         assertEquals(2, defaults.maxRetries());
         assertFalse(defaults.tlsEnabled());
+        NebulaCache.Config plaintextToken = new NebulaCache.Config(
+                0, 1, Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofSeconds(1),
+                Duration.ofSeconds(1), Duration.ofSeconds(1), 0, false, "token");
+        assertEquals("token", plaintextToken.token());
         assertThrows(IllegalArgumentException.class, () -> config(-1, 1, 0));
         assertThrows(IllegalArgumentException.class, () -> config(0, 0, 0));
         assertThrows(IllegalArgumentException.class, () -> config(2, 1, 0));

@@ -1,6 +1,6 @@
 //! Command-line interface for cache operations and administrator management.
 //!
-//! Cache commands use the binary TCP protocol, while user and token commands use the HTTPS admin
+//! Cache commands use the binary TCP protocol, while user and token commands use the HTTP admin
 //! API. Global connection options can also be supplied through the corresponding `NEBULA_*` env vars.
 
 use std::{
@@ -40,8 +40,9 @@ struct Cli {
         long,
         global = true,
         env = "NEBULA_ADMIN_ADDR",
-        default_value = "https://127.0.0.1:7002",
-        value_name = "URL"
+        default_value = "http://127.0.0.1:7002",
+        value_name = "URL",
+        help = "HTTP or HTTPS URL for the admin API"
     )]
     admin_address: String,
     #[arg(long, global = true, env = "NEBULA_TLS_CA", value_name = "PEM")]
@@ -142,14 +143,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Command::BootstrapAdmin { username } => {
             let credential = std::env::var("NEBULA_BOOTSTRAP_TOKEN")
                 .map_err(|_| invalid_input("NEBULA_BOOTSTRAP_TOKEN is required"))?;
-            let client = AdminClient::new(&admin_address, tls_ca.as_deref())?;
+            let client = AdminClient::new(&admin_address)?;
             let result = client.bootstrap_admin(&credential, &username).await?;
             println!("Created administrator {}", result.user.username);
             println!("API token (shown once): {}", result.token.token);
             Ok(())
         }
         Command::User { command } => {
-            let client = authenticated_admin_client(&admin_address, tls_ca.as_deref()).await?;
+            let client = authenticated_admin_client(&admin_address).await?;
             let result = manage_user(&client, command).await;
             let logout = client.logout().await;
             result?;
@@ -157,7 +158,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         Command::Token { command } => {
-            let client = authenticated_admin_client(&admin_address, tls_ca.as_deref()).await?;
+            let client = authenticated_admin_client(&admin_address).await?;
             let result = manage_token(&client, command).await;
             let logout = client.logout().await;
             result?;
@@ -205,13 +206,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn authenticated_admin_client(
-    address: &str,
-    tls_ca: Option<&std::path::Path>,
-) -> Result<AdminClient, Box<dyn Error>> {
+async fn authenticated_admin_client(address: &str) -> Result<AdminClient, Box<dyn Error>> {
     let token = std::env::var("NEBULA_TOKEN")
         .map_err(|_| invalid_input("NEBULA_TOKEN must contain an administrator API token"))?;
-    let mut client = AdminClient::new(address, tls_ca)?;
+    let mut client = AdminClient::new(address)?;
     client.authenticate(&token).await?;
     Ok(client)
 }
@@ -340,6 +338,28 @@ mod tests {
                 ttl_secs: 60
             } if key == "key" && value == "value"
         ));
+    }
+
+    #[test]
+    fn admin_address_defaults_to_http() {
+        let cli =
+            Cli::try_parse_from(["nebula-client", "bootstrap-admin", "administrator"]).unwrap();
+
+        assert_eq!(cli.admin_address, "http://127.0.0.1:7002");
+    }
+
+    #[test]
+    fn accepts_https_admin_address_for_tls_terminating_proxy() {
+        let cli = Cli::try_parse_from([
+            "nebula-client",
+            "--admin-address",
+            "https://admin.example",
+            "bootstrap-admin",
+            "administrator",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.admin_address, "https://admin.example");
     }
 
     #[test]

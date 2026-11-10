@@ -4,7 +4,7 @@ An asynchronous Rust client for the NebulaCache v1 binary TCP protocol. It suppo
 
 ## Before you start
 
-Start a NebulaCache server using the repository's [server instructions](../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides cache operations over the binary TCP protocol; it does not provide user or token administration. Token authentication requires TLS and a trusted CA certificate.
+Start a NebulaCache server using the repository's [server instructions](../../README.md#run-the-server). The default address is `127.0.0.1:7001`. This SDK provides cache operations over the binary TCP protocol; it does not provide user or token administration. Token authentication can be used with or without TLS; use verified TLS when the network is not trusted.
 
 ## Use the SDK
 
@@ -62,7 +62,7 @@ Keys must be non-empty UTF-8 strings no longer than 1,024 bytes. Values may cont
 
 ## TLS and token authentication
 
-Set `Config::tls_ca_path` to a PEM file containing trusted CA certificates to enable TLS. The server certificate and hostname are verified. For a server requiring token authentication, also set `Config::token`; tokens are only accepted when TLS is enabled.
+Set `Config::tls_ca_path` to a PEM file containing trusted CA certificates to enable TLS. The server certificate and hostname are verified. Set `Config::token` when the server requires token authentication; the token is accepted with or without TLS. Plaintext connections expose tokens and cache traffic, so use them only on a trusted network.
 
 ```rust
 use nebulacache::{Config, NebulaCache};
@@ -75,7 +75,7 @@ config.token = std::env::var("NEBULA_TOKEN").ok();
 let cache = NebulaCache::with_config(config)?;
 ```
 
-Do not disable certificate verification or commit tokens or private keys. Leave `tls_ca_path` unset for plaintext servers that do not require authentication.
+Do not disable certificate verification or commit tokens or private keys. Leave `tls_ca_path` unset to use plaintext TCP; authentication may still be enabled, but plaintext should be limited to trusted networks.
 
 ## Pooling, timeouts, and retries
 
@@ -85,7 +85,7 @@ Connections are opened on demand and reused; each connection handles one request
 
 ## Included example
 
-The example CLI supports PING, SET, GET, and DELETE. It reads `NEBULA_ADDR` and `NEBULA_TLS_CA` when the corresponding command-line options are omitted. For token-authenticated connections, set `NEBULA_TOKEN` along with TLS options.
+The example CLI supports PING, SET, GET, and DELETE. It reads `NEBULA_ADDR` and `NEBULA_TLS_CA` when the corresponding command-line options are omitted. Set `NEBULA_TOKEN` for token-authenticated connections; TLS options are optional.
 
 Run from the repository root:
 

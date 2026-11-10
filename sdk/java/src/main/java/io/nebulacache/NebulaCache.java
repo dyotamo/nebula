@@ -73,7 +73,7 @@ public final class NebulaCache implements AutoCloseable {
      * @param maxRetries non-negative maximum additional attempts for transient GET failures
      * @param tlsEnabled whether to use TLS with default trust settings and hostname verification
      * @param token optional UTF-8 authentication token; null disables authentication,
-     *     otherwise TLS is required and the token must occupy 1–1024 bytes
+     *     otherwise the token must occupy 1–1024 bytes; TLS is optional
      */
     public record Config(int minPoolSize, int maxPoolSize, Duration connectTimeout,
             Duration requestTimeout, Duration acquireTimeout, Duration idleTimeout,
@@ -139,7 +139,7 @@ public final class NebulaCache implements AutoCloseable {
          * @param maxLifetime positive connection age limit checked on acquisition and release
          * @param maxRetries non-negative maximum additional attempts for transient GET failures
          * @param tlsEnabled whether to enable TLS and hostname verification
-         * @param token optional authentication token requiring TLS and 1–1024 UTF-8 bytes
+         * @param token optional authentication token of 1–1024 UTF-8 bytes
          * @throws IllegalArgumentException if pool sizes, retries, durations, or token settings are invalid
          * @throws NullPointerException if any duration is null
          */
@@ -152,9 +152,6 @@ public final class NebulaCache implements AutoCloseable {
             }
             if (token != null && (token.isEmpty() || token.getBytes(StandardCharsets.UTF_8).length > 1024)) {
                 throw new IllegalArgumentException("token must be non-empty and no longer than 1024 bytes");
-            }
-            if (token != null && !tlsEnabled) {
-                throw new IllegalArgumentException("token authentication requires TLS");
             }
             requirePositive(connectTimeout, "connectTimeout");
             requirePositive(requestTimeout, "requestTimeout");

@@ -41,7 +41,7 @@ pub(super) struct Client {
 }
 
 impl Client {
-    /// Creates a client; token authentication is accepted only when a trusted TLS CA is supplied.
+    /// Creates a client with optional TLS and token authentication.
     pub(super) fn new(
         address: impl Into<String>,
         tls_ca: Option<impl AsRef<Path>>,
@@ -53,13 +53,6 @@ impl Client {
             .map(|(host, _)| host.trim_start_matches('[').trim_end_matches(']'))
             .unwrap_or(&address)
             .to_owned();
-        if token.is_some() && tls_ca.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a trusted TLS CA is required when token authentication is enabled",
-            )
-            .into());
-        }
         let tls_connector = tls_ca.map(load_tls_connector).transpose()?;
 
         Ok(Self {
@@ -202,4 +195,19 @@ fn load_tls_connector(path: impl AsRef<Path>) -> Result<TlsConnector, ClientErro
         .with_root_certificates(roots)
         .with_no_client_auth();
     Ok(TlsConnector::from(Arc::new(config)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Client;
+
+    #[test]
+    fn token_authentication_can_be_used_without_tls() {
+        assert!(Client::new(
+            "127.0.0.1:7001",
+            None::<&std::path::Path>,
+            Some("token".to_owned())
+        )
+        .is_ok());
+    }
 }
