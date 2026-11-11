@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/nebulacache-logo.svg" alt="NebulaCache logo" width="112" />
+</p>
+
 # NebulaCache
 
 NebulaCache is a single-node, in-memory key/value cache exposed over a versioned binary TCP protocol. The repository contains a Rust server and command-line client, Rust/Go/Java/JavaScript/Python client SDKs, optional TCP TLS and token authentication, TTL expiration, bounded cache memory with eviction, optional snapshots, Prometheus metrics, health monitoring, and an optional web administration console.

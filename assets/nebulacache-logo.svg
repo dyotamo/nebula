@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title description">
+  <title id="title">NebulaCache</title>
+  <desc id="description">An N monogram and cache rows inside one standalone cache unit.</desc>
+  <defs>
+    <linearGradient id="nebula" x1="36" y1="42" x2="91" y2="87" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#65E6F4"/>
+      <stop offset=".52" stop-color="#4B9DFF"/>
+      <stop offset="1" stop-color="#A77BFF"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="matrix(0 60 -60 0 64 64)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#294C8C" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#10172A" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="34" fill="#10172A"/>
+  <rect x="4" y="4" width="120" height="120" rx="34" fill="url(#glow)"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="33.25" stroke="#7186B8" stroke-opacity=".22" stroke-width="1.5"/>
+  <rect x="28" y="30" width="72" height="68" rx="17" fill="#18233D" stroke="url(#nebula)" stroke-opacity=".72" stroke-width="2"/>
+  <path d="M41 78V50l23 28V50" fill="none" stroke="url(#nebula)" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"/>
+  <g fill="none" stroke="#BFEFFF" stroke-linecap="round" stroke-width="3">
+    <path d="M71 53h17M71 64h12M71 75h17" stroke-opacity=".88"/>
+  </g>
+</svg>
