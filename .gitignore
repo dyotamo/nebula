@@ -13,3 +13,4 @@ server-key.pem
 server.pem
 
 snapshots/
+perf-results/

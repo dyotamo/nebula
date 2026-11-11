@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nebula-k6-smoke
+  namespace: nebula-perf
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: nebula-k6-perf
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: k6
+          image: nebulacache-k6:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REPORT_PATH
+              value: /tmp/nebula-k6-smoke.html
+          args:
+            - run
+            - -e
+            - SCENARIO=steady
+            - -e
+            - VUS=8
+            - -e
+            - DURATION=30s
+            - -e
+            - KEYSPACE=1000
+            - -e
+            - BATCH_SIZE=25
+            - /scripts/cache.js
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 512Mi

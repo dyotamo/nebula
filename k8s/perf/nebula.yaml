@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nebula-perf
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nebula-perf-config
+  namespace: nebula-perf
+data:
+  nebulad.toml: |
+    listen_addr = "${NEBULA_LISTEN_ADDR:-127.0.0.1:17171}"
+    ttl_cleanup_interval_secs = 5
+    log_level = "warn"
+
+    [metrics]
+    enabled = true
+    listen_addr = "${NEBULA_METRICS_ADDR:-127.0.0.1:17173}"
+
+    [resource_limits]
+    max_cache_size_bytes = 268435456
+    max_connections = 1024
+    eviction_policy = "lru"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nebula-cache-perf
+  namespace: nebula-perf
+  labels:
+    app: nebula-cache-perf
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nebula-cache-perf
+  template:
+    metadata:
+      labels:
+        app: nebula-cache-perf
+    spec:
+      containers:
+        - name: nebulad
+          image: nebulacache:dev
+          imagePullPolicy: IfNotPresent
+          args: ["/etc/nebulacache/nebulad.toml"]
+          env:
+            - name: NEBULA_LISTEN_ADDR
+              value: "0.0.0.0:17171"
+            - name: NEBULA_METRICS_ADDR
+              value: "0.0.0.0:17173"
+          ports:
+            - name: cache
+              containerPort: 17171
+              protocol: TCP
+            - name: metrics
+              containerPort: 17173
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: cache
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: cache
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nebulacache
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: nebula-perf-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nebula-cache-perf
+  namespace: nebula-perf
+  labels:
+    app: nebula-cache-perf
+spec:
+  type: ClusterIP
+  selector:
+    app: nebula-cache-perf
+  ports:
+    - name: cache
+      port: 17171
+      targetPort: cache
+      protocol: TCP
+    - name: metrics
+      port: 17173
+      targetPort: metrics
+      protocol: TCP
