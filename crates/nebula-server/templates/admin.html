@@ -128,19 +128,10 @@
       letter-spacing: -.02em
     }
 
-    .mark {
-      display: grid;
+    .brand-logo {
       width: 34px;
       height: 34px;
-      place-items: center;
-      border: 1px solid #4b4aa0;
-      border-radius: 7px;
-      color: #c7d2fe;
-      background: #202044
-    }
-
-    .mark svg {
-      width: 19px
+      flex: 0 0 auto
     }
 
     .rail-caption {
@@ -1043,7 +1034,7 @@
       border-bottom: 1px solid var(--line)
     }
 
-    .login-brand .mark {
+    .login-brand .brand-logo {
       width: 38px;
       height: 38px
     }
@@ -1469,10 +1460,8 @@
   <div class="shell">
     <aside class="rail" id="rail" aria-label="Main navigation" aria-hidden="true" inert>
       <div class="brand">
-        <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
-            <path d="M12 2.8 20 7v10l-8 4.2L4 17V7l8-4.2Z" />
-            <path d="m4.5 7.3 7.5 4 7.5-4M12 11.5V21" />
-          </svg></div><span>NebulaCache</span>
+        <img class="brand-logo" src="/assets/nebulacache-logo.svg" alt="">
+        <span>NebulaCache</span>
       </div>
       <div class="rail-caption">OPERATIONS</div>
       <nav class="rail-nav" aria-label="Console pages">
@@ -1644,10 +1633,7 @@
     <div class="login-wrap" id="login-screen">
       <section class="panel login" aria-labelledby="login-title">
         <div class="login-brand">
-          <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-              <path d="M12 2.8 20 7v10l-8 4.2L4 17V7l8-4.2Z" />
-              <path d="m4.5 7.3 7.5 4 7.5-4M12 11.5V21" />
-            </svg></div>
+          <img class="brand-logo" src="/assets/nebulacache-logo.svg" alt="">
           <div><strong>NebulaCache</strong><span>NODE ADMINISTRATION</span></div>
           <button class="button theme-toggle" id="theme-toggle-login" type="button" aria-label="Dark theme" aria-pressed="true">Dark mode</button>
         </div>

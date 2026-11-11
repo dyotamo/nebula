@@ -248,6 +248,7 @@ fn router(
     // admin management. Each protected handler applies its own read/write check.
     Router::new()
         .route("/", get(index))
+        .route("/assets/nebulacache-logo.svg", get(logo))
         .route("/api/metrics", get(dashboard_metrics))
         .route("/api/config", get(dashboard_configuration))
         .route("/api/login", post(login))
@@ -332,6 +333,10 @@ async fn wait_for_shutdown(mut lifecycle: watch::Receiver<ApplicationState>) {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn logo() -> Response {
+    ([(header::CONTENT_TYPE, "image/svg+xml")], LOGO_SVG).into_response()
 }
 
 async fn login(
@@ -887,6 +892,7 @@ fn hex_digit(byte: u8) -> Result<u8, ()> {
 }
 
 const INDEX_HTML: &str = include_str!("../templates/admin.html");
+const LOGO_SVG: &str = include_str!("../../../assets/nebulacache-logo.svg");
 
 #[cfg(test)]
 mod tests {
@@ -895,9 +901,10 @@ mod tests {
     use super::{
         bootstrap_admin, clear_entries, constant_time_eq, create_token, create_user,
         dashboard_metrics, decode_hex, delete_entry, encode_hex, list_entries, list_tokens, login,
-        revoke_token, router, session, set_entry, show_user, wait_for_shutdown,
+        logo, revoke_token, router, session, set_entry, show_user, wait_for_shutdown,
         BootstrapAdminRequest, ConsoleSession, ConsoleState, CreateTokenRequest, CreateUserRequest,
-        DashboardConfig, DashboardOptions, ListEntriesQuery, LoginRequest, SESSION_COOKIE,
+        DashboardConfig, DashboardOptions, ListEntriesQuery, LoginRequest, LOGO_SVG,
+        SESSION_COOKIE,
     };
     use crate::metrics::Metrics;
     use axum::{
@@ -916,6 +923,16 @@ mod tests {
     };
 
     use nebula_health::lifecycle::{ApplicationState, Lifecycle};
+
+    #[tokio::test]
+    async fn serves_embedded_nebulacache_logo_as_svg() {
+        let response = logo().await;
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            LOGO_SVG.as_bytes()
+        );
+    }
 
     #[tokio::test]
     async fn rejects_admin_requests_before_application_is_ready() {
