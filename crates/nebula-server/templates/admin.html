@@ -1573,22 +1573,22 @@
       </section>
       <section class="admin-page" id="entries-page" aria-labelledby="entries-title">
         <div class="page-heading">
-          <div><div class="eyebrow">Cache data</div><h1 id="entries-title">Entries</h1><p>Browse, search, create, edit, or remove cached values.</p></div>
+          <div><div class="eyebrow">Cache data</div><h1 id="entries-title">Entries</h1><p>Browse entry metadata, search keys, create or replace values, and remove entries.</p></div>
         </div>
       <section class="panel entries-panel" id="entries-section">
         <div class="panel-head">
-          <div><div class="panel-title">Cache entries</div><div class="panel-sub">Keys and values are shown as UTF-8 where possible.</div></div>
+          <div><div class="panel-title">Cache entries</div><div class="panel-sub">Values load from the cache store only when you inspect an entry.</div></div>
           <div class="actions"><button class="button primary" id="add">New entry</button><button class="button danger" id="clear-cache">Clear cache</button></div>
         </div>
         <div class="list-controls">
-          <input class="search-input" id="search" type="search" placeholder="Search keys and values..." aria-label="Search cache entries">
+          <input class="search-input" id="search" type="search" placeholder="Search keys..." aria-label="Search cache entry keys">
           <div class="result-count" id="result-count"></div>
         </div>
-        <div class="table-scroll-note" aria-hidden="true">Scroll horizontally for full values; actions stay in view.</div>
+        <div class="table-scroll-note" aria-hidden="true">Scroll horizontally for full keys; actions stay in view.</div>
         <div class="table-wrap" role="region" aria-label="Cache entries table" tabindex="0">
           <table>
             <thead>
-              <tr><th scope="col">Key</th><th scope="col">Value</th><th scope="col" class="hide-mobile">Expiry</th><th scope="col" class="actions-heading">Actions</th></tr>
+              <tr><th scope="col">Key</th><th scope="col">Size</th><th scope="col" class="hide-mobile">Expiry</th><th scope="col" class="actions-heading">Actions</th></tr>
             </thead>
             <tbody id="entries"></tbody>
           </table>
@@ -1674,7 +1674,7 @@
       <div class="form-grid">
         <div class="field full"><label for="entry-key">Key</label><input id="entry-key" required
             placeholder="e.g. user:42:profile"></div>
-        <div class="field full"><label for="entry-value">Value</label><textarea id="entry-value"
+        <div class="field full"><label id="entry-value-label" for="entry-value">Value (UTF-8 text)</label><textarea id="entry-value"
             placeholder="Enter a value"></textarea></div>
         <div class="field"><label for="entry-ttl">TTL in seconds <span style="color:var(--muted)">(0 =
               never)</span></label><input id="entry-ttl" type="number" min="0" value="0"></div>
@@ -1724,7 +1724,8 @@
     let entries = [];
     let allUsers = [];
     let allTokens = [];
-    let editing = null;
+    let editingKey = null;
+    let editingValueHex = false;
     let currentPage = 1;
     let currentUserPage = 1;
     let currentTokenPage = 1;
@@ -1793,6 +1794,8 @@
       $('topbar').removeAttribute('aria-hidden');
       $('dashboard').style.display = 'block';
       $('users-nav').hidden = currentRole !== 'admin';
+      $('add').hidden = currentRole === 'readonly';
+      $('clear-cache').hidden = currentRole === 'readonly';
       loadDashboardConfig();
       activatePage();
       if (!runtimeRefreshTimer) runtimeRefreshTimer = setInterval(refreshRuntimeMetrics, 5000);
@@ -1996,10 +1999,9 @@
         key.className = 'key-cell mono';
         key.textContent = text(entry.key) || '∅';
 
-        const value = document.createElement('td');
-        value.className = 'value-cell mono';
-        value.title = text(entry.value);
-        value.textContent = text(entry.value) || '∅';
+        const size = document.createElement('td');
+        size.className = 'value-cell mono';
+        size.textContent = formatBytes(entry.size);
 
         const ttl = document.createElement('td');
         ttl.className = 'ttl hide-mobile';
@@ -2008,11 +2010,14 @@
         const actions = document.createElement('td');
         actions.className = 'row-actions';
 
-        const editButton = document.createElement('button');
-        editButton.className = 'icon-button';
-        editButton.textContent = 'Edit';
-        editButton.setAttribute('aria-label', `Edit ${text(entry.key)}`);
-        editButton.onclick = () => openEntry(entry);
+        if (currentRole !== 'readonly') {
+          const editButton = document.createElement('button');
+          editButton.className = 'icon-button';
+          editButton.textContent = 'Edit';
+          editButton.setAttribute('aria-label', `Edit ${text(entry.key)}`);
+          editButton.onclick = () => editEntry(entry);
+          actions.append(editButton);
+        }
 
         const deleteButton = document.createElement('button');
         deleteButton.className = 'icon-button icon-button-danger';
@@ -2020,8 +2025,8 @@
         deleteButton.setAttribute('aria-label', `Delete ${text(entry.key)}`);
         deleteButton.onclick = () => removeEntry(entry);
 
-        actions.append(editButton, deleteButton);
-        row.append(key, value, ttl, actions);
+        if (currentRole !== 'readonly') actions.append(deleteButton);
+        row.append(key, size, ttl, actions);
         $('entries').append(row);
       }
     }
@@ -2185,22 +2190,59 @@
       container.style.display = 'block';
     }
 
-    function openEntry(entry = null) {
+    function openEntry() {
       modalReturnFocus = document.activeElement;
-      editing = entry;
-      $('dialog-title').textContent = entry ? 'Edit entry' : 'New entry';
-      $('entry-key').value = entry ? text(entry.key) : '';
-      $('entry-key').disabled = !!entry;
-      $('entry-value').value = entry ? text(entry.value) : '';
-      $('entry-ttl').value = entry?.ttl_secs ?? 0;
+      editingKey = null;
+      editingValueHex = false;
+      $('dialog-title').textContent = 'New entry';
+      $('entry-key').value = '';
+      $('entry-key').disabled = false;
+      $('entry-value').value = '';
+      $('entry-value-label').textContent = 'Value (UTF-8 text)';
+      $('entry-value').placeholder = 'Enter a value';
+      $('entry-ttl').value = 0;
       $('entry-error').textContent = '';
       $('entry-overlay').style.display = 'flex';
-      (entry ? $('entry-value') : $('entry-key')).focus();
+      $('entry-key').focus();
+    }
+
+    async function editEntry(entry) {
+      const response = await api(`/api/entries/${entry.key}`);
+      if (!response.ok) {
+        toast(response.status === 404 ? 'Entry no longer exists' : 'Unable to retrieve entry');
+        return;
+      }
+
+      const details = await response.json();
+      modalReturnFocus = document.activeElement;
+      editingKey = details.key;
+      $('dialog-title').textContent = 'Edit entry';
+      $('entry-key').value = text(details.key);
+      $('entry-key').disabled = true;
+      $('entry-ttl').value = details.ttl_secs ?? 0;
+      $('entry-error').textContent = '';
+
+      try {
+        const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+        $('entry-value').value = decoder.decode(unhex(details.value));
+        editingValueHex = false;
+        $('entry-value-label').textContent = 'Value (UTF-8 text)';
+        $('entry-value').placeholder = 'Enter a value';
+      } catch {
+        $('entry-value').value = details.value;
+        editingValueHex = true;
+        $('entry-value-label').textContent = 'Value (hexadecimal bytes)';
+        $('entry-value').placeholder = 'Enter hexadecimal bytes';
+      }
+
+      $('entry-overlay').style.display = 'flex';
+      $('entry-value').focus();
     }
 
     function closeEntry() {
       $('entry-overlay').style.display = 'none';
-      editing = null;
+      editingKey = null;
+      editingValueHex = false;
       if (modalReturnFocus?.isConnected) modalReturnFocus.focus();
       modalReturnFocus = null;
     }
@@ -2322,25 +2364,27 @@
 
     $('entry-form').onsubmit = async event => {
       event.preventDefault();
-      const key = editing ? editing.key : bytes($('entry-key').value);
+      const key = editingKey ?? bytes($('entry-key').value);
       const payload = {
         key,
-        value: bytes($('entry-value').value),
+        value: editingValueHex ? $('entry-value').value.trim() : bytes($('entry-value').value),
         ttl_secs: Number($('entry-ttl').value) || 0,
       };
+      const wasEditing = editingKey !== null;
       const response = await api('/api/entries', {
         method: 'PUT',
         body: JSON.stringify(payload),
       });
       if (response.ok) {
-        const wasEditing = !!editing;
         closeEntry();
-        toast(wasEditing ? 'Entry updated' : 'Entry created');
+        toast(wasEditing ? 'Entry updated' : 'Entry stored');
         refreshEntries();
       } else {
         $('entry-error').textContent = response.status === 413
           ? 'Key or value exceeds the node limits.'
-          : 'Could not save this entry.';
+          : response.status === 400 && editingValueHex
+            ? 'Value must be valid hexadecimal bytes.'
+            : 'Could not save this entry.';
       }
     };
 

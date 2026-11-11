@@ -447,7 +447,7 @@ paths:
       operationId: listCacheEntries
       tags: [Cache]
       summary: List and search cache entries
-      description: Returns a stable, sorted page of cache entries. Search matches UTF-8-decoded keys and values case-insensitively.
+      description: Returns metadata only from a cached, key-ordered projection. Search matches UTF-8-decoded keys case-insensitively; exact_key and prefix use hexadecimal key bytes. Expired entries are excluded unless expired=true.
       security:
         - AdminSession: []
       parameters:
@@ -464,22 +464,74 @@ paths:
             minimum: 1
             maximum: 100
             default: 50
+          description: Page size. The size parameter is accepted as an alias.
+        - name: size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          description: Alias for page_size; provide only one of these parameters.
         - name: search
           in: query
           schema:
             type: string
             default: ''
+        - name: exact_key
+          in: query
+          description: Exact key as hexadecimal bytes.
+          schema:
+            type: string
+        - name: prefix
+          in: query
+          description: Key prefix as hexadecimal bytes.
+          schema:
+            type: string
+        - name: expired
+          in: query
+          description: Filter by expiration status; defaults to false.
+          schema:
+            type: boolean
+        - name: sort_by
+          in: query
+          schema:
+            type: string
+            enum: [key, created_at, size]
+            default: key
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: asc
       responses:
         '200':
-          description: Paginated cache entries. Keys and values are lowercase hexadecimal bytes.
+          description: Paginated cache metadata. Cached values are never included.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/EntriesPage'
               example:
+                data:
+                  - key: 757365723a313233
+                    size: 14
+                    created_at: 1762884000000
+                    expires_at: 1762884300000
+                    last_accessed: 1762884000000
+                    ttl_secs: 300
+                pagination:
+                  page: 1
+                  size: 50
+                  total: 1
+                  total_pages: 1
+                  has_next: false
+                  has_previous: false
                 entries:
                   - key: 757365723a313233
-                    value: 416c696365
+                    size: 14
+                    created_at: 1762884000000
+                    expires_at: 1762884300000
+                    last_accessed: 1762884000000
                     ttl_secs: 300
                 total: 1
                 matching: 1
@@ -487,6 +539,8 @@ paths:
                 page_size: 50
         '401':
           description: Session required
+        '400':
+          description: Invalid query parameter or hexadecimal key filter
     put:
       operationId: setCacheEntry
       tags: [Cache]
@@ -528,6 +582,33 @@ paths:
         '401':
           description: Session or valid CSRF token required
   /api/entries/{key}:
+    get:
+      operationId: inspectCacheEntry
+      tags: [Cache]
+      summary: Retrieve a cache entry and its metadata
+      description: Reads the cached value from the primary cache store; values are not included in listing responses.
+      security:
+        - AdminSession: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Key as hexadecimal bytes.
+      responses:
+        '200':
+          description: Cache entry value and metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CacheEntryDetails'
+        '401':
+          description: Session required
+        '400':
+          description: Invalid hexadecimal key
+        '404':
+          description: Entry not found or expired
     delete:
       operationId: deleteCacheEntry
       tags: [Cache]
@@ -552,6 +633,22 @@ paths:
           description: Session or valid CSRF token required
         '404':
           description: Entry not found
+  /api/cache/stats:
+    get:
+      operationId: getCacheStats
+      tags: [Cache]
+      summary: Retrieve cache statistics
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: Snapshot-based entry and memory statistics; recent changes may await refresh
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CacheStats'
+        '401':
+          description: Session required
 components:
   securitySchemes:
     AdminSession:
@@ -662,21 +759,68 @@ components:
           default: 0
     CacheEntry:
       type: object
-      required: [key, value, ttl_secs]
+      description: Metadata only; cached values are not exposed.
+      required: [key, size, created_at, expires_at, last_accessed, ttl_secs]
       properties:
         key:
           type: string
           description: Hexadecimal bytes
-        value:
-          type: string
-          description: Hexadecimal bytes
+        size:
+          type: integer
+          description: Key and value size in bytes.
+        created_at:
+          type: integer
+          format: int64
+          description: Unix timestamp in milliseconds.
+        expires_at:
+          type: [integer, 'null']
+          format: int64
+          description: Unix timestamp in milliseconds, or null for entries without expiration.
+        last_accessed:
+          type: integer
+          format: int64
+          description: Unix timestamp in milliseconds.
         ttl_secs:
           type: [integer, 'null']
           format: int64
+    CacheEntryMetadata:
+      $ref: '#/components/schemas/CacheEntry'
+    CacheEntryDetails:
+      allOf:
+        - $ref: '#/components/schemas/CacheEntryMetadata'
+        - type: object
+          required: [value]
+          properties:
+            value:
+              type: string
+              description: Cached value as hexadecimal bytes.
+    Pagination:
+      type: object
+      required: [page, size, total, total_pages, has_next, has_previous]
+      properties:
+        page:
+          type: integer
+        size:
+          type: integer
+        total:
+          type: integer
+          description: Matching entries after filtering.
+        total_pages:
+          type: integer
+        has_next:
+          type: boolean
+        has_previous:
+          type: boolean
     EntriesPage:
       type: object
-      required: [entries, total, matching, page, page_size]
+      required: [data, pagination, entries, total, matching, page, page_size]
       properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/CacheEntry'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
         entries:
           type: array
           items:
@@ -689,6 +833,19 @@ components:
           type: integer
         page_size:
           type: integer
+    CacheStats:
+      type: object
+      required: [entries, expired_entries, memory_bytes]
+      properties:
+        entries:
+          type: integer
+          description: Non-expired entries.
+        expired_entries:
+          type: integer
+          description: Expired entries awaiting lifecycle cleanup.
+        memory_bytes:
+          type: integer
+          description: Accounted key and value bytes.
     DashboardMetrics:
       type: object
       required: [available, uptime_secs, state, health, requests_total, errors_total, requests_per_second, errors_per_second, avg_latency_ms, active_connections, cache_entries, cache_memory_bytes, snapshot_count, snapshot_failures, snapshot_duration_ms, last_snapshot_success_timestamp_secs, recovery_count, recovery_failures, recovery_duration_ms, components, recent_failures, history]

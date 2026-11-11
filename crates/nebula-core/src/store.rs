@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
     io,
-    sync::{Mutex, RwLock},
-    time::{Instant, SystemTime},
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant, SystemTime},
 };
 
 use dashmap::DashMap;
@@ -16,12 +16,45 @@ pub struct PersistenceEntry {
     pub expires_at: Option<SystemTime>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug)]
+pub struct CacheEntryMetadata {
+    pub key: Vec<u8>,
+    pub size: usize,
+    pub created_at: SystemTime,
+    pub expires_at: Option<SystemTime>,
+    pub last_accessed: SystemTime,
+    expires_at_instant: Option<Instant>,
+}
+
+impl CacheEntryMetadata {
+    pub fn is_expired(&self) -> bool {
+        self.is_expired_at(Instant::now())
+    }
+
+    pub fn is_expired_at(&self, now: Instant) -> bool {
+        self.expires_at_instant
+            .is_some_and(|expires_at| now >= expires_at)
+    }
+
+    pub fn remaining_ttl_secs_at(&self, now: Instant) -> Option<u64> {
+        self.expires_at_instant.map(|expires_at| {
+            let remaining = expires_at.saturating_duration_since(now);
+            remaining
+                .as_secs()
+                .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+        })
+    }
+}
+
 struct EntryMetadata {
     size: usize,
     inserted: u64,
     accessed: u64,
     hits: u64,
+    created_at: SystemTime,
+    expires_at: Option<SystemTime>,
+    expires_at_instant: Option<Instant>,
+    last_accessed: SystemTime,
 }
 
 #[derive(Default)]
@@ -35,6 +68,7 @@ pub struct CacheStore {
     entries: DashMap<Vec<u8>, CacheEntry>,
     snapshot_gate: RwLock<()>,
     accounting: Mutex<CacheAccounting>,
+    admin_snapshot: RwLock<Option<(Instant, Arc<Vec<CacheEntryMetadata>>)>>,
     max_size_bytes: usize,
     eviction_policy: EvictionPolicy,
 }
@@ -55,6 +89,7 @@ impl CacheStore {
             entries: DashMap::new(),
             snapshot_gate: RwLock::new(()),
             accounting: Mutex::new(CacheAccounting::default()),
+            admin_snapshot: RwLock::new(None),
             max_size_bytes,
             eviction_policy,
         }
@@ -86,6 +121,11 @@ impl CacheStore {
         }
 
         let tick = Self::next_tick(&mut accounting);
+        let entry = CacheEntry::new(value, ttl_secs);
+        let created_at = SystemTime::now();
+        let expires_at = entry.expires_at.and_then(|deadline| {
+            SystemTime::now().checked_add(deadline.saturating_duration_since(Instant::now()))
+        });
         accounting.total_bytes = accounting.total_bytes.saturating_add(size);
         accounting.entries.insert(
             key.clone(),
@@ -94,13 +134,34 @@ impl CacheStore {
                 inserted: tick,
                 accessed: tick,
                 hits: 0,
+                created_at,
+                expires_at,
+                expires_at_instant: entry.expires_at,
+                last_accessed: created_at,
             },
         );
-        self.entries.insert(key, CacheEntry::new(value, ttl_secs));
+        self.entries.insert(key, entry);
         true
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.get_inner(key, |value, _| value)
+    }
+
+    /// Reads the value from the primary store and returns metadata from the same
+    /// synchronized lookup.
+    pub fn get_with_metadata(&self, key: &[u8]) -> Option<(Vec<u8>, CacheEntryMetadata)> {
+        self.get_inner(key, |value, metadata| {
+            metadata.map(|metadata| (value, Self::admin_metadata(key, metadata)))
+        })
+        .flatten()
+    }
+
+    fn get_inner<R>(
+        &self,
+        key: &[u8],
+        result: impl FnOnce(Vec<u8>, Option<&EntryMetadata>) -> R,
+    ) -> Option<R> {
         let mut accounting = self
             .accounting
             .lock()
@@ -119,11 +180,13 @@ impl CacheStore {
         drop(entry);
 
         let tick = Self::next_tick(&mut accounting);
-        if let Some(metadata) = accounting.entries.get_mut(key) {
+        let mut metadata = accounting.entries.get_mut(key);
+        if let Some(metadata) = metadata.as_deref_mut() {
             metadata.accessed = tick;
             metadata.hits = metadata.hits.saturating_add(1);
+            metadata.last_accessed = SystemTime::now();
         }
-        Some(value)
+        Some(result(value, metadata.as_deref()))
     }
 
     pub fn delete(&self, key: &[u8]) -> bool {
@@ -165,6 +228,68 @@ impl CacheStore {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .total_bytes
+    }
+
+    /// Returns an immutable, key-ordered metadata projection, refreshed on demand
+    /// at least once per second. A returned snapshot remains stable for its caller.
+    pub fn admin_snapshot(&self) -> Arc<Vec<CacheEntryMetadata>> {
+        if let Some((built_at, snapshot)) = self
+            .admin_snapshot
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            if built_at.elapsed() < Duration::from_secs(1) {
+                return Arc::clone(snapshot);
+            }
+        }
+
+        let mut cached = self
+            .admin_snapshot
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((built_at, snapshot)) = cached.as_ref() {
+            if built_at.elapsed() < Duration::from_secs(1) {
+                return Arc::clone(snapshot);
+            }
+        }
+        let (built_at, mut entries): (Instant, Vec<CacheEntryMetadata>) = {
+            let accounting = self
+                .accounting
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let entries = accounting
+                .entries
+                .iter()
+                .map(|(key, metadata)| Self::admin_metadata(key, metadata))
+                .collect();
+            (Instant::now(), entries)
+        };
+        entries.sort_by(|left, right| left.key.cmp(&right.key));
+        let snapshot = Arc::new(entries);
+        *cached = Some((built_at, Arc::clone(&snapshot)));
+        snapshot
+    }
+
+    /// Looks up metadata directly in the registry and removes an expired entry.
+    pub fn admin_entry(&self, key: &[u8]) -> Option<CacheEntryMetadata> {
+        let mut accounting = self
+            .accounting
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let now = Instant::now();
+        let expired = accounting
+            .entries
+            .get(key)
+            .is_some_and(|metadata| metadata.expires_at_instant.is_some_and(|time| now >= time));
+        if expired {
+            Self::remove_key(&self.entries, &mut accounting, key);
+            return None;
+        }
+        accounting
+            .entries
+            .get(key)
+            .map(|metadata| Self::admin_metadata(key, metadata))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -278,6 +403,10 @@ impl CacheStore {
                     inserted: tick,
                     accessed: tick,
                     hits: 0,
+                    created_at: SystemTime::now(),
+                    expires_at: entry.expires_at,
+                    expires_at_instant: expires_at,
+                    last_accessed: SystemTime::now(),
                 },
             );
             self.entries.insert(
@@ -302,6 +431,17 @@ impl CacheStore {
     fn next_tick(accounting: &mut CacheAccounting) -> u64 {
         accounting.clock = accounting.clock.saturating_add(1);
         accounting.clock
+    }
+
+    fn admin_metadata(key: &[u8], metadata: &EntryMetadata) -> CacheEntryMetadata {
+        CacheEntryMetadata {
+            key: key.to_vec(),
+            size: metadata.size,
+            created_at: metadata.created_at,
+            expires_at: metadata.expires_at,
+            last_accessed: metadata.last_accessed,
+            expires_at_instant: metadata.expires_at_instant,
+        }
     }
 
     fn remove_key(
@@ -403,6 +543,14 @@ mod tests {
         assert_eq!(store.get(b"a"), Some(b"1".to_vec()));
         assert_eq!(store.get(b"b"), None);
         assert_eq!(store.memory_usage(), 4);
+        assert_eq!(
+            store
+                .admin_snapshot()
+                .iter()
+                .map(|entry| entry.key.as_slice())
+                .collect::<Vec<_>>(),
+            [b"a".as_slice(), b"c".as_slice()]
+        );
     }
 
     #[test]
@@ -434,5 +582,92 @@ mod tests {
         assert!(!store.set(b"k".to_vec(), b"value".to_vec(), 0));
         assert!(store.is_empty());
         assert_eq!(store.memory_usage(), 0);
+    }
+
+    #[test]
+    fn admin_snapshot_is_sorted_metadata_and_tracks_mutations() {
+        let store = CacheStore::new();
+        store.set(b"b".to_vec(), b"secret".to_vec(), 0);
+        store.set(b"a".to_vec(), b"value".to_vec(), 30);
+
+        let first = store.admin_snapshot();
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.key.as_slice())
+                .collect::<Vec<_>>(),
+            [b"a".as_slice(), b"b".as_slice()]
+        );
+        assert_eq!(first[0].size, b"a".len() + b"value".len());
+        assert!(first[0].expires_at.is_some());
+        assert!(first[1].expires_at.is_none());
+
+        store.set(b"b".to_vec(), b"updated".to_vec(), 0);
+        store.delete(b"a");
+        thread::sleep(Duration::from_millis(1_100));
+        let second = store.admin_snapshot();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].key, b"b");
+        assert_eq!(second[0].size, b"b".len() + b"updated".len());
+
+        store.clear();
+        thread::sleep(Duration::from_millis(1_100));
+        assert!(store.admin_snapshot().is_empty());
+        assert_eq!(first.len(), 2);
+    }
+
+    #[test]
+    fn admin_inspection_removes_expired_entries() {
+        let store = CacheStore::new();
+        store.set(b"short".to_vec(), b"value".to_vec(), 1);
+        thread::sleep(Duration::from_millis(1_100));
+
+        assert!(store.admin_entry(b"short").is_none());
+        assert!(store.admin_snapshot().is_empty());
+        assert_eq!(store.memory_usage(), 0);
+    }
+
+    #[test]
+    fn restore_rebuilds_entry_metadata() {
+        let store = CacheStore::new();
+        store.set(b"old".to_vec(), b"value".to_vec(), 0);
+        let restored = store
+            .restore_from_persistence(vec![PersistenceEntry {
+                key: b"restored".to_vec(),
+                value: b"value".to_vec(),
+                expires_at: None,
+            }])
+            .unwrap();
+
+        assert_eq!(restored, 1);
+        let snapshot = store.admin_snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].key, b"restored");
+        assert_eq!(snapshot[0].size, b"restored".len() + b"value".len());
+        assert!(snapshot[0].expires_at.is_none());
+    }
+
+    #[test]
+    fn admin_snapshots_remain_safe_during_concurrent_mutations() {
+        let store = Arc::new(CacheStore::new());
+        let writers: Vec<_> = (0..4)
+            .map(|writer| {
+                let store = Arc::clone(&store);
+                thread::spawn(move || {
+                    for index in 0..100 {
+                        let key = format!("{writer}:{index}").into_bytes();
+                        store.set(key, b"value".to_vec(), 0);
+                        let snapshot = store.admin_snapshot();
+                        assert!(snapshot.windows(2).all(|pair| pair[0].key <= pair[1].key));
+                    }
+                })
+            })
+            .collect();
+
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        thread::sleep(Duration::from_millis(1_100));
+        assert_eq!(store.admin_snapshot().len(), 400);
     }
 }

@@ -40,7 +40,7 @@ use nebula_health::{lifecycle::ApplicationState, HealthManager};
 use nebula_watchdog::WorkerHeartbeat;
 use tracing::info;
 
-use nebula_core::CacheStore;
+use nebula_core::{CacheEntryMetadata, CacheStore};
 
 use crate::metrics::Metrics;
 
@@ -96,19 +96,53 @@ struct SetEntryRequest {
     ttl_secs: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct EntryView {
     key: String,
-    value: String,
+    size: usize,
+    created_at: u64,
+    expires_at: Option<u64>,
+    last_accessed: u64,
     ttl_secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct EntryDetails {
+    #[serde(flatten)]
+    metadata: EntryView,
+    value: String,
+}
+
+#[derive(Clone, Copy, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum EntrySort {
+    #[default]
+    Key,
+    CreatedAt,
+    Size,
+}
+
+#[derive(Clone, Copy, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum SortOrder {
+    #[default]
+    Asc,
+    Desc,
 }
 
 #[derive(Deserialize)]
 #[serde(default)]
 struct ListEntriesQuery {
     page: usize,
+    #[serde(alias = "size")]
     page_size: usize,
     search: String,
+    exact_key: Option<String>,
+    prefix: Option<String>,
+    expired: Option<bool>,
+    #[serde(alias = "sort")]
+    sort_by: EntrySort,
+    order: SortOrder,
 }
 
 impl Default for ListEntriesQuery {
@@ -117,17 +151,42 @@ impl Default for ListEntriesQuery {
             page: 1,
             page_size: 50,
             search: String::new(),
+            exact_key: None,
+            prefix: None,
+            expired: None,
+            sort_by: EntrySort::Key,
+            order: SortOrder::Asc,
         }
     }
 }
 
 #[derive(Serialize)]
 struct EntriesPage {
+    data: Vec<EntryView>,
+    pagination: Pagination,
+    // Kept for existing clients of the original admin response.
     entries: Vec<EntryView>,
     total: usize,
     matching: usize,
     page: usize,
     page_size: usize,
+}
+
+#[derive(Serialize)]
+struct Pagination {
+    page: usize,
+    size: usize,
+    total: usize,
+    total_pages: usize,
+    has_next: bool,
+    has_previous: bool,
+}
+
+#[derive(Serialize)]
+struct CacheStats {
+    entries: usize,
+    expired_entries: usize,
+    memory_bytes: usize,
 }
 
 #[derive(Deserialize)]
@@ -268,7 +327,8 @@ fn router(
             "/api/entries",
             get(list_entries).put(set_entry).delete(clear_entries),
         )
-        .route("/api/entries/{key}", delete(delete_entry))
+        .route("/api/entries/{key}", get(get_entry).delete(delete_entry))
+        .route("/api/cache/stats", get(cache_stats))
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(middleware::from_fn_with_state(lifecycle, require_ready))
         .with_state(state)
@@ -717,47 +777,171 @@ async fn list_entries(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    // Sort raw keys before paging; search uses case-insensitive, lossy UTF-8
-    // key/value text, while response keys and values remain lossless hex strings.
+    let exact_key = match query.exact_key.as_deref().map(decode_hex).transpose() {
+        Ok(key) => key,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let prefix = match query.prefix.as_deref().map(decode_hex).transpose() {
+        Ok(prefix) => prefix,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
     let search = query.search.trim().to_lowercase();
-    let mut entries = state.store.snapshot();
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
-    let total = entries.len();
-    entries.retain(|(key, value, _)| {
-        search.is_empty()
-            || String::from_utf8_lossy(key)
-                .to_lowercase()
-                .contains(&search)
-            || String::from_utf8_lossy(value)
-                .to_lowercase()
-                .contains(&search)
-    });
-
-    let matching = entries.len();
-    // Clamp page size and page number, retaining page 1 even for no matches.
+    let snapshot = state.store.admin_snapshot();
+    let instant_now = Instant::now();
+    let total = snapshot
+        .iter()
+        .filter(|entry| !entry.is_expired_at(instant_now))
+        .count();
     let page_size = query.page_size.clamp(1, 100);
-    let page_count = matching.div_ceil(page_size).max(1);
-    let page = query.page.max(1).min(page_count);
-    let offset = (page - 1) * page_size;
-    let entries = entries
-        .into_iter()
-        .skip(offset)
-        .take(page_size)
-        .map(|(key, value, ttl_secs)| EntryView {
-            key: encode_hex(&key),
-            value: encode_hex(&value),
-            ttl_secs,
-        })
-        .collect();
+    let page = query.page.max(1);
+    let offset = page.saturating_sub(1).saturating_mul(page_size);
+    let active_key_order = exact_key.is_none()
+        && prefix.is_none()
+        && search.is_empty()
+        && query.expired != Some(true)
+        && matches!(query.sort_by, EntrySort::Key)
+        && matches!(query.order, SortOrder::Asc);
+    let (matching, data): (usize, Vec<_>) = if active_key_order {
+        let data = if total == snapshot.len() {
+            let end = offset.saturating_add(page_size).min(snapshot.len());
+            snapshot
+                .get(offset..end)
+                .into_iter()
+                .flatten()
+                .map(|entry| metadata_view(entry, instant_now))
+                .collect()
+        } else {
+            snapshot
+                .iter()
+                .filter(|entry| !entry.is_expired_at(instant_now))
+                .skip(offset)
+                .take(page_size)
+                .map(|entry| metadata_view(entry, instant_now))
+                .collect()
+        };
+        (total, data)
+    } else {
+        let mut entries: Vec<_> = snapshot
+            .iter()
+            .filter(|entry| {
+                let expired = entry.is_expired_at(instant_now);
+                query.expired.unwrap_or(false) == expired
+                    && exact_key
+                        .as_deref()
+                        .is_none_or(|key| entry.key.as_slice() == key)
+                    && prefix
+                        .as_deref()
+                        .is_none_or(|prefix| entry.key.starts_with(prefix))
+                    && (search.is_empty()
+                        || String::from_utf8_lossy(&entry.key)
+                            .to_lowercase()
+                            .contains(&search))
+            })
+            .collect();
+
+        if !matches!(query.sort_by, EntrySort::Key) || matches!(query.order, SortOrder::Desc) {
+            entries.sort_by(|left, right| {
+                let ordering = match query.sort_by {
+                    EntrySort::Key => left.key.cmp(&right.key),
+                    EntrySort::CreatedAt => left.created_at.cmp(&right.created_at),
+                    EntrySort::Size => left.size.cmp(&right.size),
+                };
+                let ordering = match query.order {
+                    SortOrder::Asc => ordering,
+                    SortOrder::Desc => ordering.reverse(),
+                };
+                ordering.then_with(|| left.key.cmp(&right.key))
+            });
+        }
+
+        let matching = entries.len();
+        let end = offset.saturating_add(page_size).min(matching);
+        let data = entries
+            .get(offset..end)
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| metadata_view(entry, instant_now))
+            .collect();
+        (matching, data)
+    };
+    let total_pages = matching.div_ceil(page_size);
 
     Json(EntriesPage {
-        entries,
+        data: data.clone(),
+        pagination: Pagination {
+            page,
+            size: page_size,
+            total: matching,
+            total_pages,
+            has_next: page < total_pages,
+            has_previous: page > 1,
+        },
+        entries: data,
         total,
         matching,
         page,
         page_size,
     })
     .into_response()
+}
+
+async fn get_entry(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Response {
+    if !admin_authorized(&state, &headers, false) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Ok(key) = decode_hex(&key) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match state.store.get_with_metadata(&key) {
+        Some((value, metadata)) => Json(EntryDetails {
+            metadata: metadata_view(&metadata, Instant::now()),
+            value: encode_hex(&value),
+        })
+        .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn cache_stats(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
+    if !admin_authorized(&state, &headers, false) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let instant_now = Instant::now();
+    let snapshot = state.store.admin_snapshot();
+    let expired_entries = snapshot
+        .iter()
+        .filter(|entry| entry.is_expired_at(instant_now))
+        .count();
+    Json(CacheStats {
+        entries: snapshot.len().saturating_sub(expired_entries),
+        expired_entries,
+        memory_bytes: snapshot
+            .iter()
+            .fold(0_usize, |total, entry| total.saturating_add(entry.size)),
+    })
+    .into_response()
+}
+
+fn metadata_view(entry: &CacheEntryMetadata, instant_now: Instant) -> EntryView {
+    EntryView {
+        key: encode_hex(&entry.key),
+        size: entry.size,
+        created_at: timestamp_millis(entry.created_at),
+        expires_at: entry.expires_at.map(timestamp_millis),
+        last_accessed: timestamp_millis(entry.last_accessed),
+        ttl_secs: entry.remaining_ttl_secs_at(instant_now),
+    }
+}
+
+fn timestamp_millis(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 
 async fn clear_entries(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
@@ -896,15 +1080,15 @@ const LOGO_SVG: &str = include_str!("../../../assets/nebulacache-logo.svg");
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use super::{
-        bootstrap_admin, clear_entries, constant_time_eq, create_token, create_user,
-        dashboard_metrics, decode_hex, delete_entry, encode_hex, list_entries, list_tokens, login,
-        logo, revoke_token, router, session, set_entry, show_user, wait_for_shutdown,
-        BootstrapAdminRequest, ConsoleSession, ConsoleState, CreateTokenRequest, CreateUserRequest,
-        DashboardConfig, DashboardOptions, ListEntriesQuery, LoginRequest, LOGO_SVG,
-        SESSION_COOKIE,
+        bootstrap_admin, cache_stats, clear_entries, constant_time_eq, create_token, create_user,
+        dashboard_metrics, decode_hex, delete_entry, encode_hex, get_entry, list_entries,
+        list_tokens, login, logo, revoke_token, router, session, set_entry, show_user,
+        wait_for_shutdown, BootstrapAdminRequest, ConsoleSession, ConsoleState, CreateTokenRequest,
+        CreateUserRequest, DashboardConfig, DashboardOptions, ListEntriesQuery, LoginRequest,
+        LOGO_SVG, SESSION_COOKIE,
     };
     use crate::metrics::Metrics;
     use axum::{
@@ -1079,7 +1263,7 @@ mod tests {
 
         state
             .store
-            .set(b"a".to_vec(), b"searchable value".to_vec(), 0);
+            .set(b"searchable".to_vec(), b"private value".to_vec(), 0);
         state.store.set(b"b".to_vec(), b"another value".to_vec(), 0);
 
         let filtered = list_entries(
@@ -1089,6 +1273,7 @@ mod tests {
                 page: 1,
                 page_size: 1,
                 search: "SEARCH".to_owned(),
+                ..ListEntriesQuery::default()
             }),
         )
         .await;
@@ -1097,7 +1282,10 @@ mod tests {
         let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(result["total"], 3);
         assert_eq!(result["matching"], 1);
-        assert_eq!(result["entries"][0]["key"], "61");
+        assert_eq!(result["entries"][0]["key"], "73656172636861626c65");
+        assert!(result["entries"][0].get("value").is_none());
+        assert_eq!(result["pagination"]["total_pages"], 1);
+        assert!(!result["pagination"]["has_next"].as_bool().unwrap());
 
         let second_page = list_entries(
             State(Arc::clone(&state)),
@@ -1106,13 +1294,121 @@ mod tests {
                 page: 2,
                 page_size: 1,
                 search: String::new(),
+                ..ListEntriesQuery::default()
             }),
         )
         .await;
         let body = to_bytes(second_page.into_body(), 1024).await.unwrap();
         let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(result["page"], 2);
-        assert_eq!(result["entries"][0]["key"], "62");
+        assert_eq!(result["entries"][0]["key"], "6b");
+        assert_eq!(result["pagination"]["has_previous"], true);
+
+        let out_of_range = list_entries(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Query(ListEntriesQuery {
+                page: usize::MAX,
+                page_size: 1,
+                ..ListEntriesQuery::default()
+            }),
+        )
+        .await;
+        let body = to_bytes(out_of_range.into_body(), 1024).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(result["data"].as_array().unwrap().is_empty());
+
+        state
+            .store
+            .set(b"searchable".to_vec(), b"fresh primary value".to_vec(), 0);
+        let inspected = get_entry(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Path("73656172636861626c65".to_owned()),
+        )
+        .await;
+        let body = to_bytes(inspected.into_body(), 1024).await.unwrap();
+        let inspected: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            inspected["size"],
+            "searchable".len() + "fresh primary value".len()
+        );
+        assert_eq!(inspected["value"], encode_hex(b"fresh primary value"));
+
+        let stats = cache_stats(State(Arc::clone(&state)), headers.clone()).await;
+        let body = to_bytes(stats.into_body(), 1024).await.unwrap();
+        let stats: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(stats["entries"], 3);
+
+        let sorted = list_entries(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Query(ListEntriesQuery {
+                sort_by: super::EntrySort::Size,
+                order: super::SortOrder::Desc,
+                ..ListEntriesQuery::default()
+            }),
+        )
+        .await;
+        let body = to_bytes(sorted.into_body(), 2048).await.unwrap();
+        let sorted: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(sorted["data"][0]["key"], "73656172636861626c65", "{sorted}");
+
+        let prefix = list_entries(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Query(ListEntriesQuery {
+                prefix: Some("73".to_owned()),
+                ..ListEntriesQuery::default()
+            }),
+        )
+        .await;
+        let body = to_bytes(prefix.into_body(), 2048).await.unwrap();
+        let prefix: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(prefix["pagination"]["total"], 1);
+
+        let no_matches = list_entries(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Query(ListEntriesQuery {
+                exact_key: Some("ff".to_owned()),
+                ..ListEntriesQuery::default()
+            }),
+        )
+        .await;
+        let body = to_bytes(no_matches.into_body(), 2048).await.unwrap();
+        let no_matches: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(no_matches["pagination"]["total_pages"], 0);
+        assert!(no_matches["data"].as_array().unwrap().is_empty());
+
+        let capped = list_entries(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Query(ListEntriesQuery {
+                page_size: 500,
+                ..ListEntriesQuery::default()
+            }),
+        )
+        .await;
+        let body = to_bytes(capped.into_body(), 2048).await.unwrap();
+        let capped: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(capped["pagination"]["size"], 100);
+
+        state.store.set(b"expired".to_vec(), b"value".to_vec(), 1);
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let expired = list_entries(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Query(ListEntriesQuery {
+                expired: Some(true),
+                ..ListEntriesQuery::default()
+            }),
+        )
+        .await;
+        let body = to_bytes(expired.into_body(), 2048).await.unwrap();
+        let expired: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(expired["pagination"]["total"], 1);
+        assert_eq!(expired["data"][0]["key"], "65787069726564");
 
         let deleted = delete_entry(
             State(Arc::clone(&state)),
