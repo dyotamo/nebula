@@ -12,9 +12,6 @@
       <stop offset="1" stop-color="#10172A" stop-opacity="0"/>
     </radialGradient>
   </defs>
-  <rect x="4" y="4" width="120" height="120" rx="34" fill="#10172A"/>
-  <rect x="4" y="4" width="120" height="120" rx="34" fill="url(#glow)"/>
-  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="33.25" stroke="#7186B8" stroke-opacity=".22" stroke-width="1.5"/>
   <rect x="28" y="30" width="72" height="68" rx="17" fill="#18233D" stroke="url(#nebula)" stroke-opacity=".72" stroke-width="2"/>
   <path d="M41 78V50l23 28V50" fill="none" stroke="url(#nebula)" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"/>
   <g fill="none" stroke="#BFEFFF" stroke-linecap="round" stroke-width="3">

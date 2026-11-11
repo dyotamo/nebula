@@ -22,47 +22,53 @@
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       font-synthesis: none;
       text-rendering: optimizeLegibility;
-      --canvas: #080d19;
-      --surface: #111827;
-      --elevated: #1e293b;
-      --line: #273449;
+      --canvas: #18233d;
+      --surface: #202d4a;
+      --elevated: #2a3958;
+      --line: #3a4b6d;
       --text: #f8fafc;
-      --secondary: #94a3b8;
-      --muted: #64748b;
-      --primary: #6366f1;
-      --primary-hover: #5558de;
-      --accent: #38bdf8;
-      --indigo: #818cf8;
+      --secondary: #b8c6de;
+      --muted: #91a4c5;
+      --primary: #4b9dff;
+      --primary-hover: #65e6f4;
+      --primary-text: #10233d;
+      --accent: #65e6f4;
+      --indigo: #a77bff;
       --success: #22c55e;
       --warning: #f59e0b;
       --danger: #ef4444;
       --success-text: #22c55e;
       --warning-text: #f59e0b;
       --danger-text: #ef4444;
-      --hover: #172235;
-      --input: #0a1220;
-      --table-head: #172235;
-      --row-hover: #ffffff08;
+      --hover: #344563;
+      --input: #121c32;
+      --table-head: #202d4a;
+      --row-hover: #bfefff12;
       --shadow: #0004;
     }
 
     html[data-theme="light"] {
       color-scheme: light;
-      --canvas: #f3f5f8;
+      --canvas: #f1f6fc;
       --surface: #ffffff;
-      --elevated: #f7f9fc;
-      --line: #d8e0ea;
-      --text: #172235;
-      --secondary: #42536a;
-      --muted: #63738a;
+      --elevated: #f5f8fd;
+      --line: #cbd8e8;
+      --text: #18233d;
+      --secondary: #425570;
+      --muted: #637794;
+      --primary: #286fc2;
+      --primary-hover: #205fa8;
+      --primary-text: #ffffff;
+      --accent: #087f9b;
+      --indigo: #7043b5;
       --success-text: #15803d;
       --warning-text: #854d0e;
       --danger-text: #b42318;
-      --hover: #f1f5f9;
+      --hover: #e8f1fb;
       --input: #ffffff;
-      --table-head: #f1f4f8;
-      --row-hover: #eef3fa;
-      --shadow: #17223512;
+      --table-head: #edf3fa;
+      --row-hover: #bfefff66;
+      --shadow: #18233d12;
     }
 
     * {
@@ -691,7 +697,7 @@
 
     .button.primary {
       border-color: var(--primary);
-      color: #fff;
+      color: var(--primary-text);
       background: var(--primary)
     }
 

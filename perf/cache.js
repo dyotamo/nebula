@@ -1,11 +1,13 @@
 import { check } from "k6";
+import exec from "k6/execution";
 import { Counter, Rate, Trend } from "k6/metrics";
 import { Socket } from "k6/x/tcp";
 
 const MAGIC = [0x4e, 0x45, 0x42, 0x55];
 const VERSION = 1;
-const OPCODES = { set: 1, get: 2, delete: 3, ping: 4 };
+const OPCODES = { set: 1, get: 2, delete: 3, ping: 4, auth: 5 };
 const MAX_VALUE_SIZE = 8 * 1024 * 1024;
+const MAX_AUTH_TOKEN_SIZE = 1024;
 const scenario = __ENV.SCENARIO || "steady";
 const workload = {
   steady: { get: 70, set: 30, delete: 0 },
@@ -29,13 +31,16 @@ const valueSize = Number(__ENV.VALUE_SIZE || (scenario === "large-value" ? 10485
 const batchSize = Number(__ENV.BATCH_SIZE || 25);
 const target = __ENV.TARGET || "nebula-cache-perf";
 const port = Number(__ENV.PORT || 17171);
+const authToken = __ENV.AUTH_TOKEN || "";
+const authTokenBytes = encodeUtf8(authToken);
 if (
   !Number.isInteger(vus) || vus < 1 ||
   !Number.isInteger(keyspace) || keyspace < 1 ||
   !Number.isInteger(valueSize) || valueSize < 0 || valueSize > MAX_VALUE_SIZE ||
-  !Number.isInteger(batchSize) || batchSize < 1
+  !Number.isInteger(batchSize) || batchSize < 1 ||
+  authTokenBytes.length > MAX_AUTH_TOKEN_SIZE
 ) {
-  throw new Error("VUS, KEYSPACE, and BATCH_SIZE must be positive integers; VALUE_SIZE must be 0-8388608");
+  throw new Error("VUS, KEYSPACE, and BATCH_SIZE must be positive integers; VALUE_SIZE must be 0-8388608; AUTH_TOKEN must be at most 1024 bytes");
 }
 const operationLatency = new Trend("nebula_operation_latency", true);
 const operationCount = new Counter("nebula_operations_total");
@@ -70,6 +75,35 @@ function u32be(bytes, offset, value) {
   bytes[offset + 1] = (value >>> 16) & 0xff;
   bytes[offset + 2] = (value >>> 8) & 0xff;
   bytes[offset + 3] = value & 0xff;
+}
+
+function encodeUtf8(value) {
+  const bytes = [];
+  for (const character of value) {
+    let code = character.codePointAt(0);
+    if (code >= 0xd800 && code <= 0xdfff) {
+      code = 0xfffd;
+    }
+    if (code <= 0x7f) {
+      bytes.push(code);
+    } else if (code <= 0x7ff) {
+      bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    } else if (code <= 0xffff) {
+      bytes.push(
+        0xe0 | (code >> 12),
+        0x80 | ((code >> 6) & 0x3f),
+        0x80 | (code & 0x3f),
+      );
+    } else {
+      bytes.push(
+        0xf0 | (code >> 18),
+        0x80 | ((code >> 12) & 0x3f),
+        0x80 | ((code >> 6) & 0x3f),
+        0x80 | (code & 0x3f),
+      );
+    }
+  }
+  return new Uint8Array(bytes);
 }
 
 function u64be(bytes, offset, value) {
@@ -109,7 +143,17 @@ function connect() {
   let buffered = new Uint8Array(0);
   let pending = null;
   let failure = null;
-  const closed = new Promise((resolve) => socket.on("close", resolve));
+  const closed = new Promise((resolve) => socket.on("close", () => {
+    if (pending) {
+      const message = authToken
+        ? "TCP socket closed before receiving a response"
+        : "TCP socket closed before receiving a response; set AUTH_TOKEN if the server requires authentication";
+      failure = failure || new Error(message);
+      pending.reject(failure);
+      pending = null;
+    }
+    resolve();
+  }));
   socket.setTimeout(5000);
 
   socket.on("data", (data) => {
@@ -171,24 +215,41 @@ function connect() {
   });
 
   const connected = socket.connect(String(port), target);
+  let authenticated = false;
+  async function exchange(opcode, key, value, ttl) {
+    if (failure) {
+      throw failure;
+    }
+    await connected;
+    const response = new Promise((resolve, reject) => {
+      pending = { resolve, reject };
+    });
+    try {
+      await socket.write(makeFrame(opcode, key, value, ttl).buffer);
+    } catch (error) {
+      failure = error;
+      pending = null;
+      socket.destroy();
+      throw error;
+    }
+    return response;
+  }
+
   return {
     async request(opcode, key, value, ttl) {
       if (failure) {
         throw failure;
       }
-      await connected;
-      const response = new Promise((resolve, reject) => {
-        pending = { resolve, reject };
-      });
-      try {
-        await socket.write(makeFrame(opcode, key, value, ttl).buffer);
-      } catch (error) {
-        failure = error;
-        pending = null;
-        socket.destroy();
-        throw error;
+      if (authToken && !authenticated) {
+        const status = await exchange(OPCODES.auth, new Uint8Array(0), authTokenBytes, 0);
+        if (status !== 0) {
+          failure = new Error(`AUTH failed with status ${status}`);
+          socket.destroy();
+          throw failure;
+        }
+        authenticated = true;
       }
-      return response;
+      return exchange(opcode, key, value, ttl);
     },
     async close() {
       socket.destroy();
@@ -209,13 +270,18 @@ export async function setup() {
         throw new Error(`Prefill SET failed with status ${status} at key ${index}`);
       }
     }
+  } catch (error) {
+    return { setupError: String(error) };
   } finally {
     await prefill.close();
   }
   return { ready: true };
 }
 
-export default async function () {
+export default async function (data) {
+  if (data && data.setupError) {
+    exec.test.abort(`Setup failed: ${data.setupError}`);
+  }
   const connection = connect();
   try {
     for (let index = 0; index < batchSize; index++) {

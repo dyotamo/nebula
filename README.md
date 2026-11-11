@@ -480,6 +480,8 @@ The cache is not distributed. Keep the Kubernetes Deployment at one replica; add
 
 k6 reports operation latency percentiles and rate, errors, checks, and TCP transport metrics. Configure `KEYSPACE` to fit under the 256 MiB cache budget. `large-value` defaults to 128 keys of 1 MiB each; the other scenarios default to 10,000 keys with 128-byte values. `VALUE_SIZE` overrides the payload size in bytes, and `BATCH_SIZE` defaults to 25 operations per connection. Keep `BATCH_SIZE` fixed when comparing scenarios.
 
+When TCP authentication is enabled, pass the API token with `-e AUTH_TOKEN="$NEBULA_TOKEN"`; the harness authenticates each new connection before prefill and measured operations. Setup failures abort the run with an error rather than proceeding with an empty benchmark.
+
 ### High-throughput config for 500-VU steady runs
 
 For a high-concurrency local baseline, use a tuned server config and raise the OS file-descriptor limit before starting Nebula:
