@@ -1,11 +1,18 @@
 #!/bin/sh
 set -eu
 
+: "${NEBULA_TOKEN:?NEBULA_TOKEN must be set}"
+
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 project_root=$(CDPATH= cd "$script_dir/.." && pwd)
-address=${1:-${NEBULA_ADDR:-127.0.0.1:17171}}
-tls_ca=${2:-${NEBULA_TLS_CA:-}}
+address=${NEBULA_ADDRESS:-127.0.0.1:17171}
 target_dir=${CARGO_TARGET_DIR:-target}
+total_records=10000
+batch_limit=100
+
+random_hex() {
+  od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
 
 cd "$project_root"
 cargo build --quiet -p nebula-client
@@ -25,16 +32,14 @@ wait_batch() {
   fi
 }
 
-total_records=10000
-batch_limit=100
-index=1
+index=0
 batch_size=0
 batch_pids=
-while [ "$index" -le "$total_records" ]; do
-  key="test:seed:$index"
-  value="cache-test-value-$index"
-  if [ -n "$tls_ca" ]; then
-    "$client" --address "$address" --tls-ca "$tls_ca" set "$key" "$value" &
+while [ "$index" -lt "$total_records" ]; do
+  key="test:seed:$(random_hex)"
+  value="cache-test-value-$(random_hex)"
+  if [ -n "${NEBULA_TLS_CA:-}" ]; then
+    "$client" --address "$address" --tls-ca "$NEBULA_TLS_CA" set "$key" "$value" &
   else
     "$client" --address "$address" set "$key" "$value" &
   fi
@@ -47,7 +52,7 @@ while [ "$index" -le "$total_records" ]; do
   fi
 done
 
-if [ "$batch_size" -ne 0 ]; then
+if [ -n "$batch_pids" ]; then
   wait_batch
 fi
 
