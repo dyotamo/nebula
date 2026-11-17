@@ -38,13 +38,8 @@ This README describes the system as it exists in this repository. It is not a di
     - [Opcodes and statuses](#opcodes-and-statuses)
   - [Operational and security boundaries](#operational-and-security-boundaries)
   - [Performance tests](#performance-tests)
-    - [Scenarios](#scenarios)
-    - [High-throughput config for 500-VU steady runs](#high-throughput-config-for-500-vu-steady-runs)
-    - [Example steady run: 500 VU / 60s](#example-steady-run-500-vu--60s)
-    - [Local test](#local-test)
-    - [Viewing and interpreting results](#viewing-and-interpreting-results)
-      - [Save an HTML report](#save-an-html-report)
-    - [Kubernetes test](#kubernetes-test)
+    - [Run a benchmark](#run-a-benchmark)
+    - [View results](#view-results)
 
 ## Features
 
@@ -463,30 +458,11 @@ Keys are limited to 1,024 bytes and values to 8 MiB. `SET` requires a non-empty 
 
 ## Performance tests
 
-NebulaCache is a single-node in-memory cache with a binary TCP protocol, so this harness builds k6 with Grafana's `xk6-tcp` extension. The k6 `setup()` phase preloads the keyspace before measurement. Each VU then opens one TCP connection per iteration and issues `BATCH_SIZE` sequential operations before closing it. Prefill requests are excluded from the operation metrics. GET and DELETE misses are expected protocol responses; unexpected statuses and protocol/transport errors are reported as failed checks. Latency measures the request/response round trip and excludes connection establishment; throughput includes the amortized connection setup/teardown cost. Metrics include overall and per-operation latency, request counts, and error rates.
+NebulaCache is built for performant, low-latency cache workloads. Use the included k6 harness to measure throughput, latency, and errors on your machine.
 
-The cache is not distributed. Keep the Kubernetes Deployment at one replica; additional replicas would be independent caches and would not represent a clustered deployment. Results depend on CPU/memory limits, cluster node, and network path. The current store protects cache accounting with a mutex, so the worker-count comparisons can help identify contention.
+### Run a benchmark
 
-### Scenarios
-
-| `SCENARIO`    | Operation mix                            | Focus                              |
-| ------------- | ---------------------------------------- | ---------------------------------- |
-| `steady`      | 70% GET, 30% SET                         | Baseline mix                       |
-| `read-heavy`  | 95% GET, 5% SET                          | Read latency and throughput        |
-| `write-heavy` | 20% GET, 80% SET                         | Mutation throughput and contention |
-| `churn`       | 34% GET, 33% SET, 33% DELETE             | Entry turnover and miss rate       |
-| `hot-key`     | 95% GET, 5% SET; 90% target the same key | Hot-key contention                 |
-| `ttl`         | 70% GET, 30% SET with 2-second TTL       | Expiration and expected misses     |
-| `large-value` | 50% GET, 50% SET                         | Payload and memory-copy cost       |
-| `ping`        | PING only                                | Protocol/network baseline          |
-
-k6 reports operation latency percentiles and rate, errors, checks, and TCP transport metrics. Configure `KEYSPACE` to fit under the 256 MiB cache budget. `large-value` defaults to 128 keys of 1 MiB each; the other scenarios default to 10,000 keys with 128-byte values. `VALUE_SIZE` overrides the payload size in bytes, and `BATCH_SIZE` defaults to 25 operations per connection. Keep `BATCH_SIZE` fixed when comparing scenarios.
-
-When TCP authentication is enabled, pass the API token with `-e AUTH_TOKEN="$NEBULA_TOKEN"`; the harness authenticates each new connection before prefill and measured operations. Setup failures abort the run with an error rather than proceeding with an empty benchmark.
-
-### High-throughput config for 500-VU steady runs
-
-For a high-concurrency local baseline, use a tuned server config and raise the OS file-descriptor limit before starting Nebula:
+Save this tuned benchmark configuration as `./nebulad.toml` from the repository root. On Linux, raise the open-file limit before starting the server:
 
 ```bash
 ulimit -n 65535
@@ -514,145 +490,43 @@ mode = "volatile"
 authentication = false
 ```
 
-This keeps the cache hot, disables unnecessary persistence/auth overhead, and leaves room for a burst of TCP connections during heavy load tests.
-
-### Example steady run: 500 VU / 60s
-
-On a local Linux workstation with the tuned config above, a steady-state benchmark using `SCENARIO=steady`, `VUS=500`, `DURATION=60s`, `KEYSPACE=10000`, `VALUE_SIZE=128`, and `BATCH_SIZE=25` produced:
-
-- `Operations: 603720 (9534.3 ops/s)`
-- `Operation error rate: 0%`
-- `Checks: 603720 / 603720 passed`
-- `p95 latency: 121 ms`
-- `p90 latency: 100 ms`
-- `avg latency: 47.7 ms`
-
-This is a local baseline only; run the same test on your target machine when comparing hardware, kernel, or network differences. The point is that Nebula sustains a high non-error throughput with very low steady-state error rates while using a simple in-memory, single-node deployment.
-
-### Local test
-
-Install Docker, build the server and k6 runner images from the repository root, then start the server with the benchmark config:
+Build the server and k6 runner images:
 
 ```sh
 docker build -t nebulacache:dev .
 docker build -f perf/Dockerfile -t nebulacache-k6:dev .
+```
+
+Start NebulaCache in one terminal:
+
+```sh
 docker run --rm --name nebula-perf \
   -p 17171:17171 -p 17173:17173 \
-  -v "$PWD/k8s/perf/nebulad.toml:/etc/nebulacache/nebulad.toml:ro" \
+  -v "$PWD/nebulad.toml:/etc/nebulacache/nebulad.toml:ro" \
   -e NEBULA_LISTEN_ADDR=0.0.0.0:17171 \
   -e NEBULA_METRICS_ADDR=0.0.0.0:17173 \
   nebulacache:dev /etc/nebulacache/nebulad.toml
 ```
 
-In another terminal, run k6 with host networking so its TCP VUs can reach the server:
-
-```sh
-docker run --rm --network host nebulacache-k6:dev run \
-  -e TARGET=127.0.0.1 -e SCENARIO=steady -e VUS=16 -e DURATION=30s \
-  -e KEYSPACE=10000 -e VALUE_SIZE=128 -e BATCH_SIZE=25 /scripts/cache.js
-```
-
-Change `SCENARIO` to test another profile. Use the `--network host` form on Linux; on Docker Desktop, remove `--network host`, publish the server ports as above, and use `-e TARGET=host.docker.internal`.
-
-### Viewing and interpreting results
-
-The k6 summary is printed to the terminal when a run ends. To keep a text copy:
-
-```sh
-mkdir -p perf-results
-set -o pipefail
-docker run --rm --network host nebulacache-k6:dev run \
-  -e TARGET=127.0.0.1 -e SCENARIO=steady -e VUS=16 -e DURATION=30s \
-  -e KEYSPACE=10000 -e VALUE_SIZE=128 -e BATCH_SIZE=25 /scripts/cache.js \
-  | tee perf-results/steady.txt
-```
-
-The key metrics are:
-
-| Metric                                    | What to look at                                                                                                |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `nebula_operations_total`                 | Total measured operations and aggregate operations/second.                                                     |
-| `nebula_<operation>_latency`              | Per-operation average and p90/p95/p99 latency; p95/p99 show tail latency.                                      |
-| `nebula_<operation>_errors` and k6 checks | Unexpected protocol or transport failures. These should remain zero / pass.                                    |
-| `nebula_get_misses`                       | Expected missing-key GETs, especially relevant to TTL and churn scenarios.                                     |
-| `tcp_socket_duration`                     | Duration of a connection including the batch; compare with operation latency, which excludes connection setup. |
-
-For comparisons, keep scenario, VUs, duration, keyspace, value size, and batch size constant; change one factor at a time. Avoid running overlapping tests against the same server. Record server CPU and memory as well, since client-reported throughput alone does not identify the bottleneck.
-
-#### Save an HTML report
-
-The k6 script writes a self-contained HTML report with summary cards, thresholds, checks, and all metric statistics. Mount a local output directory and set `REPORT_PATH`:
+Run the benchmark in another terminal. This example uses the steady workload with 500 VUs for 60 seconds and writes an HTML report to `./perf-results/steady.html`:
 
 ```sh
 mkdir -p perf-results
 docker run --rm --network host --user "$(id -u):$(id -g)" \
   -v "$PWD/perf-results:/results" nebulacache-k6:dev run \
-  -e TARGET=127.0.0.1 -e SCENARIO=steady -e VUS=16 -e DURATION=30s \
+  -e TARGET=127.0.0.1 -e SCENARIO=steady -e VUS=500 -e DURATION=60s \
   -e KEYSPACE=10000 -e VALUE_SIZE=128 -e BATCH_SIZE=25 \
   -e REPORT_PATH=/results/steady.html /scripts/cache.js
 ```
 
-Open the report with `xdg-open perf-results/steady.html` (or your browser). Use a different filename for each run to retain comparisons. The report is local to the k6 runner; for Kubernetes Jobs, copy it out of the pod before deleting the Job.
+On Docker Desktop, remove `--network host` and change `TARGET` to `host.docker.internal`. Other workloads are available with `SCENARIO=read-heavy`, `write-heavy`, `churn`, `hot-key`, `ttl`, `large-value`, or `ping`. Keep the keyspace and value size within the configured cache capacity.
 
-### Kubernetes test
+### View results
 
-Build both images and load/push them so the cluster can pull them. For a local kind cluster:
-
-```sh
-docker build -t nebulacache:dev .
-docker build -f perf/Dockerfile -t nebulacache-k6:dev .
-kind load docker-image nebulacache:dev nebulacache-k6:dev
-kubectl apply -f k8s/perf/nebula.yaml
-kubectl -n nebula-perf rollout status deployment/nebula-cache-perf
-```
-
-Minikube users can substitute `minikube image load`; remote-cluster users should push both images and update their image names in the manifests. Run the included smoke Job:
+The k6 summary, including throughput, latency percentiles, and errors, prints to the terminal when the run finishes. Open the saved HTML report in a browser:
 
 ```sh
-kubectl apply -f k8s/perf/k6-smoke.yaml
-kubectl -n nebula-perf logs -f job/nebula-k6-smoke
+xdg-open perf-results/steady.html
 ```
 
-The log stream shows the k6 text summary. Save it locally with:
-
-```sh
-mkdir -p perf-results
-kubectl -n nebula-perf logs job/nebula-k6-smoke | tee perf-results/k8s-smoke.txt
-```
-
-The smoke Job also writes an HTML report inside its pod. After the Job completes, copy it out before deleting the pod or Job:
-
-```sh
-pod=$(kubectl -n nebula-perf get pods -l job-name=nebula-k6-smoke -o jsonpath='{.items[0].metadata.name}')
-kubectl -n nebula-perf cp "$pod":/tmp/nebula-k6-smoke.html perf-results/k8s-smoke.html
-xdg-open perf-results/k8s-smoke.html
-```
-
-For other scenarios or load settings, create a Job with a unique name and desired k6 environment. Example:
-
-```sh
-kubectl -n nebula-perf create job nebula-k6-write \
-  --image=nebulacache-k6:dev --image-pull-policy=IfNotPresent -- \
-  run -e SCENARIO=write-heavy -e VUS=32 -e DURATION=60s \
-  -e KEYSPACE=10000 -e VALUE_SIZE=128 -e BATCH_SIZE=25 \
-  -e REPORT_PATH=/tmp/nebula-k6-write.html /scripts/cache.js
-kubectl -n nebula-perf logs -f job/nebula-k6-write
-```
-
-Available scenario names are shown above. Repeat with `read-heavy`, `hot-key`, `churn`, `ttl`, `large-value`, and `ping`. Do not run competing benchmark Jobs against the same target when comparing results. Compare a baseline, then increase `VUS` (for example 1, 8, 32, 64) while keeping the other parameters fixed. Also compare p95/p99 latency, errors, CPU, and memory.
-
-Metrics are available through the service on port `17173`:
-
-```sh
-kubectl -n nebula-perf port-forward service/nebula-cache-perf 17173:17173
-curl -s http://127.0.0.1:17173/metrics
-kubectl -n nebula-perf top pod -l app=nebula-cache-perf
-```
-
-The metrics endpoint is unauthenticated; keep it on a trusted network. The manifests use volatile storage and disable auth/TLS/snapshots to isolate the cache baseline. Test those features separately when you want to measure their overhead.
-
-To remove the benchmark namespace and all its resources:
-
-```sh
-kubectl delete namespace nebula-perf
-```
+Use a different `REPORT_PATH` filename for each run to keep multiple reports.
