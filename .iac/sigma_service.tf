@@ -1,4 +1,4 @@
-module "sigma_container_service_customer360" {
+module "sigma_container_service_nebulad" {
   source = "https://nexus.pkg.dev.vm.co.mz/repository/zip-public/tf-modules/sigma-container-service/1.1.7-RELEASE.zip"
   name   = var.name
 
