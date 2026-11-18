@@ -152,6 +152,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Command::User { command } => {
             let client = authenticated_admin_client(&admin_address).await?;
             let result = manage_user(&client, command).await;
+            // Attempt logout even when the operation failed, so the server-side session is closed.
             let logout = client.logout().await;
             result?;
             logout?;
@@ -160,6 +161,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Command::Token { command } => {
             let client = authenticated_admin_client(&admin_address).await?;
             let result = manage_token(&client, command).await;
+            // Attempt logout even when the operation failed, so the server-side session is closed.
             let logout = client.logout().await;
             result?;
             logout?;

@@ -47,6 +47,8 @@ use crate::metrics::Metrics;
 const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
 const SESSION_COOKIE: &str = "nebula_admin_session";
 
+/// Server-side session data keyed by the opaque cookie secret.
+/// Expiry and role are fixed at login; the CSRF secret is returned separately to the client.
 #[derive(Clone)]
 struct ConsoleSession {
     expires_at: Instant,
@@ -54,6 +56,8 @@ struct ConsoleSession {
     csrf_token: String,
 }
 
+/// Non-secret startup configuration exposed by `/api/config`.
+/// Backend names reflect configuration even when the corresponding feature is disabled.
 #[derive(Clone, Serialize)]
 pub(crate) struct DashboardConfig {
     pub(crate) persistence_mode: &'static str,
@@ -63,12 +67,16 @@ pub(crate) struct DashboardConfig {
     pub(crate) max_cache_size_bytes: usize,
 }
 
+/// Dashboard settings captured when the admin listener starts.
 #[derive(Clone)]
 pub(crate) struct DashboardOptions {
+    /// Gates `/api/metrics` only; `/api/config` and other admin routes remain available.
     pub(crate) enabled: bool,
     pub(crate) config: DashboardConfig,
 }
 
+/// Shared handler dependencies and process-local sessions for one router instance.
+/// An absent authentication store disables login and identity management, not route creation.
 #[derive(Clone)]
 struct ConsoleState {
     store: Arc<CacheStore>,
@@ -88,6 +96,7 @@ struct LoginRequest {
     token: String,
 }
 
+/// JSON representation of binary cache data; key and value strings contain hex bytes.
 #[derive(Deserialize)]
 struct SetEntryRequest {
     key: String,
@@ -96,6 +105,7 @@ struct SetEntryRequest {
     ttl_secs: u64,
 }
 
+/// Value-free cache metadata with a hex key, Unix-millisecond timestamps, and TTL in seconds.
 #[derive(Clone, Serialize)]
 struct EntryView {
     key: String,
@@ -106,6 +116,7 @@ struct EntryView {
     ttl_secs: Option<u64>,
 }
 
+/// Single-entry response that adds a hex value to the same flat metadata used by listings.
 #[derive(Serialize)]
 struct EntryDetails {
     #[serde(flatten)]
@@ -130,6 +141,8 @@ enum SortOrder {
     Desc,
 }
 
+/// Optional filters and ordering applied before pagination of the metadata snapshot.
+/// Exact keys and prefixes use hex; search matches a lossy UTF-8 rendering of each key.
 #[derive(Deserialize)]
 #[serde(default)]
 struct ListEntriesQuery {
@@ -146,6 +159,7 @@ struct ListEntriesQuery {
 }
 
 impl Default for ListEntriesQuery {
+    /// Selects the first 50 live entries in ascending bytewise key order without key filters.
     fn default() -> Self {
         Self {
             page: 1,
@@ -160,18 +174,22 @@ impl Default for ListEntriesQuery {
     }
 }
 
+/// Publishes both the structured pagination API and legacy top-level listing fields.
 #[derive(Serialize)]
 struct EntriesPage {
     data: Vec<EntryView>,
     pagination: Pagination,
     // Kept for existing clients of the original admin response.
     entries: Vec<EntryView>,
+    // Live entries before filtering; `matching` and `pagination.total` count filtered rows.
     total: usize,
     matching: usize,
     page: usize,
     page_size: usize,
 }
 
+/// Filtered result counts and normalized request bounds; an empty result has zero pages.
+/// A requested page beyond the last page is retained rather than clamped to an existing page.
 #[derive(Serialize)]
 struct Pagination {
     page: usize,
@@ -182,6 +200,7 @@ struct Pagination {
     has_previous: bool,
 }
 
+/// Snapshot counts split live and expired rows; memory includes both until they are removed.
 #[derive(Serialize)]
 struct CacheStats {
     entries: usize,
@@ -230,6 +249,7 @@ struct UserView {
     created_at: i64,
 }
 
+/// Token metadata safe for repeated listing, with no plaintext credential in the response.
 #[derive(Serialize)]
 struct TokenView {
     id: String,
@@ -269,6 +289,7 @@ pub(crate) async fn run(
             .with_graceful_shutdown(shutdown)
             .await
     });
+    // Listener setup is complete, but this notification does not transition lifecycle readiness.
     let _ = started.send(());
     let mut heartbeat_interval = interval(Duration::from_secs(1));
     heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -280,6 +301,8 @@ pub(crate) async fn run(
     }
 }
 
+/// Creates the route table, a fresh session map, and the shared readiness/body-size gates.
+/// Authorization remains in handlers so login, bootstrap, and embedded assets can be sessionless.
 fn router(
     store: Arc<CacheStore>,
     limits: FrameLimits,
@@ -334,6 +357,8 @@ fn router(
         .with_state(state)
 }
 
+/// Returns a live dashboard snapshot to an admin session, or 503 when metrics are disabled.
+/// The dashboard feature flag is checked only after session authorization succeeds.
 async fn dashboard_metrics(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
     if !admin_authorized(&state, &headers, false) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -354,6 +379,7 @@ async fn dashboard_metrics(State(state): State<Arc<ConsoleState>>, headers: Head
     .into_response()
 }
 
+/// Exposes the startup configuration to an admin session regardless of dashboard enablement.
 async fn dashboard_configuration(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -364,6 +390,8 @@ async fn dashboard_configuration(
     Json(&state.dashboard_config).into_response()
 }
 
+/// Rejects requests outside `Ready` before forwarding them to their route handlers.
+/// This is an admission check, not cancellation of requests already being handled.
 async fn require_ready(
     State(lifecycle): State<watch::Receiver<ApplicationState>>,
     request: Request,
@@ -376,6 +404,8 @@ async fn require_ready(
     next.run(request).await
 }
 
+/// Resolves graceful shutdown on a terminal lifecycle state or loss of all lifecycle senders.
+/// Checks the current state before awaiting changes so an already-terminal listener can stop.
 // Degraded state blocks requests but does not stop the listener.
 async fn wait_for_shutdown(mut lifecycle: watch::Receiver<ApplicationState>) {
     loop {
@@ -391,19 +421,25 @@ async fn wait_for_shutdown(mut lifecycle: watch::Receiver<ApplicationState>) {
     }
 }
 
+/// Serves the embedded console shell without requiring login; its API calls authorize separately.
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+/// Serves the compile-time SVG asset with an explicit image content type and no session check.
 async fn logo() -> Response {
     ([(header::CONTENT_TYPE, "image/svg+xml")], LOGO_SVG).into_response()
 }
 
+/// Exchanges an admin API credential in the JSON body for a fixed-lifetime browser session.
+/// Missing stores, lookup errors, invalid tokens, and non-admin roles all fail authentication.
 async fn login(
     State(state): State<Arc<ConsoleState>>,
     Json(credentials): Json<LoginRequest>,
 ) -> Response {
     let authentication_started = Instant::now();
+    // Authenticate only during login; subsequent requests trust the stored session role.
+    // Store failures are logged locally but collapse into the same client-visible denial.
     let role = match state.auth_store.as_ref() {
         Some(auth_store) => match auth_store.authenticate(&credentials.token) {
             Ok(Some(identity)) => Some(identity.role),
@@ -437,6 +473,7 @@ async fn login(
     rand::rngs::OsRng.fill_bytes(&mut csrf_bytes);
     let token = encode_hex(&session_bytes);
     let csrf_token = encode_hex(&csrf_bytes);
+    // The monotonic server deadline is authoritative even if the browser retains its cookie.
     state.sessions.insert(
         token.clone(),
         ConsoleSession {
@@ -446,6 +483,7 @@ async fn login(
         },
     );
 
+    // Keep the session secret HttpOnly while returning the separate CSRF secret in JSON.
     (
         StatusCode::OK,
         [(header::SET_COOKIE, format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_TTL_SECS}"))],
@@ -454,6 +492,8 @@ async fn login(
         .into_response()
 }
 
+/// Restores the role and CSRF token for a live admin cookie without extending its expiration.
+/// Invalid stored sessions are removed here; ordinary authorization checks only reject them.
 async fn session(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
     let Some(token) = session_token(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -475,6 +515,8 @@ async fn session(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> 
     .into_response()
 }
 
+/// Removes a stored session only when its CSRF secret matches, then expires the browser cookie.
+/// A missing cookie, unknown session, or missing/invalid CSRF header leaves the cookie untouched.
 async fn logout(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
     let Some(token) = session_token(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -502,6 +544,8 @@ async fn logout(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> R
         .into_response()
 }
 
+/// Delegates first-admin provisioning to the auth store using the supplied bootstrap credential.
+/// Success returns user metadata and a plaintext API token for a later login, not a session.
 async fn bootstrap_admin(
     State(state): State<Arc<ConsoleState>>,
     Json(request): Json<BootstrapAdminRequest>,
@@ -529,6 +573,7 @@ async fn bootstrap_admin(
             }))
             .into_response()
         }
+        // Invalid credentials and unavailable bootstrap share one response without backend details.
         Err(nebula_auth::AuthError::InvalidBootstrapCredential)
         | Err(nebula_auth::AuthError::BootstrapUnavailable) => {
             StatusCode::UNAUTHORIZED.into_response()
@@ -540,6 +585,9 @@ async fn bootstrap_admin(
     }
 }
 
+// User and token management checks session/CSRF authorization before backend availability.
+// These store mutations do not traverse or invalidate the separate console session map.
+/// Lists user metadata for an admin reader, returning 503 if no auth store is configured.
 async fn list_users(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
     if !admin_authorized(&state, &headers, false) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -565,6 +613,7 @@ async fn list_users(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) 
     }
 }
 
+/// Looks up a username for an admin reader, distinguishing a missing user from store failure.
 async fn show_user(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -590,6 +639,8 @@ async fn show_user(
     }
 }
 
+/// Creates a user after admin/CSRF checks and role parsing; duplicate usernames return 409.
+/// Username validation remains with the auth store, and success contains no API token.
 async fn create_user(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -625,6 +676,8 @@ async fn create_user(
     }
 }
 
+/// Changes the persisted role after admin/CSRF authorization and rejects unknown role strings.
+/// Existing console sessions keep their login-time role even when their user is changed here.
 async fn change_user_role(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -651,6 +704,8 @@ async fn change_user_role(
     }
 }
 
+/// Updates a user's enabled flag after admin/CSRF authorization, with 404 for a missing user.
+/// Disabling a user here does not remove console sessions already issued to that user.
 async fn change_user_enabled(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -673,6 +728,8 @@ async fn change_user_enabled(
     }
 }
 
+/// Deletes a username through the auth store after admin/CSRF checks; absent users return 404.
+/// The handler does not invalidate any previously issued console sessions.
 async fn delete_user(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -694,6 +751,8 @@ async fn delete_user(
     }
 }
 
+/// Lists a user's token metadata for an admin reader without exposing credential material.
+/// All store errors use the generic 500 response rather than a separate missing-user mapping.
 async fn list_tokens(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -722,6 +781,8 @@ async fn list_tokens(
     }
 }
 
+/// Issues a user API token after admin/CSRF checks, delegating expiration validation to the store.
+/// Missing users return 404 and invalid expirations return 400; success includes the secret.
 async fn create_token(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -746,6 +807,8 @@ async fn create_token(
     }
 }
 
+/// Revokes an API token after admin/CSRF checks and records the revocation only on store success.
+/// This affects the API credential, not console sessions established using it before revocation.
 async fn revoke_token(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -768,6 +831,10 @@ async fn revoke_token(
     }
 }
 
+// Cache reads expose metadata snapshots for browsing and direct store reads for value inspection.
+/// Filters, orders, and paginates cache metadata after authorizing an admin reader.
+/// Live rows are selected by default; `expired=true` selects expired snapshot rows instead.
+/// `total` counts live rows before filtering, while matching counts describe the selected subset.
 async fn list_entries(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -777,6 +844,8 @@ async fn list_entries(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    // Binary filters must decode successfully even when the snapshot would have no matches.
+    // Text search is separate: trim/lowercase the query rather than interpreting it as hex.
     let exact_key = match query.exact_key.as_deref().map(decode_hex).transpose() {
         Ok(key) => key,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
@@ -787,11 +856,14 @@ async fn list_entries(
     };
     let search = query.search.trim().to_lowercase();
     let snapshot = state.store.admin_snapshot();
+    // Use one monotonic instant for expiration filtering, counts, and every row's remaining TTL.
     let instant_now = Instant::now();
     let total = snapshot
         .iter()
         .filter(|entry| !entry.is_expired_at(instant_now))
         .count();
+    // Bound page work and normalize zero, but keep large requested page numbers intact.
+    // Saturating offset arithmetic makes extreme page requests produce empty slices safely.
     let page_size = query.page_size.clamp(1, 100);
     let page = query.page.max(1);
     let offset = page.saturating_sub(1).saturating_mul(page_size);
@@ -801,8 +873,11 @@ async fn list_entries(
         && query.expired != Some(true)
         && matches!(query.sort_by, EntrySort::Key)
         && matches!(query.order, SortOrder::Asc);
+    // The shared snapshot is already key-ordered, so default reads need no filtered list.
+    // Expired rows must still be excluded before applying pagination offsets.
     let (matching, data): (usize, Vec<_>) = if active_key_order {
         let data = if total == snapshot.len() {
+            // With no expired rows, snapshot indices coincide with visible-row page indices.
             let end = offset.saturating_add(page_size).min(snapshot.len());
             snapshot
                 .get(offset..end)
@@ -821,6 +896,8 @@ async fn list_entries(
         };
         (total, data)
     } else {
+        // Combine all filters before slicing. Expiration selects one class, never both classes.
+        // Exact/prefix filters compare raw bytes; search uses case-insensitive lossy key text.
         let mut entries: Vec<_> = snapshot
             .iter()
             .filter(|entry| {
@@ -839,6 +916,7 @@ async fn list_entries(
             })
             .collect();
 
+        // Filtering preserves snapshot key order, so only alternate sorts need another sort pass.
         if !matches!(query.sort_by, EntrySort::Key) || matches!(query.order, SortOrder::Desc) {
             entries.sort_by(|left, right| {
                 let ordering = match query.sort_by {
@@ -850,10 +928,12 @@ async fn list_entries(
                     SortOrder::Asc => ordering,
                     SortOrder::Desc => ordering.reverse(),
                 };
+                // Equal sort values always use ascending keys for deterministic page boundaries.
                 ordering.then_with(|| left.key.cmp(&right.key))
             });
         }
 
+        // Count the complete filtered set before taking a page; out-of-range pages stay empty.
         let matching = entries.len();
         let end = offset.saturating_add(page_size).min(matching);
         let data = entries
@@ -866,6 +946,7 @@ async fn list_entries(
     };
     let total_pages = matching.div_ceil(page_size);
 
+    // Both response layouts carry the same rows; navigation flags reflect the requested page.
     Json(EntriesPage {
         data: data.clone(),
         pagination: Pagination {
@@ -885,6 +966,8 @@ async fn list_entries(
     .into_response()
 }
 
+/// Reads one hex-encoded key directly from the cache and returns hex value plus fresh metadata.
+/// Malformed hex returns 400; a store miss returns 404 rather than an empty value.
 async fn get_entry(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -906,6 +989,8 @@ async fn get_entry(
     }
 }
 
+/// Counts live/expired snapshot rows and sums their recorded sizes for an authorized admin reader.
+/// The byte sum includes expired rows and is not a measurement of total process or allocator memory.
 async fn cache_stats(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
     if !admin_authorized(&state, &headers, false) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -926,6 +1011,8 @@ async fn cache_stats(State(state): State<Arc<ConsoleState>>, headers: HeaderMap)
     .into_response()
 }
 
+/// Converts store metadata into JSON-safe hex/timestamps without loading a cached value.
+/// The caller supplies the monotonic instant so a page shares one remaining-TTL reference time.
 fn metadata_view(entry: &CacheEntryMetadata, instant_now: Instant) -> EntryView {
     EntryView {
         key: encode_hex(&entry.key),
@@ -937,6 +1024,7 @@ fn metadata_view(entry: &CacheEntryMetadata, instant_now: Instant) -> EntryView 
     }
 }
 
+/// Converts wall-clock time to Unix milliseconds, mapping pre-epoch times to zero and capping overflow.
 fn timestamp_millis(time: std::time::SystemTime) -> u64 {
     time.duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -944,6 +1032,8 @@ fn timestamp_millis(time: std::time::SystemTime) -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
+// Cache mutations require the cookie session and its separate CSRF header before changing data.
+/// Clears the cache after admin/CSRF authorization and returns an empty 204 response.
 async fn clear_entries(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
     if !admin_authorized(&state, &headers, true) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -953,6 +1043,8 @@ async fn clear_entries(State(state): State<Arc<ConsoleState>>, headers: HeaderMa
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Parses a hex key/value JSON body and writes it only after admin/CSRF and decoded-size checks.
+/// Bad JSON or hex returns 400; empty/oversized keys and oversized values all return 413.
 async fn set_entry(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -962,6 +1054,7 @@ async fn set_entry(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    // Parse the already-bounded raw body here so malformed JSON uses this handler's 400 response.
     let Ok(request) = serde_json::from_slice::<SetEntryRequest>(&body) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -969,6 +1062,7 @@ async fn set_entry(
     let (Ok(key), Ok(value)) = (decode_hex(&request.key), decode_hex(&request.value)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    // Reject empty keys along with limit violations; an empty value remains a valid byte sequence.
     if key.is_empty()
         || key.len() > state.limits.max_key_len
         || value.len() > state.limits.max_value_len
@@ -981,6 +1075,8 @@ async fn set_entry(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Deletes a hex-addressed key after admin/CSRF checks, distinguishing malformed keys from misses.
+/// The store's deletion result determines whether the response is 204 or 404.
 async fn delete_entry(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -1000,6 +1096,9 @@ async fn delete_entry(
     }
 }
 
+// Session and byte-representation helpers are shared by the protected handlers above.
+/// Checks a live admin cookie and, for writes, the matching session-specific CSRF header.
+/// Does not accept API credentials directly, renew sessions, or remove rejected sessions.
 // Authorize from the cookie and cached login-time role, not the auth store.
 // Failed checks leave sessions in place; session lookup removes expired entries.
 fn admin_authorized(state: &ConsoleState, headers: &HeaderMap, write: bool) -> bool {
@@ -1013,6 +1112,7 @@ fn admin_authorized(state: &ConsoleState, headers: &HeaderMap, write: bool) -> b
         return false;
     }
     // Reads need no CSRF header; protected mutations require the session token.
+    // Here the header must match the stored CSRF secret, not the opaque cookie secret.
     !write
         || headers
             .get("x-nebula-csrf")
@@ -1020,6 +1120,8 @@ fn admin_authorized(state: &ConsoleState, headers: &HeaderMap, write: bool) -> b
             .is_some_and(|value| constant_time_eq(value, &session.csrf_token))
 }
 
+/// Extracts the first matching cookie value from the selected Cookie header's semicolon list.
+/// Malformed header text or an absent named cookie yields no token; values are not decoded.
 fn session_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::COOKIE)?
@@ -1030,6 +1132,8 @@ fn session_token(headers: &HeaderMap) -> Option<String> {
         .find_map(|(name, value)| (name == SESSION_COOKIE).then(|| value.to_owned()))
 }
 
+/// Compares byte contents and lengths without returning early on a mismatching byte.
+/// Work still depends on input length; this is not a guarantee about compiler-generated timing.
 fn constant_time_eq(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
     let right = right.as_bytes();
@@ -1045,6 +1149,7 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
     difference == 0
 }
 
+/// Encodes arbitrary bytes as lowercase hex for binary cache data and randomly generated secrets.
 fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -1055,6 +1160,8 @@ fn encode_hex(bytes: &[u8]) -> String {
     output
 }
 
+/// Decodes contiguous ASCII hex pairs, accepting either letter case but no prefixes or whitespace.
+/// Empty input decodes successfully; callers decide whether an empty key or value is allowed.
 fn decode_hex(input: &str) -> Result<Vec<u8>, ()> {
     if !input.len().is_multiple_of(2) {
         return Err(());
@@ -1066,6 +1173,7 @@ fn decode_hex(input: &str) -> Result<Vec<u8>, ()> {
         .collect()
 }
 
+/// Converts one ASCII hex digit to its nibble value, rejecting all non-hex and non-ASCII bytes.
 fn hex_digit(byte: u8) -> Result<u8, ()> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
@@ -1078,6 +1186,7 @@ fn hex_digit(byte: u8) -> Result<u8, ()> {
 const INDEX_HTML: &str = include_str!("../templates/admin.html");
 const LOGO_SVG: &str = include_str!("../../../assets/nebulacache-logo.svg");
 
+// Handler scenarios call functions directly; only the listener scenario exercises route middleware.
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
@@ -1108,6 +1217,7 @@ mod tests {
 
     use nebula_health::lifecycle::{ApplicationState, Lifecycle};
 
+    /// Pins the SVG content type and body to the bundled asset rather than an external resource.
     #[tokio::test]
     async fn serves_embedded_nebulacache_logo_as_svg() {
         let response = logo().await;
@@ -1118,6 +1228,8 @@ mod tests {
         );
     }
 
+    /// Uses real HTTP to prove even the sessionless root route is gated before readiness.
+    /// Transitioning to `Failed` then verifies the listener's graceful-shutdown signal completes.
     #[tokio::test]
     async fn rejects_admin_requests_before_application_is_ready() {
         let lifecycle = Lifecycle::new();
@@ -1165,6 +1277,8 @@ mod tests {
         server.await.unwrap().unwrap();
     }
 
+    /// Exercises the cookie/CSRF login flow and cache handlers without HTTP routing/extraction.
+    /// Covers metadata-only filtering, pagination bounds, value inspection, and expired-row browsing.
     #[tokio::test]
     async fn login_session_can_manage_entries_and_rejects_anonymous_access() {
         let auth_store = Arc::new(AuthStore::open(":memory:").unwrap());
@@ -1189,6 +1303,7 @@ mod tests {
             },
         });
 
+        // Both metadata reads and destructive mutations must reject a missing session.
         let anonymous = list_entries(
             State(Arc::clone(&state)),
             HeaderMap::new(),
@@ -1199,6 +1314,7 @@ mod tests {
         let anonymous_clear = clear_entries(State(Arc::clone(&state)), HeaderMap::new()).await;
         assert_eq!(anonymous_clear.status(), StatusCode::UNAUTHORIZED);
 
+        // A bad API credential must not establish a console login before the successful flow.
         let invalid_login = login(
             State(Arc::clone(&state)),
             Json(LoginRequest {
@@ -1222,6 +1338,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap();
+        // Pin the currently emitted non-Secure cookie contract, then reuse cookie and CSRF separately.
         assert!(!set_cookie.contains("Secure"));
         let cookie = set_cookie.split(';').next().unwrap().to_owned();
         let body = to_bytes(authenticated.into_body(), 1024).await.unwrap();
@@ -1233,6 +1350,7 @@ mod tests {
             HeaderValue::from_str(response["csrf_token"].as_str().unwrap()).unwrap(),
         );
 
+        // Session lookup must return the original CSRF secret and the cached admin role.
         let restored_session = session(State(Arc::clone(&state)), headers.clone()).await;
         assert_eq!(restored_session.status(), StatusCode::OK);
         let body = to_bytes(restored_session.into_body(), 1024).await.unwrap();
@@ -1240,6 +1358,7 @@ mod tests {
         assert_eq!(restored["csrf_token"], response["csrf_token"]);
         assert_eq!(restored["role"], "admin");
 
+        // Dashboard observations include recorded requests; its feature switch produces 503.
         state.metrics.record_request("set", true, 1_000_000);
         let dashboard = dashboard_metrics(State(Arc::clone(&state)), headers.clone()).await;
         assert_eq!(dashboard.status(), StatusCode::OK);
@@ -1266,6 +1385,7 @@ mod tests {
             .set(b"searchable".to_vec(), b"private value".to_vec(), 0);
         state.store.set(b"b".to_vec(), b"another value".to_vec(), 0);
 
+        // Search is case-insensitive over keys, retains the live total, and never lists values.
         let filtered = list_entries(
             State(Arc::clone(&state)),
             headers.clone(),
@@ -1287,6 +1407,7 @@ mod tests {
         assert_eq!(result["pagination"]["total_pages"], 1);
         assert!(!result["pagination"]["has_next"].as_bool().unwrap());
 
+        // The default ascending key order determines which row appears at the next page offset.
         let second_page = list_entries(
             State(Arc::clone(&state)),
             headers.clone(),
@@ -1304,6 +1425,7 @@ mod tests {
         assert_eq!(result["entries"][0]["key"], "6b");
         assert_eq!(result["pagination"]["has_previous"], true);
 
+        // An extreme page index returns an empty page rather than panicking on a slice boundary.
         let out_of_range = list_entries(
             State(Arc::clone(&state)),
             headers.clone(),
@@ -1318,6 +1440,7 @@ mod tests {
         let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(result["data"].as_array().unwrap().is_empty());
 
+        // Value inspection after replacement must return the current value and its updated size.
         state
             .store
             .set(b"searchable".to_vec(), b"fresh primary value".to_vec(), 0);
@@ -1340,6 +1463,7 @@ mod tests {
         let stats: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(stats["entries"], 3);
 
+        // Non-default size ordering must place the largest key/value entry first when descending.
         let sorted = list_entries(
             State(Arc::clone(&state)),
             headers.clone(),
@@ -1354,6 +1478,7 @@ mod tests {
         let sorted: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(sorted["data"][0]["key"], "73656172636861626c65", "{sorted}");
 
+        // Prefixes address raw key bytes through hex, unlike the text search scenario above.
         let prefix = list_entries(
             State(Arc::clone(&state)),
             headers.clone(),
@@ -1367,6 +1492,7 @@ mod tests {
         let prefix: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(prefix["pagination"]["total"], 1);
 
+        // An exact-key miss has zero total pages, not a synthetic empty first page in the count.
         let no_matches = list_entries(
             State(Arc::clone(&state)),
             headers.clone(),
@@ -1381,6 +1507,7 @@ mod tests {
         assert_eq!(no_matches["pagination"]["total_pages"], 0);
         assert!(no_matches["data"].as_array().unwrap().is_empty());
 
+        // The advertised page size must reflect the server cap rather than the oversized request.
         let capped = list_entries(
             State(Arc::clone(&state)),
             headers.clone(),
@@ -1394,6 +1521,7 @@ mod tests {
         let capped: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(capped["pagination"]["size"], 100);
 
+        // Let a stored row expire without removing it, then select the expired-only snapshot view.
         state.store.set(b"expired".to_vec(), b"value".to_vec(), 1);
         tokio::time::sleep(Duration::from_millis(1_100)).await;
         let expired = list_entries(
@@ -1423,6 +1551,8 @@ mod tests {
         assert!(state.store.is_empty());
     }
 
+    /// Valid read-only API credentials cannot log in, and a manually seeded non-admin session
+    /// still fails read/write/dashboard checks before session lookup removes the invalid role.
     #[tokio::test]
     async fn non_admin_roles_cannot_access_admin_console() {
         let auth_store = Arc::new(AuthStore::open(":memory:").unwrap());
@@ -1457,6 +1587,7 @@ mod tests {
         assert_eq!(denied_login.status(), StatusCode::UNAUTHORIZED);
         assert!(state.sessions.is_empty());
 
+        // Bypass login to test defense in depth: even correct CSRF cannot elevate a cached role.
         state.sessions.insert(
             "read-only-session".to_owned(),
             ConsoleSession {
@@ -1492,6 +1623,7 @@ mod tests {
         assert!(state.sessions.is_empty());
     }
 
+    /// Bootstrap needs no existing session, returns a usable admin API credential, and cannot repeat.
     #[tokio::test]
     async fn bootstrap_admin_api_creates_the_first_admin_and_token() {
         let auth_store = Arc::new(AuthStore::open(":memory:").unwrap());
@@ -1533,6 +1665,7 @@ mod tests {
             .unwrap()
             .is_some_and(|identity| identity.role.is_admin()));
 
+        // Reusing the initial bootstrap credential must not provision a second administrator.
         let unavailable = bootstrap_admin(
             State(state),
             Json(BootstrapAdminRequest {
@@ -1544,6 +1677,8 @@ mod tests {
         assert_eq!(unavailable.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// An authenticated admin can create/read a user and issue a token whose secret is omitted
+    /// from listings; revocation then makes the previously returned API credential unusable.
     #[tokio::test]
     async fn admin_manages_users_and_token_revocation() {
         let auth_store = Arc::new(AuthStore::open(":memory:").unwrap());
@@ -1626,6 +1761,7 @@ mod tests {
         let plaintext = created_token["token"].as_str().unwrap().to_owned();
         let token_id = created_token["id"].as_str().unwrap().to_owned();
 
+        // Keep the creation-only secret for authentication checks, but never expose it on listing.
         let listed_tokens = list_tokens(
             State(Arc::clone(&state)),
             headers.clone(),
@@ -1636,23 +1772,27 @@ mod tests {
         let listed_tokens: serde_json::Value = serde_json::from_slice(&listed_tokens).unwrap();
         assert!(listed_tokens[0].get("token").is_none());
 
+        // Confirm revocation at the authentication store, not just the handler's success status.
         let revoked = revoke_token(State(state.clone()), headers, Path(token_id)).await;
         assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
         assert_eq!(auth_store.authenticate(&plaintext).unwrap(), None);
     }
 
+    /// Binary cache representations must round-trip zero and high-bit bytes without UTF-8 assumptions.
     #[test]
     fn hex_encoding_round_trips_arbitrary_bytes() {
         let bytes = [0, 10, 127, 128, 255];
         assert_eq!(decode_hex(&encode_hex(&bytes)).unwrap(), bytes);
     }
 
+    /// Odd byte counts and non-hex digits are separate malformed-input cases for the decoder.
     #[test]
     fn rejects_invalid_hex() {
         assert!(decode_hex("0").is_err());
         assert!(decode_hex("0g").is_err());
     }
 
+    /// Checks equality outcomes for a trailing-byte mismatch and unequal lengths, not timing behavior.
     #[test]
     fn password_comparison_checks_all_bytes_and_length() {
         assert!(constant_time_eq("secret", "secret"));

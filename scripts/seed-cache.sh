@@ -1,24 +1,31 @@
 #!/bin/sh
 set -eu
 
+# The CLI inherits the token from the environment; keep it out of process arguments.
 : "${NEBULA_TOKEN:?NEBULA_TOKEN must be set}"
 
+# Resolve paths from this script rather than the caller's directory; ignore shell CDPATH output.
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 project_root=$(CDPATH= cd "$script_dir/.." && pwd)
 address=${NEBULA_ADDRESS:-127.0.0.1:17171}
 target_dir=${CARGO_TARGET_DIR:-target}
 total_records=10000
+# Each CLI invocation opens its own authenticated connection; bound concurrent processes/sockets.
 batch_limit=100
 
+# Generate independent 128-bit suffixes to avoid collisions with earlier seeding runs.
 random_hex() {
   od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
 }
 
+# Build once before launching batches so child processes only perform cache operations.
 cd "$project_root"
 cargo build --quiet -p nebula-client
 client=$target_dir/debug/nebula
 
+# A failed batch stops further insertion under set -e after every tracked child has been reaped.
 wait_batch() {
+  # Reap every child even after a failure; bare wait would lose individual exit statuses.
   batch_failed=0
   for pid in $batch_pids; do
     if ! wait "$pid"; then
@@ -38,6 +45,7 @@ batch_pids=
 while [ "$index" -lt "$total_records" ]; do
   key="test:seed:$(random_hex)"
   value="cache-test-value-$(random_hex)"
+  # Passing a CA opts each connection into TLS verification; otherwise use the normal CLI transport.
   if [ -n "${NEBULA_TLS_CA:-}" ]; then
     "$client" --address "$address" --tls-ca "$NEBULA_TLS_CA" set "$key" "$value" &
   else
@@ -52,6 +60,7 @@ while [ "$index" -lt "$total_records" ]; do
   fi
 done
 
+# Drain any partial final batch before reporting the requested total as successfully inserted.
 if [ -n "$batch_pids" ]; then
   wait_batch
 fi

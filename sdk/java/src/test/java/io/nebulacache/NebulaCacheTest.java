@@ -39,6 +39,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+// Tests use a loopback protocol peer so framing, pool timing, and connection failures
+// are exercised without relying on a separately running cache server.
 @Timeout(15)
 class NebulaCacheTest {
     private static final byte[] MAGIC = new byte[] {'N', 'E', 'B', 'U'};
@@ -176,6 +178,8 @@ class NebulaCacheTest {
         }
     }
 
+    // Hold both leases at the server before issuing another call; the third call
+    // must hit acquireTimeout rather than opening a connection beyond maxPoolSize.
     @Test
     void poolAllowsConcurrentRequestsButBoundsAcquisition() throws Exception {
         CountDownLatch entered = new CountDownLatch(2);
@@ -219,6 +223,8 @@ class NebulaCacheTest {
         assertMinimumPoolReplenished(Duration.ofSeconds(10), Duration.ofMillis(80));
     }
 
+    // After lazy expiry removes both minimum connections, one request must trigger
+    // replenishment back to the configured floor instead of creating only one socket.
     private void assertMinimumPoolReplenished(Duration idleTimeout, Duration maxLifetime) throws Exception {
         try (TestServer fixture = new TestServer(NebulaCacheTest::respond);
                 NebulaCache client = new NebulaCache(fixture.address(), new NebulaCache.Config(
@@ -281,6 +287,8 @@ class NebulaCacheTest {
         }
     }
 
+    // Sending one byte at a time prevents socket read timeouts from firing; the
+    // client must still enforce one wall-clock deadline for the complete exchange.
     @Test
     void requestDeadlineCoversEntireResponseRatherThanEachRead() throws Exception {
         try (TestServer fixture = new TestServer((request, socket, output) -> {
@@ -318,6 +326,8 @@ class NebulaCacheTest {
         }
     }
 
+    // A connection reset leaves mutation outcome ambiguous, so retry safety is
+    // asserted by checking the exact number of frames sent for every operation.
     @Test
     void getRetriesResetButMutationsAndPingAreNeverReplayed() throws Exception {
         try (TestServer fixture = new TestServer((request, socket, output) -> {
@@ -389,6 +399,8 @@ class NebulaCacheTest {
         }
     }
 
+    // Concurrent failures race for a single token bucket; this bounds total
+    // attempts independently of which caller wins each retry token.
     @Test
     void concurrentGetsShareClientRetryBudget() throws Exception {
         int operations = 12;
@@ -494,6 +506,8 @@ class NebulaCacheTest {
         assertTrue(condition.getAsBoolean(), "condition did not become true before deadline");
     }
 
+    // Minimal stateful peer for ordinary protocol tests; fault-injection cases use
+    // custom handlers so their response timing and framing remain under test control.
     private static boolean respond(Request request, Socket socket, DataOutputStream output) throws IOException {
         int status = 0;
         byte[] responseValue = new byte[0];
@@ -541,6 +555,8 @@ class NebulaCacheTest {
         boolean handle(Request request, Socket socket, DataOutputStream output) throws Exception;
     }
 
+    // Each accepted socket has its own worker so tests can hold several pooled
+    // requests concurrently and close the peer while exchanges are blocked.
     private static final class TestServer implements AutoCloseable {
         private final ServerSocket listener;
         private final ExecutorService executor = Executors.newCachedThreadPool();

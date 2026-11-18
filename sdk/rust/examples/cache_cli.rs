@@ -1,9 +1,11 @@
+// A small command-line walkthrough of the Rust client API.
 use std::{env, error::Error, io, path::PathBuf, process};
 
 use nebulacache::{Config, NebulaCache};
 
 const USAGE: &str = "Usage: cache_cli [--address HOST:PORT] [--tls-ca PEM] <ping|set|get|delete> [arguments]\n\nCommands:\n  ping\n  set <key> <value> [--ttl SECONDS]\n  get <key>\n  delete <key>\n\nEnvironment:\n  NEBULA_ADDR      Server address (default: 127.0.0.1:17171)\n  NEBULA_TLS_CA    PEM CA file; enables TLS\n  NEBULA_TOKEN     API token for authenticated servers (TLS is optional)";
 
+// Tokio drives the async client calls; top-level failures get a message and nonzero exit status.
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -14,6 +16,8 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
+    // Start from SDK defaults, then let environment settings override them; CLI options below
+    // are applied last, so explicit command-line values take precedence over the environment.
     let mut config = Config::default();
     if let Ok(address) = env::var("NEBULA_ADDR") {
         config.address = address;
@@ -25,6 +29,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .ok()
         .filter(|token| !token.is_empty());
 
+    // Consume global options before the command; each accepts either `--name value` or
+    // `--name=value`, while help exits before constructing a client.
     let mut args = env::args().skip(1).peekable();
     while let Some(option) = args.peek().cloned() {
         if option == "--help" || option == "-h" {
@@ -54,7 +60,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| invalid_argument("a command is required"))?;
     let command_args: Vec<String> = args.collect();
     let cache = NebulaCache::with_config(config)?;
+    // Keep operation errors as a result so the cache can be closed before they are returned.
     let result: Result<(), Box<dyn Error>> = async {
+        // Dispatch to the selected operation; each branch checks its own argument shape.
         match command.as_str() {
             "ping" => {
                 require_count(&command_args, 0, "ping")?;
@@ -68,6 +76,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     )
                     .into());
                 }
+                // Zero means no expiration; otherwise the supplied TTL is in seconds.
                 let ttl_secs = if command_args.len() == 4 && command_args[2] == "--ttl" {
                     command_args[3]
                         .parse::<u64>()
@@ -84,6 +93,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             }
             "get" => {
                 require_count(&command_args, 1, "get")?;
+                // Values that are not valid UTF-8 are shown as hex to preserve their bytes.
                 match cache.get(&command_args[0]).await? {
                     Some(value) => match String::from_utf8(value) {
                         Ok(text) => println!("{text}"),
@@ -108,10 +118,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Ok::<(), Box<dyn Error>>(())
     }
     .await;
+    // Close the client after either success or a command-level failure.
     cache.close().await;
     result
 }
 
+// Apply a validated global option to the config, rejecting missing or unsupported values.
 fn apply_option(config: &mut Config, name: &str, value: String) -> Result<(), io::Error> {
     if value.is_empty() {
         return Err(invalid_argument(format!("{name} requires a value")));
@@ -124,6 +136,7 @@ fn apply_option(config: &mut Config, name: &str, value: String) -> Result<(), io
     Ok(())
 }
 
+// Keep fixed-arity commands from silently accepting missing or extra arguments.
 fn require_count(args: &[String], count: usize, command: &str) -> Result<(), io::Error> {
     if args.len() != count {
         return Err(invalid_argument(format!(
@@ -134,10 +147,12 @@ fn require_count(args: &[String], count: usize, command: &str) -> Result<(), io:
     Ok(())
 }
 
+// Give parsing and validation failures one consistent error kind for the top-level handler.
 fn invalid_argument(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
+// Render arbitrary bytes as lowercase hex when they cannot be printed as UTF-8 text.
 fn encode_hex(value: &[u8]) -> String {
     value.iter().map(|byte| format!("{byte:02x}")).collect()
 }

@@ -16,6 +16,9 @@ use nebula_protocol::FrameLimits;
 use serde::Deserialize;
 
 /// Top-level server configuration, populated from TOML or defaults.
+///
+/// Direct Serde deserialization applies defaults but bypasses the file loader's
+/// environment expansion, scalar coercion, and cross-field validation.
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -172,6 +175,7 @@ pub struct AdminOptions {
 }
 
 impl Default for Config {
+    // Serde uses these values for omitted top-level fields; an empty file uses this directly.
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::from(([0, 0, 0, 0], 17171)),
@@ -189,6 +193,7 @@ impl Default for Config {
 }
 
 impl Default for ResourceLimitsOptions {
+    // Bound cache accounting and connection concurrency independently of protocol frame sizes.
     fn default() -> Self {
         Self {
             max_cache_size_bytes: 64 * 1024 * 1024,
@@ -199,6 +204,7 @@ impl Default for ResourceLimitsOptions {
 }
 
 impl Default for SecurityOptions {
+    // Authentication must be opted into; merely supplying backend details does not enable it.
     fn default() -> Self {
         Self {
             authentication: false,
@@ -208,6 +214,7 @@ impl Default for SecurityOptions {
 }
 
 impl Default for AuthStorageOptions {
+    // Keep the default backend local, with no PostgreSQL URL required unless selected later.
     fn default() -> Self {
         Self {
             backend: AuthStorageBackend::Sqlite,
@@ -218,6 +225,7 @@ impl Default for AuthStorageOptions {
 }
 
 impl Default for TlsOptions {
+    // Disabled TLS needs no certificate material and is independent of authentication.
     fn default() -> Self {
         Self {
             enabled: false,
@@ -228,6 +236,8 @@ impl Default for TlsOptions {
 }
 
 impl Default for PersistenceOptions {
+    // Snapshot defaults are ready for an explicit mode switch but do not enable disk writes.
+    // Absent S3 credentials leave credential selection to the backend's default resolution.
     fn default() -> Self {
         Self {
             mode: PersistenceMode::Volatile,
@@ -246,6 +256,7 @@ impl Default for PersistenceOptions {
 }
 
 impl Default for MetricsOptions {
+    // Metrics are enabled by default but bound to loopback rather than the protocol's wildcard.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -255,6 +266,7 @@ impl Default for MetricsOptions {
 }
 
 impl Default for AdminOptions {
+    // Dashboard data is available when admin is enabled, but does not itself start the listener.
     fn default() -> Self {
         Self {
             enabled: false,
@@ -268,15 +280,20 @@ impl Config {
     /// Parses command-line options and loads the selected TOML configuration file.
     ///
     /// If no path is provided, `nebulad.toml` in the current directory is used.
+    /// The selected file must exist; an empty file uses defaults.
     pub fn from_args() -> Result<Self, Box<dyn Error>> {
         Self::load(Args::parse())
     }
 
+    // Keep the binary's working-directory default separate from tests' injected default paths.
     fn load(args: Args) -> Result<Self, Box<dyn Error>> {
         Self::load_with_default(args, Path::new("nebulad.toml"))
     }
 
+    // Resolve one file, transform its TOML values, then validate the fully defaulted configuration.
     fn load_with_default(args: Args, default_config_path: &Path) -> Result<Self, Box<dyn Error>> {
+        // An explicit argument replaces the default path; neither a missing file nor a read error
+        // falls back to defaults. Preserve the I/O error kind while adding the selected path.
         let path = args
             .config
             .unwrap_or_else(|| default_config_path.to_path_buf());
@@ -289,12 +306,15 @@ impl Config {
         let config = if contents.trim().is_empty() {
             Self::default()
         } else {
+            // Parse before substitution so environment values remain string data, not TOML syntax.
+            // Coercion restores known scalar types before Serde fills defaults and rejects fields.
             let mut value = toml::from_str::<toml::Value>(&contents)?;
             expand_environment_variables(&mut value)?;
             coerce_environment_values(&mut value)?;
             value.try_into()?
         };
 
+        // Reject capacities the connection semaphore cannot represent before runtime creation.
         if config.resource_limits.max_connections > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -303,6 +323,7 @@ impl Config {
             .into());
         }
 
+        // Admin uses the authentication store; enabling it cannot silently leave that store absent.
         if config.admin.enabled && !config.security.authentication {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -311,6 +332,8 @@ impl Config {
             .into());
         }
 
+        // Require connection details only for the active auth backend, and only when auth is on.
+        // This checks presence, not database connectivity, which is handled during startup.
         if config.security.authentication {
             match config.security.auth.backend {
                 AuthStorageBackend::Sqlite
@@ -340,6 +363,8 @@ impl Config {
             }
         }
 
+        // TLS and authentication are independent switches. Only enabled TLS requires both paths;
+        // file readability, PEM contents, and key/certificate compatibility are startup concerns.
         if config.tls.enabled
             && (config.tls.certificate.is_none() || config.tls.private_key.is_none())
         {
@@ -350,6 +375,7 @@ impl Config {
             .into());
         }
 
+        // Tokio's repeating cleanup timer requires a nonzero period.
         if config.ttl_cleanup_interval_secs == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -358,6 +384,8 @@ impl Config {
             .into());
         }
 
+        // Volatile mode does not require snapshot settings. In snapshot mode, validate the selected
+        // destination only, alongside the interval and retention shared by both storage backends.
         if config.persistence.mode == PersistenceMode::Snapshot
             && (config.persistence.snapshot_interval_secs == 0
                 || config.persistence.snapshot_retention == 0
@@ -377,6 +405,8 @@ impl Config {
             .into());
         }
 
+        // Explicit S3 credentials are all-or-nothing, even in volatile mode or with filesystem
+        // storage selected. Neither supplied is allowed; this checks option presence, not contents.
         if config.persistence.snapshot_s3_access_key_id.is_some()
             != config.persistence.snapshot_s3_secret_access_key.is_some()
         {
@@ -391,12 +421,15 @@ impl Config {
     }
 
     /// Returns the protocol frame limits applied by the server.
+    /// These are protocol defaults, independent of the configured resource limits.
     pub fn frame_limits(&self) -> FrameLimits {
         FrameLimits::default()
     }
 }
 
 // Expand strings recursively so placeholders work in nested tables and arrays as well as top-level values.
+// Only string values are rewritten: table keys and already typed TOML scalars remain unchanged.
+// Errors abort loading; a partially transformed value is never deserialized into Config.
 fn expand_environment_variables(value: &mut toml::Value) -> Result<(), Box<dyn Error>> {
     match value {
         toml::Value::String(text) => *text = expand_environment_string(text)?,
@@ -421,6 +454,7 @@ fn expand_environment_string(value: &str) -> Result<String, io::Error> {
     let mut cursor = 0;
 
     // `cursor` indexes the original input; expanded output can have a different length.
+    // Replacements are appended literally, so expansion is single-pass, not recursive.
     while let Some(relative_start) = value[cursor..].find("${") {
         let start = cursor + relative_start;
         expanded.push_str(&value[cursor..start]);
@@ -480,6 +514,7 @@ fn valid_environment_name(name: &str) -> bool {
         && characters.all(|character| matches!(character, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'))
 }
 
+// Coerce only known numeric/boolean fields; other strings may be literal paths or credentials.
 fn coerce_environment_values(value: &mut toml::Value) -> Result<(), Box<dyn Error>> {
     let toml::Value::Table(values) = value else {
         return Ok(());

@@ -1,3 +1,5 @@
+"""Exercise the Python client against a controllable local wire-protocol server."""
+
 import inspect
 import socket
 import socketserver
@@ -12,12 +14,16 @@ from unittest.mock import patch
 
 from nebulacache import CacheConnectionError, CacheProtocolError, CacheResponseError, NebulaCache
 
+# Request framing: magic, version, opcode, key length, value length, and TTL.
 _REQUEST_HEADER = struct.Struct("!4sBBIIQ")
+# Response framing: magic, version, status, and response-payload length.
 _RESPONSE_HEADER = struct.Struct("!4sBBI")
 
 
 @dataclass
 class ResponsePlan:
+    """Describe an optional delay, synchronization point, or wire fault for one request."""
+
     delay: float = 0.0
     entered: threading.Event | None = None
     release: threading.Event | None = None
@@ -28,15 +34,19 @@ class ResponsePlan:
 
 
 class CacheHandler(socketserver.BaseRequestHandler):
+    """Parse client requests and return normal or deliberately malformed responses."""
+
     entries: dict[bytes, bytes] = {}
     ttls: dict[bytes, int] = {}
 
     def handle(self) -> None:
+        """Serve framed requests until the client disconnects or the test server stops."""
         server = self.server
         with server.condition:
             session = server.session_ids[self.request]
         try:
             while not server.stopping.is_set():
+                # TCP is a byte stream: read the fixed header and then each declared field exactly.
                 header = self._receive_exactly(_REQUEST_HEADER.size)
                 magic, version, opcode, key_len, value_len, ttl_secs = _REQUEST_HEADER.unpack(header)
                 if magic != b"NEBU" or version != 1:
@@ -44,6 +54,7 @@ class CacheHandler(socketserver.BaseRequestHandler):
                 key = self._receive_exactly(key_len)
                 value = self._receive_exactly(value_len)
                 with server.condition:
+                    # Record a snapshot per request and consume at most one planned fault.
                     server.requests.append((session, opcode, key, value, ttl_secs))
                     server.active += 1
                     server.peak_active = max(server.peak_active, server.active)
@@ -61,10 +72,12 @@ class CacheHandler(socketserver.BaseRequestHandler):
                         return
                     if plan.disconnect:
                         if plan.reset:
+                            # Zero-time SO_LINGER makes the close visible as a TCP reset, not EOF.
                             self.request.setsockopt(
                                 socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
                             )
                         return
+                    # Implement enough opcodes for client behavior tests; status values mirror the wire protocol.
                     with server.condition:
                         if opcode == 4:
                             status, response_value = 0, b"PONG"
@@ -86,6 +99,7 @@ class CacheHandler(socketserver.BaseRequestHandler):
                             status, response_value = 1, b""
                         else:
                             status, response_value = 2, b"invalid request"
+                    # Length is the payload byte count; custom plans can violate any framing invariant.
                     response = _RESPONSE_HEADER.pack(b"NEBU", 1, status, len(response_value))
                     response += response_value
                     if plan.response is not None:
@@ -93,12 +107,14 @@ class CacheHandler(socketserver.BaseRequestHandler):
                     if plan.fragments is None:
                         self.request.sendall(response)
                     else:
+                        # Delayed fragments distinguish correct exact reads from packet-boundary assumptions.
                         for delay, fragment in plan.fragments:
                             if server.stopping.wait(delay):
                                 return
                             self.request.sendall(fragment)
                         return
                 finally:
+                    # Keep active counts balanced even when a fault path returns early.
                     with server.condition:
                         server.active -= 1
                         server.condition.notify_all()
@@ -110,6 +126,7 @@ class CacheHandler(socketserver.BaseRequestHandler):
                 server.condition.notify_all()
 
     def _receive_exactly(self, length: int) -> bytes:
+        """Accumulate a fixed-size field, treating early EOF as an incomplete frame."""
         chunks = bytearray()
         while len(chunks) < length:
             chunk = self.request.recv(length - len(chunks))
@@ -120,10 +137,13 @@ class CacheHandler(socketserver.BaseRequestHandler):
 
 
 class CacheServer(socketserver.ThreadingTCPServer):
+    """Local threaded server with counters and deterministic per-request fault injection."""
+
     allow_reuse_address = True
     daemon_threads = True
 
     def __init__(self) -> None:
+        """Initialize isolated state before binding an ephemeral loopback port."""
         self.condition = threading.Condition()
         self.stopping = threading.Event()
         self.entries = {}
@@ -138,6 +158,7 @@ class CacheServer(socketserver.ThreadingTCPServer):
         super().__init__(("127.0.0.1", 0), CacheHandler)
 
     def get_request(self):
+        """Assign each accepted socket a stable session number for reuse assertions."""
         connection, address = super().get_request()
         with self.condition:
             self.accepted += 1
@@ -147,12 +168,14 @@ class CacheServer(socketserver.ThreadingTCPServer):
         return connection, address
 
     def plan(self, opcode: int, key: bytes = b"", **options) -> ResponsePlan:
+        """Queue one behavior override for the next matching opcode/key request."""
         plan = ResponsePlan(**options)
         with self.condition:
             self.plans[(opcode, key)].append(plan)
         return plan
 
     def count(self, opcode: int | None = None, key: bytes | None = None) -> int:
+        """Count recorded requests, optionally narrowed to one opcode and/or key."""
         with self.condition:
             return sum(
                 (opcode is None or request[1] == opcode)
@@ -161,10 +184,12 @@ class CacheServer(socketserver.ThreadingTCPServer):
             )
 
     def wait_for(self, predicate, timeout: float = 2.0) -> bool:
+        """Wait on the server condition until a synchronized test predicate is true."""
         with self.condition:
             return self.condition.wait_for(predicate, timeout)
 
     def stop(self) -> None:
+        """Stop accepting work, unblock handlers, and close every tracked socket."""
         self.stopping.set()
         with self.condition:
             sockets = tuple(self.sockets)
@@ -179,7 +204,10 @@ class CacheServer(socketserver.ThreadingTCPServer):
 
 
 class NebulaCacheTests(unittest.TestCase):
+    """Verify client API, pooling, protocol, retry, deadline, and cleanup behavior."""
+
     def setUp(self) -> None:
+        """Start an isolated loopback server and register deterministic cleanup."""
         self.server = CacheServer()
         CacheHandler.entries = self.server.entries
         CacheHandler.ttls = self.server.ttls
@@ -193,6 +221,7 @@ class NebulaCacheTests(unittest.TestCase):
         self.cache = self.make_cache()
 
     def make_cache(self, *args, **options) -> NebulaCache:
+        """Construct a client and arrange to close it during test teardown."""
         cache = NebulaCache(self.address, *args, **options)
         close = getattr(cache, "close", None)
         if close is not None:
@@ -200,14 +229,17 @@ class NebulaCacheTests(unittest.TestCase):
         return cache
 
     def seed(self, key: bytes = b"key", value: bytes = b"value") -> None:
+        """Insert bytes directly into the fake server's store without a client request."""
         with self.server.condition:
             self.server.entries[key] = value
 
     def pool_sockets(self, cache: NebulaCache) -> tuple[socket.socket, ...]:
+        """Return a synchronized snapshot of sockets currently owned by the pool."""
         with cache._condition:
             return tuple(connection.socket for connection in cache._connections)
 
     def test_ping_and_key_lifecycle(self) -> None:
+        """Cover ping plus set/get/delete semantics and TTL forwarding."""
         self.assertTrue(self.cache.ping())
         self.cache.set("greeting", "hello", ttl_secs=30)
         self.assertEqual(self.cache.get("greeting"), b"hello")
@@ -218,6 +250,7 @@ class NebulaCacheTests(unittest.TestCase):
         self.assertIsNone(self.cache.get("greeting"))
 
     def test_binary_values_and_utf8_keys(self) -> None:
+        """Ensure keys are UTF-8 encoded while value payloads remain arbitrary bytes."""
         key = "space / café"
         value = b"\x00\xff"
         self.cache.set(key, value)

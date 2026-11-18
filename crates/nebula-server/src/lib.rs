@@ -3,6 +3,10 @@
 //! The executable wires these modules together through [`application::Application`]. The TCP
 //! protocol is handled by [`server`], while optional HTTP administration and metrics endpoints
 //! are provided by [`admin`] and [`metrics`].
+//!
+//! Embedders can drive startup and shutdown explicitly through the application API. Direct
+//! handler calls bypass the listener's lifecycle and authentication checks; callers must enforce
+//! those boundaries themselves.
 
 /// HTTP administration API and browser console.
 pub mod admin;
@@ -20,4 +24,5 @@ pub mod persistence;
 pub mod server;
 /// systemd notification and watchdog integration.
 pub mod systemd;
+/// Internal expiration maintenance owned by the application lifecycle.
 mod ttl_cleanup;

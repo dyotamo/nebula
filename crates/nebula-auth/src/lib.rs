@@ -12,14 +12,19 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::runtime::{Handle, RuntimeFlavor};
 
+/// Permissions assigned to a user for reads, writes, and administration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
+    /// May authenticate and perform read operations, but not mutations.
     ReadOnly,
+    /// May perform reads and writes, but not administrative account management.
     ReadWrite,
+    /// Identifies an administrative account; callers enforce what that role permits.
     Admin,
 }
 
 impl Role {
+    /// Returns the lowercase role name used in storage.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "readonly",
@@ -28,14 +33,17 @@ impl Role {
         }
     }
 
+    /// Reports read access, which every role grants.
     pub fn can_read(self) -> bool {
         true
     }
 
+    /// Reports whether this role grants write access.
     pub fn can_write(self) -> bool {
         matches!(self, Self::ReadWrite | Self::Admin)
     }
 
+    /// Reports whether this role grants administrative access.
     pub fn is_admin(self) -> bool {
         self == Self::Admin
     }
@@ -54,37 +62,60 @@ impl TryFrom<&str> for Role {
     }
 }
 
+/// A persisted account with a creation timestamp in Unix seconds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct User {
+    /// Stable, randomly generated identifier used by token records.
     pub id: String,
+    /// Unique account name, preserved exactly as supplied after validation.
     pub username: String,
+    /// Role resolved from storage for this account.
     pub role: Role,
+    /// Whether tokens belonging to this account may currently authenticate.
     pub enabled: bool,
+    /// Account creation time as seconds since the Unix epoch.
     pub created_at: i64,
 }
 
+/// A user's identity and role as resolved at authentication time.
+/// Later account changes or token revocation do not update an already returned identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedIdentity {
+    /// Stable identifier of the account that owns the presented token.
     pub user_id: String,
+    /// Account name at the time authentication was resolved.
     pub username: String,
+    /// Current stored role at the time authentication was resolved.
     pub role: Role,
 }
 
+/// Non-secret token details with timestamps in Unix seconds.
+/// An absent expiration means the token does not expire.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenMetadata {
+    /// Identifier accepted by revocation APIs; not the bearer secret.
     pub id: String,
+    /// Owner account's stable identifier.
     pub user_id: String,
+    /// Token creation time as seconds since the Unix epoch.
     pub created_at: i64,
+    /// Expiration time in Unix seconds, or `None` for a non-expiring token.
     pub expires_at: Option<i64>,
+    /// Whether authentication rejects this token regardless of its expiration.
     pub revoked: bool,
 }
 
+/// A newly issued token whose plaintext secret cannot be retrieved from storage later.
+/// Treat this value as sensitive, including its derived `Debug` output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedToken {
+    /// Safe-to-store metadata; its ID can later be used to revoke the token.
     pub metadata: TokenMetadata,
+    /// Bearer secret returned only at issuance; storage retains only its digest.
     pub token: String,
 }
 
+/// Storage, validation, and credential lifecycle failures.
 #[derive(Debug, Error)]
 pub enum AuthError {
     #[error("authentication storage error: {0}")]
@@ -115,11 +146,18 @@ pub enum AuthError {
     Filesystem(#[from] std::io::Error),
 }
 
+/// Synchronous user and bearer-token storage backed by SQLite or PostgreSQL.
+/// Management operations do not enforce caller permissions. Calls block the caller;
+/// PostgreSQL runtime isolation prevents nested-runtime errors, not blocking I/O.
 pub struct AuthStore {
     backend: Option<Box<dyn AuthBackend>>,
 }
 
+// Backend implementations share one behavioral contract: both adapters return the same
+// domain errors and expose the same account/token lifecycle semantics to AuthStore.
 trait AuthBackend: Send + Sync {
+    // The synchronous Postgres client owns/drives Tokio internals; SQLite does not.
+    // The facade uses this capability rather than branching on backend type.
     fn requires_runtime_isolation(&self) -> bool {
         false
     }
@@ -151,12 +189,18 @@ struct SqliteAuthStore {
 }
 
 impl AuthStore {
+    /// Opens or creates a SQLite database and initializes its schema.
+    /// Use `:memory:` for a database scoped to this store instance.
+    /// A newly created parent directory and the database file are restricted to
+    /// owner-only permissions on Unix; other platforms use filesystem defaults.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuthError> {
         Ok(Self {
             backend: Some(Box::new(SqliteAuthStore::open(path)?)),
         })
     }
 
+    /// Connects to PostgreSQL over TLS and initializes the authentication tables if absent.
+    /// This uses the platform's native TLS implementation through `native-tls`.
     pub fn open_postgres(connection_string: &str) -> Result<Self, AuthError> {
         let backend = run_blocking(|| PostgresAuthStore::open(connection_string))?;
         Ok(Self {
@@ -164,6 +208,8 @@ impl AuthStore {
         })
     }
 
+    // Keep backend selection in one place so every facade operation gets the same
+    // runtime handling. This is isolation from nested runtimes, not async I/O.
     fn with_backend<T: Send>(&self, operation: impl FnOnce(&dyn AuthBackend) -> T + Send) -> T {
         let backend = self
             .backend
@@ -176,10 +222,14 @@ impl AuthStore {
         }
     }
 
+    /// Creates a bootstrap secret, returning `None` if an admin or credential already exists.
+    /// Only its hash is stored, so an existing secret cannot be retrieved again.
     pub fn ensure_bootstrap_credential(&self) -> Result<Option<String>, AuthError> {
         self.with_backend(|backend| backend.ensure_bootstrap_credential())
     }
 
+    /// Atomically creates an admin and non-expiring token, consuming the bootstrap secret.
+    /// Requires a valid secret and no existing admin, even a disabled one.
     pub fn bootstrap_admin(
         &self,
         credential: &str,
@@ -188,30 +238,39 @@ impl AuthStore {
         self.with_backend(|backend| backend.bootstrap_admin(credential, username))
     }
 
+    /// Creates an enabled user without issuing a token.
+    /// Usernames must be nonblank and at most 128 UTF-8 bytes; they are stored without trimming.
     pub fn create_user(&self, username: &str, role: Role) -> Result<User, AuthError> {
         self.with_backend(|backend| backend.create_user(username, role))
     }
 
+    /// Lists all users, including disabled accounts, ordered by username.
     pub fn list_users(&self) -> Result<Vec<User>, AuthError> {
         self.with_backend(|backend| backend.list_users())
     }
 
+    /// Looks up a user, including disabled accounts; a missing username yields `None`.
     pub fn get_user(&self, username: &str) -> Result<Option<User>, AuthError> {
         self.with_backend(|backend| backend.get_user(username))
     }
 
+    /// Changes the role returned by subsequent authentications of the user's tokens.
     pub fn set_role(&self, username: &str, role: Role) -> Result<(), AuthError> {
         self.with_backend(|backend| backend.set_role(username, role))
     }
 
+    /// Enables or disables authentication without revoking the user's existing tokens.
     pub fn set_enabled(&self, username: &str, enabled: bool) -> Result<(), AuthError> {
         self.with_backend(|backend| backend.set_enabled(username, enabled))
     }
 
+    /// Deletes a user and all of their token records.
     pub fn delete_user(&self, username: &str) -> Result<(), AuthError> {
         self.with_backend(|backend| backend.delete_user(username))
     }
 
+    /// Issues a token; missing or disabled users yield [`AuthError::UserNotFound`].
+    /// `expires_at` is Unix time in seconds and must be in the future; `None` never expires.
     pub fn create_token(
         &self,
         username: &str,
@@ -220,14 +279,19 @@ impl AuthStore {
         self.with_backend(|backend| backend.create_token(username, expires_at))
     }
 
+    /// Lists token metadata, including revoked and expired tokens, newest first.
+    /// Returns an empty list for a missing user.
     pub fn list_tokens(&self, username: &str) -> Result<Vec<TokenMetadata>, AuthError> {
         self.with_backend(|backend| backend.list_tokens(username))
     }
 
+    /// Revokes a token by metadata ID, not its secret; repeated revocation succeeds.
     pub fn revoke_token(&self, token_id: &str) -> Result<(), AuthError> {
         self.with_backend(|backend| backend.revoke_token(token_id))
     }
 
+    /// Resolves a token to the user's current role, or `None` if it cannot authenticate.
+    /// Unknown, revoked, expired, and disabled-user tokens all yield `None`, not an error.
     pub fn authenticate(&self, token: &str) -> Result<Option<AuthenticatedIdentity>, AuthError> {
         self.with_backend(|backend| backend.authenticate(token))
     }
@@ -238,6 +302,7 @@ impl Drop for AuthStore {
         let Some(backend) = self.backend.take() else {
             return;
         };
+        // The synchronous Postgres client drives its runtime even during destruction.
         if backend.requires_runtime_isolation() {
             run_blocking(move || drop(backend));
         } else {
@@ -246,6 +311,8 @@ impl Drop for AuthStore {
     }
 }
 
+// Postgres drives its own Tokio runtime, so it cannot run directly in an async task.
+// block_in_place allows nested runtimes; current-thread runtimes require a new thread.
 fn run_blocking<T: Send>(operation: impl FnOnce() -> T + Send) -> T {
     match Handle::try_current() {
         Ok(handle) if matches!(handle.runtime_flavor(), RuntimeFlavor::MultiThread) => {
@@ -259,6 +326,8 @@ fn run_blocking<T: Send>(operation: impl FnOnce() -> T + Send) -> T {
     }
 }
 
+// SQLite's schema and query semantics mirror PostgresAuthStore; the mutex protects
+// its single connection, while database constraints remain the cross-process guard.
 impl SqliteAuthStore {
     fn open(path: impl AsRef<Path>) -> Result<Self, AuthError> {
         let path = path.as_ref();
@@ -345,7 +414,10 @@ impl SqliteAuthStore {
             .connection
             .lock()
             .map_err(|_| AuthError::LockPoisoned)?;
+        // Commit the account, initial token, and credential consumption as one unit.
         let transaction = connection.transaction()?;
+        // The bootstrap secret is looked up only as a digest, so a restart cannot
+        // recover a secret whose one-time plaintext was lost by the caller.
         let expected: Option<Vec<u8>> = transaction
             .query_row(
                 "SELECT token_hash FROM bootstrap_credentials WHERE id = 1",
@@ -365,6 +437,7 @@ impl SqliteAuthStore {
             |row| row.get(0),
         )?;
         if existing_admin {
+            // A stale bootstrap row must not remain usable after an admin exists.
             transaction.execute("DELETE FROM bootstrap_credentials WHERE id = 1", [])?;
             transaction.commit()?;
             return Err(AuthError::BootstrapUnavailable);
@@ -579,6 +652,7 @@ impl SqliteAuthStore {
     }
 
     fn update_user(&self, username: &str, column: &str, value: &str) -> Result<(), AuthError> {
+        // `column` must remain an internal constant; SQL parameters bind only values.
         let query = format!("UPDATE users SET {column} = ?1 WHERE username = ?2");
         let connection = self
             .connection
@@ -686,6 +760,8 @@ impl AuthBackend for PostgresAuthStore {
     fn ensure_bootstrap_credential(&self) -> Result<Option<String>, AuthError> {
         let mut client = self.client.lock().map_err(|_| AuthError::LockPoisoned)?;
         let mut transaction = client.transaction().map_err(storage_error)?;
+        // The credential row may not exist yet; an advisory lock serializes issuers
+        // across connections until this transaction ends.
         transaction
             .query_one("SELECT pg_advisory_xact_lock(827100001)", &[])
             .map_err(storage_error)?;
@@ -726,6 +802,8 @@ impl AuthBackend for PostgresAuthStore {
         validate_username(username)?;
         let mut client = self.client.lock().map_err(|_| AuthError::LockPoisoned)?;
         let mut transaction = client.transaction().map_err(storage_error)?;
+        // Hold the credential row lock through admin/token creation and deletion
+        // so competing bootstraps cannot consume the same secret.
         let expected: Option<Vec<u8>> = transaction
             .query_opt(
                 "SELECT token_hash FROM bootstrap_credentials WHERE id = 1 FOR UPDATE",
@@ -925,6 +1003,7 @@ impl AuthBackend for PostgresAuthStore {
 
 impl PostgresAuthStore {
     fn update_user(&self, column: &str, value: &str, username: &str) -> Result<(), AuthError> {
+        // `column` must remain an internal constant; SQL parameters bind only values.
         let query = format!("UPDATE users SET {column} = $1 WHERE username = $2");
         let changed = self
             .client
@@ -1018,6 +1097,8 @@ fn generate_secret(prefix: &str) -> Result<String, AuthError> {
     Ok(result)
 }
 
+// Secrets have 256 bits of OS randomness, so a fast hash is suitable for lookup;
+// both backends persist only the digest, never the bearer secret.
 fn hash_token(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }

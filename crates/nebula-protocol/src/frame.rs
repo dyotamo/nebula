@@ -2,18 +2,41 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{Opcode, ProtocolError, Request, Response, Status};
 
+/// Prefix identifying both request and response frames.
+///
+/// Readers compare these four bytes before interpreting the remaining header; writers always
+/// emit them first. The prefix is not a checksum and does not validate the payload contents.
 pub const MAGIC: [u8; 4] = *b"NEBU";
+/// Wire version emitted by writers and accepted by readers.
+///
+/// Readers reject any other value rather than attempting compatibility fallback or resynchronization.
 pub const VERSION: u8 = 1;
+/// Default key-length limit in bytes; custom [`FrameLimits`] can override it.
+///
+/// This bound applies to request keys; response frames have no key field.
 pub const MAX_KEY_LEN: usize = 1_024;
+/// Default value-length limit in bytes (8 MiB).
+///
+/// This is the default for both request values and response payloads, except that response
+/// codecs retain a four-byte minimum to allow the `PONG` control payload.
 pub const MAX_VALUE_LEN: usize = 8 * 1024 * 1024;
 
+/// Per-frame payload limits in bytes, checked before allocation or writing.
+/// Responses allow at least four bytes for PONG; AUTH tokens also have a fixed 1 KiB cap.
+///
+/// The limits are independent of wire-format length-field capacity: a frame must satisfy both
+/// its configured bound and the `u32` length representation. Request keys and values are
+/// bounded separately; the value limit also applies to response payloads with the PONG exception.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrameLimits {
+    /// Maximum request key length; response frames have no key field.
     pub max_key_len: usize,
+    /// Maximum request value length; responses use this limit or four bytes, whichever is larger.
     pub max_value_len: usize,
 }
 
 impl Default for FrameLimits {
+    /// Uses the crate's standard request-key and payload bounds.
     fn default() -> Self {
         Self {
             max_key_len: MAX_KEY_LEN,
@@ -22,10 +45,16 @@ impl Default for FrameLimits {
     }
 }
 
+// Integers are big-endian; payload lengths exclude the header.
+// Request: magic(4), version(1), opcode(1), key_len(4), value_len(4), TTL(8).
+// Response: magic(4), version(1), status(1), value_len(4).
 const REQUEST_HEADER_LEN: usize = 22;
 const RESPONSE_HEADER_LEN: usize = 10;
 
-/// Reads one complete request. `UnexpectedEof` before any header byte is a clean disconnect.
+/// Reads one request with default limits; EOF, including truncation, is an I/O error.
+///
+/// This convenience entry point has the same framing and stream-consumption behavior as
+/// [`read_request_with_limits`], using [`FrameLimits::default`].
 pub async fn read_request<R>(reader: &mut R) -> Result<Request, ProtocolError>
 where
     R: AsyncRead + Unpin,
@@ -33,6 +62,14 @@ where
     read_request_with_limits(reader, FrameLimits::default()).await
 }
 
+/// Reads one request, validating its header before allocating payload buffers.
+/// On rejection the payload is not drained, so the stream is not ready for another frame.
+///
+/// The fixed-size header is read first, then magic, version, opcode, declared lengths, and
+/// operation-specific shape are checked in that order. Only an accepted pair of lengths is used
+/// to allocate the owned key and value buffers; short headers or payloads surface as I/O errors.
+/// Any error after bytes have been consumed leaves the caller responsible for discarding or
+/// otherwise recovering the connection, since this codec does not scan for a later frame boundary.
 pub async fn read_request_with_limits<R>(
     reader: &mut R,
     limits: FrameLimits,
@@ -56,10 +93,14 @@ where
     let value_len = u32::from_be_bytes(header[10..14].try_into().unwrap()) as usize;
     let ttl_secs = u64::from_be_bytes(header[14..22].try_into().unwrap());
 
+    // Reject declared payload sizes before shape checks or allocation so malformed frames cannot
+    // request buffers larger than the caller's configured budget.
     if key_len > limits.max_key_len || value_len > limits.max_value_len {
         return Err(ProtocolError::FrameTooLarge);
     }
 
+    // Control operations have explicit payload shapes; TTL is retained for SET and must be
+    // zero for AUTH, whose token has a protocol-level cap independent of custom value limits.
     if opcode == Opcode::Ping && (key_len != 0 || value_len != 0) {
         return Err(ProtocolError::InvalidFrame(
             "PING must not contain key or value",
@@ -102,6 +143,10 @@ where
     })
 }
 
+/// Validates, writes, and flushes one request using default limits.
+///
+/// Shape or size errors are returned before output begins. Stream I/O errors can still occur
+/// after a prefix of the header or payload has been written, so the stream may then be unusable.
 pub async fn write_request<W>(writer: &mut W, request: &Request) -> Result<(), ProtocolError>
 where
     W: AsyncWrite + Unpin,
@@ -109,6 +154,14 @@ where
     write_request_with_limits(writer, request, FrameLimits::default()).await
 }
 
+/// Validates request shape and lengths before writing any bytes, then flushes the frame.
+/// An I/O failure may leave a partial frame on the stream.
+///
+/// Validation first enforces caller limits, then operation-specific key/value/token rules, and
+/// finally verifies that payload lengths fit the `u32` fields. The encoder writes the fixed header,
+/// key, and value in that order; the TTL field is serialized for every opcode, though only SET
+/// assigns it cache-expiration meaning. The final flush sends buffered bytes but does not make
+/// a failed or partially written stream safe to reuse.
 pub async fn write_request_with_limits<W>(
     writer: &mut W,
     request: &Request,
@@ -168,6 +221,10 @@ where
     Ok(())
 }
 
+/// Reads one response using default limits; non-OK statuses are returned as data.
+///
+/// A decoded status indicates the application result and is not itself a codec error. This
+/// convenience function delegates to [`read_response_with_limits`] with default bounds.
 pub async fn read_response<R>(reader: &mut R) -> Result<Response, ProtocolError>
 where
     R: AsyncRead + Unpin,
@@ -175,6 +232,14 @@ where
     read_response_with_limits(reader, FrameLimits::default()).await
 }
 
+/// Reads one response with the value limit described by [`FrameLimits`].
+/// A rejected header leaves its payload unread; no frame resynchronization is attempted.
+///
+/// The reader consumes and checks the fixed header before allocating the declared payload. The
+/// response limit is raised to at least four bytes so a `PONG` can be received even with a zero or
+/// smaller configured value limit; all other payloads remain bounded by the configured limit.
+/// Truncated headers or values are I/O errors, and after an error the connection should not be
+/// assumed to begin at a frame boundary.
 pub async fn read_response_with_limits<R>(
     reader: &mut R,
     limits: FrameLimits,
@@ -195,6 +260,7 @@ where
 
     let status = Status::try_from(header[5])?;
     let value_len = u32::from_be_bytes(header[6..10].try_into().unwrap()) as usize;
+    // Keep liveness replies possible even when cache values are disabled or tiny.
     if value_len > limits.max_value_len.max(b"PONG".len()) {
         return Err(ProtocolError::FrameTooLarge);
     }
@@ -204,6 +270,10 @@ where
     Ok(Response { status, value })
 }
 
+/// Writes and flushes one response using default limits.
+///
+/// The response status and value are serialized as supplied; application-level status/value
+/// combinations are not interpreted by this framing layer.
 pub async fn write_response<W>(writer: &mut W, response: &Response) -> Result<(), ProtocolError>
 where
     W: AsyncWrite + Unpin,
@@ -211,6 +281,12 @@ where
     write_response_with_limits(writer, response, FrameLimits::default()).await
 }
 
+/// Checks the response value limit before writing, then flushes the frame.
+/// As on reads, a four-byte minimum limit permits PONG; I/O errors may leave a partial frame.
+///
+/// The writer rejects an oversized value before emitting any bytes, encodes the status and value
+/// length in the fixed response header, and then writes the value. As with request writes, a
+/// stream error after output starts can leave the peer with an incomplete frame.
 pub async fn write_response_with_limits<W>(
     writer: &mut W,
     response: &Response,

@@ -27,6 +27,8 @@ type testFrame struct {
 	attempt    int
 }
 
+// testServer is a controllable loopback peer that records pool and retry behavior,
+// and can block or corrupt individual responses through hook.
 type testServer struct {
 	listener    net.Listener
 	mu          sync.Mutex
@@ -105,6 +107,8 @@ func (server *testServer) serve() {
 	}
 }
 
+// handle decodes complete request frames and attaches connection/attempt metadata so
+// tests can tell whether retries reuse a socket or accidentally replay a request.
 func (server *testServer) handle(connection net.Conn, id int) {
 	defer server.workers.Done()
 	defer func() {
@@ -591,6 +595,8 @@ func TestPoolMinimumTargetOnFirstUse(t *testing.T) {
 	}
 }
 
+// TestPoolConcurrentBound holds the first three leases open and proves that a
+// fourth caller waits instead of exceeding MaxPoolSize.
 func TestPoolConcurrentBound(t *testing.T) {
 	server := newTestServer(t)
 	entered := make(chan testFrame, 24)
@@ -641,6 +647,8 @@ func TestPoolConcurrentBound(t *testing.T) {
 	}
 }
 
+// TestPoolAcquisitionTimeout separates time spent waiting for a leased socket
+// from the request deadline and confirms the pool remains usable afterward.
 func TestPoolAcquisitionTimeout(t *testing.T) {
 	server := newTestServer(t)
 	entered := make(chan struct{}, 1)
@@ -781,6 +789,8 @@ func TestPoolMaxLifetimeIsNotResetByUse(t *testing.T) {
 	}
 }
 
+// failTestResponse leaves deliberately partial or reset frames on the wire so
+// retry tests cover failures that cannot be mistaken for application statuses.
 func failTestResponse(connection net.Conn, kind string) bool {
 	var header [responseHeader]byte
 	copy(header[:4], protocolMagic[:])
@@ -800,6 +810,8 @@ func failTestResponse(connection net.Conn, kind string) bool {
 	return false
 }
 
+// TestGetRetriesTransientResponses exercises connection closure, incomplete
+// frames, resets, and timeouts; each retry must use a fresh connection.
 func TestGetRetriesTransientResponses(t *testing.T) {
 	for _, kind := range []string{"EOF", "truncated header", "truncated body", "reset", "timeout"} {
 		t.Run(kind, func(t *testing.T) {
@@ -936,6 +948,8 @@ func TestGetDoesNotRetryProtocolOrStatusErrors(t *testing.T) {
 	}
 }
 
+// TestRetryBudgetSharedAndSuccessfulRetriesDoNotRefill proves retries consume
+// one client-wide budget even when the retry itself succeeds.
 func TestRetryBudgetSharedAndSuccessfulRetriesDoNotRefill(t *testing.T) {
 	server := newTestServer(t)
 	server.setHook(func(connection net.Conn, frame testFrame) bool {
@@ -1028,6 +1042,8 @@ func TestCloseIdleConnectionsAndRejectRequests(t *testing.T) {
 	}
 }
 
+// TestCloseInterruptsActiveRequestsAndWaiters ensures Close() closes active
+// sockets, wakes blocked acquisitions, and remains safe under concurrent callers.
 func TestCloseInterruptsActiveRequestsAndWaiters(t *testing.T) {
 	server := newTestServer(t)
 	entered := make(chan struct{}, 1)

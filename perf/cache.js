@@ -8,6 +8,7 @@ const VERSION = 1;
 const OPCODES = { set: 1, get: 2, delete: 3, ping: 4, auth: 5 };
 const MAX_VALUE_SIZE = 8 * 1024 * 1024;
 const MAX_AUTH_TOKEN_SIZE = 1024;
+// Scenario weights choose operations; hot and ttl alter key locality and SET expiration separately.
 const scenario = __ENV.SCENARIO || "steady";
 const workload = {
   steady: { get: 70, set: 30, delete: 0 },
@@ -24,6 +25,7 @@ if (!workload[scenario]) {
   throw new Error(`Unknown SCENARIO "${scenario}"`);
 }
 
+// Resolve shared run settings during k6 initialization, before setup or any VU opens a socket.
 const vus = Number(__ENV.VUS || 16);
 const duration = __ENV.DURATION || "30s";
 const keyspace = Number(__ENV.KEYSPACE || (scenario === "large-value" ? 128 : 10000));
@@ -42,6 +44,7 @@ if (
 ) {
   throw new Error("VUS, KEYSPACE, and BATCH_SIZE must be positive integers; VALUE_SIZE must be 0-8388608; AUTH_TOKEN must be at most 1024 bytes");
 }
+// Tagged totals drive whole-run thresholds; named operation metrics remain easy to inspect in reports.
 const operationLatency = new Trend("nebula_operation_latency", true);
 const operationCount = new Counter("nebula_operations_total");
 const operationErrors = new Rate("nebula_operation_errors");
@@ -65,11 +68,13 @@ export const options = {
   },
 };
 
+// Reuse a deterministic payload so per-request timing does not include generating value bytes.
 const payload = new Uint8Array(valueSize);
 for (let i = 0; i < payload.length; i++) {
   payload[i] = 97 + (i % 26);
 }
 
+// Write protocol length fields directly into the frame without platform-dependent byte order.
 function u32be(bytes, offset, value) {
   bytes[offset] = (value >>> 24) & 0xff;
   bytes[offset + 1] = (value >>> 16) & 0xff;
@@ -77,6 +82,7 @@ function u32be(bytes, offset, value) {
   bytes[offset + 3] = value & 0xff;
 }
 
+// Token limits count wire bytes, not UTF-16 code units; replace unpaired surrogates as UTF-8 does.
 function encodeUtf8(value) {
   const bytes = [];
   for (const character of value) {
@@ -106,13 +112,17 @@ function encodeUtf8(value) {
   return new Uint8Array(bytes);
 }
 
+// Encode the numeric TTL into the protocol's eight-byte field, most significant byte first.
 function u64be(bytes, offset, value) {
+  // Division preserves high bytes that JavaScript's 32-bit shift operators would discard.
   for (let i = 7; i >= 0; i--) {
     bytes[offset + i] = value & 0xff;
     value = Math.floor(value / 256);
   }
 }
 
+// Requests have a 22-byte header: NEBU, version, opcode, u32 key/value lengths, u64 TTL.
+// All integers are big-endian; key and value bytes follow without terminators.
 function makeFrame(opcode, key, value, ttl) {
   const frame = new Uint8Array(22 + key.length + value.length);
   frame.set(MAGIC, 0);
@@ -126,6 +136,7 @@ function makeFrame(opcode, key, value, ttl) {
   return frame;
 }
 
+// Fixed-width decimal keys let setup and every VU address the same shared keyspace.
 function makeKey(index) {
   const key = new Uint8Array(16);
   const prefix = [112, 101, 114, 102, 45, 107, 101, 121, 45];
@@ -138,9 +149,11 @@ function makeKey(index) {
   return key;
 }
 
+// Wrap one socket with response framing, a single in-flight exchange, and lazy authentication.
 function connect() {
   const socket = new Socket();
   let buffered = new Uint8Array(0);
+  // There are no request IDs on the wire; callers must await each response before sending again.
   let pending = null;
   let failure = null;
   const closed = new Promise((resolve) => socket.on("close", () => {
@@ -156,6 +169,8 @@ function connect() {
   }));
   socket.setTimeout(5000);
 
+  // TCP chunks may split frames; wait for the full 10-byte response header and declared body.
+  // The response header is NEBU, version, status, then a big-endian u32 body length.
   socket.on("data", (data) => {
     const incoming = new Uint8Array(data);
     const combined = new Uint8Array(buffered.length + incoming.length);
@@ -163,6 +178,7 @@ function connect() {
     combined.set(incoming, buffered.length);
     buffered = combined;
     if (pending && buffered.length >= 10) {
+      // Multiplication keeps the unsigned high length byte from becoming a negative 32-bit integer.
       const length = (
         buffered[6] * 0x1000000 +
         buffered[7] * 0x10000 +
@@ -188,6 +204,7 @@ function connect() {
           socket.destroy();
           return;
         }
+        // Workloads measure status and latency rather than value equality; discard the body bytes.
         const status = buffered[5];
         buffered = buffered.slice(10 + length);
         const resolve = pending.resolve;
@@ -197,6 +214,7 @@ function connect() {
     }
   });
 
+  // Retain transport failure so later requests in this batch fail instead of reusing a broken stream.
   socket.on("error", (error) => {
     failure = error;
     if (pending) {
@@ -216,6 +234,7 @@ function connect() {
 
   const connected = socket.connect(String(port), target);
   let authenticated = false;
+  // Register the response waiter before writing so a fast reply cannot arrive without a consumer.
   async function exchange(opcode, key, value, ttl) {
     if (failure) {
       throw failure;
@@ -236,10 +255,12 @@ function connect() {
   }
 
   return {
+    // Authenticate on first use only, then reuse the established identity for this batch.
     async request(opcode, key, value, ttl) {
       if (failure) {
         throw failure;
       }
+      // Authentication belongs to this socket, not to an individual cache request.
       if (authToken && !authenticated) {
         const status = await exchange(OPCODES.auth, new Uint8Array(0), authTokenBytes, 0);
         if (status !== 0) {
@@ -251,6 +272,7 @@ function connect() {
       }
       return exchange(opcode, key, value, ttl);
     },
+    // Await the close event so each iteration finishes releasing its socket before returning.
     async close() {
       socket.destroy();
       await closed;
@@ -258,12 +280,14 @@ function connect() {
   };
 }
 
+// Prefill outside measured iterations; PING needs no cache contents or setup connection.
 export async function setup() {
   if (scenario === "ping") {
     return { ready: true };
   }
   const prefill = connect();
   try {
+    // Seed without TTL; the TTL scenario applies expiration to subsequent measured SET operations.
     for (let index = 0; index < keyspace; index++) {
       const status = await prefill.request(OPCODES.set, makeKey(index), payload, 0);
       if (status !== 0) {
@@ -271,6 +295,7 @@ export async function setup() {
       }
     }
   } catch (error) {
+    // Pass setup failure to the VUs so they abort instead of measuring an unpopulated cache.
     return { setupError: String(error) };
   } finally {
     await prefill.close();
@@ -278,6 +303,7 @@ export async function setup() {
   return { ready: true };
 }
 
+// Each VU iteration amortizes a fresh connection over a bounded sequence of awaited operations.
 export default async function (data) {
   if (data && data.setupError) {
     exec.test.abort(`Setup failed: ${data.setupError}`);
@@ -292,6 +318,7 @@ export default async function (data) {
   }
 }
 
+// Select one workload operation and record both protocol outcomes and end-to-end exchange time.
 async function runOperation(connection) {
   const profile = workload[scenario];
   let operation;
@@ -307,17 +334,20 @@ async function runOperation(connection) {
   }
 
   let keyIndex = Math.floor(Math.random() * keyspace);
+  // The remaining ten percent still samples the full keyspace rather than a separate cold set.
   if (profile.hot && Math.random() < 0.9) {
     keyIndex = 0;
   }
   const key = operation === "ping" ? new Uint8Array(0) : makeKey(keyIndex);
   const opcode = OPCODES[operation];
   const ttl = operation === "set" ? (profile.ttl || 0) : 0;
+  // The first exchange may also wait for connection establishment and the lazy AUTH handshake.
   const started = Date.now();
   let status;
   let succeeded = false;
   try {
     status = await connection.request(opcode, key, operation === "set" ? payload : new Uint8Array(0), ttl);
+    // NotFound (1) is expected for shared-key deletes and TTL expiry, not a transport failure.
     const valid = operation === "get" || operation === "delete"
       ? status === 0 || status === 1
       : status === 0;
@@ -335,6 +365,7 @@ async function runOperation(connection) {
     });
   }
 
+  // Failed attempts contribute latency and counts too, preventing errors from disappearing from totals.
   const elapsed = Date.now() - started;
   operationLatency.add(elapsed, { operation });
   operationCount.add(1, { operation });
@@ -344,6 +375,7 @@ async function runOperation(connection) {
   perOperationMetrics[operation].errors.add(!succeeded);
 }
 
+// Escape dynamic report values before interpolating them into HTML text or attributes.
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -353,6 +385,7 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+// Keep finite numeric summaries compact while retaining explicit nonnumeric or nonfinite values.
 function formatValue(value) {
   if (typeof value !== "number") {
     return String(value);
@@ -363,10 +396,12 @@ function formatValue(value) {
   return Number(value.toPrecision(5)).toLocaleString();
 }
 
+// Read a summary field from its base metric, falling back to summing matching tagged entries.
 function aggregateMetric(metrics, prefix, field) {
   const entries = Object.entries(metrics).filter(([name]) =>
     name === prefix || name.startsWith(`${prefix}{`)
   );
+  // Prefer the aggregate over tagged submetrics to avoid counting the same samples twice.
   const exact = entries.find(([name]) => name === prefix);
   if (exact) {
     return exact[1].values[field] || 0;
@@ -374,6 +409,7 @@ function aggregateMetric(metrics, prefix, field) {
   return entries.reduce((sum, [, metric]) => sum + (metric.values[field] || 0), 0);
 }
 
+// k6 nests checks under groups; flatten the tree so the report includes checks at every depth.
 function collectChecks(group, rows) {
   for (const item of group.checks || []) {
     rows.push(item);
@@ -383,10 +419,12 @@ function collectChecks(group, rows) {
   }
 }
 
+// Build the k6 output mapping in memory; k6 writes the selected report path and stdout output.
 function renderHtmlReport(summary) {
   const metrics = Object.entries(summary.metrics || {}).sort(([left], [right]) =>
     left.localeCompare(right)
   );
+  // Metric kinds expose different fields, so omit absent statistics rather than inventing zeroes.
   const metricFields = ["avg", "min", "med", "max", "p(90)", "p(95)", "p(99)", "count", "rate", "passes", "fails", "value"];
   const metricRows = metrics.map(([name, metric]) => {
     const values = metricFields
@@ -399,6 +437,7 @@ function renderHtmlReport(summary) {
   const thresholds = [];
   for (const [name, metric] of metrics) {
     for (const [condition, result] of Object.entries(metric.thresholds || {})) {
+      // Accept both structured threshold results and the boolean form used by some summaries.
       const passed = result && typeof result === "object" ? result.ok : Boolean(result);
       thresholds.push(`<tr><td>${escapeHtml(name)}</td><td>${escapeHtml(condition)}</td><td class="${passed ? "pass" : "fail"}">${passed ? "PASS" : "FAIL"}</td></tr>`);
     }
@@ -464,6 +503,7 @@ footer{color:var(--muted);font-size:12px;margin-top:20px}@media(max-width:700px)
   return { [reportPath]: html, stdout: `${text}\n` };
 }
 
+// Override k6's summary hook with matching HTML and concise terminal views of the completed run.
 export function handleSummary(summary) {
   return renderHtmlReport(summary);
 }

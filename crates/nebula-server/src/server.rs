@@ -35,7 +35,8 @@ pub(crate) struct ServerLimits {
 
 /// Runs the listener until shutdown, then waits for all accepted connection tasks to finish.
 ///
-/// Optional token authentication is handled after any configured TLS handshake.
+/// Optional token authentication is handled after any configured TLS handshake. `started`
+/// acknowledges listener startup, not readiness; requests wait for the lifecycle to become ready.
 pub(crate) async fn run(
     listener: TcpListener,
     store: Arc<CacheStore>,
@@ -62,6 +63,7 @@ pub(crate) async fn run(
         let state = *lifecycle.borrow();
         match state {
             ApplicationState::Initializing => {
+                // Binding and startup acknowledgement precede readiness; leave queued sockets untouched.
                 if lifecycle.changed().await.is_err() {
                     break;
                 }
@@ -130,6 +132,7 @@ pub(crate) async fn run(
         }
     }
 
+    // Let accepted work release its guards before the listener task reports completion.
     while let Some(result) = connections.join_next().await {
         if let Err(err) = result {
             warn!(error = %err, "connection task failed during shutdown");
@@ -138,6 +141,7 @@ pub(crate) async fn run(
     Ok(())
 }
 
+/// Balances the authenticated gauge even when a connection task is cancelled or fails.
 struct AuthenticatedConnection(Arc<Metrics>);
 
 impl Drop for AuthenticatedConnection {
@@ -146,6 +150,7 @@ impl Drop for AuthenticatedConnection {
     }
 }
 
+/// Counts a socket for its entire task lifetime, including any TLS handshake.
 struct ActiveConnection(Arc<Metrics>);
 
 impl Drop for ActiveConnection {
@@ -169,6 +174,7 @@ async fn serve_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Identity and role are captured once; token revocation is not rechecked on this connection.
     let mut identity = None;
     let mut _authenticated_connection = None;
     loop {
@@ -176,12 +182,14 @@ where
             return Ok(());
         }
 
+        // Lifecycle changes interrupt idle frame reads instead of waiting for client traffic.
         let request = tokio::select! {
             result = read_request_with_limits(&mut socket, limits) => match result {
                 Ok(request) => request,
                 Err(nebula_protocol::ProtocolError::Io(err))
                     if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
                 Err(err) => {
+                    // A malformed stream is closed rather than attempting to resynchronize frames.
                     error!(error = %err, "invalid request frame");
                     let _ = socket.shutdown().await;
                     return Ok(());
@@ -195,6 +203,7 @@ where
             }
         };
 
+        // A completed frame read can race with readiness withdrawal in the select above.
         if *lifecycle.borrow() != ApplicationState::Ready {
             return Ok(());
         }
@@ -204,6 +213,7 @@ where
         let (response, close_after_response) = if let Some(auth_store) = auth_store.as_ref() {
             match identity.as_ref() {
                 None => {
+                    // Before authentication, even PING closes silently when it is the first frame.
                     if request.opcode != nebula_protocol::Opcode::Auth {
                         let _ = socket.shutdown().await;
                         return Ok(());
@@ -226,6 +236,7 @@ where
                             identity = Some(authenticated);
                             (Response::ok(b"AUTH_RESULT".to_vec()), false)
                         }
+                        // Invalid UTF-8, unknown credentials, and lookup errors all fail closed.
                         Ok(None) | Err(()) => {
                             metrics.record_authentication(false, authentication_elapsed);
                             warn!("connection authentication failed");
@@ -234,6 +245,7 @@ where
                     }
                 }
                 Some(identity) => {
+                    // A denied operation never reaches cache dispatch, but leaves the session open.
                     let allowed = match request.opcode {
                         nebula_protocol::Opcode::Ping => true,
                         nebula_protocol::Opcode::Get => identity.role.can_read(),
@@ -268,6 +280,7 @@ where
         if let Err(err) = write_response_with_limits(&mut socket, &response, limits).await {
             return Err(io::Error::other(err));
         }
+        // Authentication failures get their response before the server shuts down the stream.
         if close_after_response {
             let _ = socket.shutdown().await;
             return Ok(());
@@ -293,6 +306,7 @@ mod tests {
 
     use super::{run, serve_connection, ServerLimits};
 
+    // Cover queued pre-ready work, admission saturation, and lifecycle-driven connection draining.
     #[tokio::test]
     async fn tcp_requests_are_not_processed_until_application_is_ready() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -342,6 +356,7 @@ mod tests {
         assert_eq!(response.status, Status::Ok);
         assert_eq!(store.get(b"key"), Some(b"value".to_vec()));
 
+        // Keep the first socket alive so the sole connection permit cannot be reused.
         let mut rejected = tokio::net::TcpStream::connect(address).await.unwrap();
         let _ = write_request(
             &mut rejected,
@@ -365,6 +380,7 @@ mod tests {
         server.await.unwrap().unwrap();
     }
 
+    // Distinguish a missing AUTH handshake from a valid identity denied permission to mutate.
     #[tokio::test]
     async fn authentication_is_required_and_readonly_roles_cannot_write() {
         let auth_store = Arc::new(AuthStore::open(":memory:").unwrap());

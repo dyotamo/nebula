@@ -39,32 +39,38 @@ use crate::{
 };
 
 // Header layout: four-byte magic, big-endian format version, then big-endian CRC32.
+// The remaining bytes are JSON; the checksum covers only those payload bytes, not the header.
 const MAGIC: &[u8; 4] = b"NBSC";
 const FORMAT_VERSION: u32 = 1;
 const HEADER_LEN: usize = 12;
 const SNAPSHOT_PREFIX: &str = "snapshot-";
 const SNAPSHOT_EXTENSION: &str = ".nbs";
+// Shared by final object names and test-only temporary files to distinguish same-process writes.
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Coordinates snapshot I/O, health reporting, metrics, and snapshot serialization access.
 #[derive(Clone)]
 pub(crate) struct PersistenceManager {
+    // Keep initialization failures so later operations can surface them through health and metrics.
     storage: Result<Arc<dyn ObjectStore>, String>,
     prefix: String,
     storage_label: String,
     interval: Duration,
     retention: usize,
+    // Clones share this lock; separate managers or processes using the same storage do not.
     operation: Arc<Mutex<()>>,
     health: HealthManager,
     metrics: Arc<Metrics>,
 }
 
+// Creation time determines recovery and retention order independently of the object key.
 #[derive(Serialize, Deserialize)]
 struct SnapshotPayload {
     created_at: Timestamp,
     entries: Vec<SnapshotEntry>,
 }
 
+// Store absolute expiration instants, not remaining TTLs, so downtime does not extend entry life.
 #[derive(Serialize, Deserialize)]
 struct SnapshotEntry {
     key: Vec<u8>,
@@ -72,12 +78,15 @@ struct SnapshotEntry {
     expires_at: Option<Timestamp>,
 }
 
+// Unix seconds plus a subsecond remainder avoid serializing platform-specific SystemTime internals.
+// Derived ordering compares seconds before nanoseconds; decoding validates their range.
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
 struct Timestamp {
     seconds: u64,
     nanos: u32,
 }
 
+// Drop records early returns and cancelled attempts as failures unless success was set.
 struct PersistenceRecorder {
     metrics: Arc<Metrics>,
     started: std::time::Instant,
@@ -86,6 +95,7 @@ struct PersistenceRecorder {
 }
 
 impl PersistenceRecorder {
+    // Begin timing immediately; callers mark success only after their full operation completes.
     fn new(metrics: Arc<Metrics>, snapshot: bool) -> Self {
         Self {
             metrics,
@@ -97,7 +107,9 @@ impl PersistenceRecorder {
 }
 
 impl Drop for PersistenceRecorder {
+    // Emit one outcome per guard, including error paths that return through the `?` operator.
     fn drop(&mut self) {
+        // Saturate before narrowing so an unusually long duration cannot wrap the metric value.
         let elapsed_ns = self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         if self.snapshot {
             self.metrics.record_snapshot(elapsed_ns, self.success);
@@ -116,6 +128,7 @@ impl PersistenceManager {
         health: HealthManager,
         metrics: Arc<Metrics>,
     ) -> Self {
+        // Filesystem keys are already rooted at snapshot_dir; only S3 needs an object-key prefix.
         let prefix = if options.snapshot_backend == SnapshotBackend::S3 {
             options.snapshot_s3_prefix.trim_matches('/').to_owned()
         } else {
@@ -140,6 +153,8 @@ impl PersistenceManager {
                         "persistence.snapshot_s3_bucket must be set for S3 storage".to_owned()
                     })
                     .and_then(|bucket| {
+                        // Explicit options override the environment-derived S3 configuration.
+                        // Unspecified settings retain the builder's environment/default behavior.
                         let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
                         if let Some(region) = options.snapshot_s3_region.clone() {
                             builder = builder.with_region(region);
@@ -191,6 +206,9 @@ impl PersistenceManager {
     ///
     /// Corrupt candidates are skipped if another valid snapshot is available. If snapshot files
     /// exist but none can be decoded, recovery fails rather than silently starting empty.
+    /// Storage read errors abort recovery instead of falling back to an older snapshot.
+    ///
+    /// Call before accepting writes: restoration does not acquire the snapshot-operation lock.
     pub(crate) async fn restore(&self, store: Arc<CacheStore>) -> io::Result<bool> {
         let mut recorder = PersistenceRecorder::new(Arc::clone(&self.metrics), false);
         info!(storage = %self.storage_label, "cache snapshot restoration started");
@@ -202,6 +220,7 @@ impl PersistenceManager {
                 return Err(error);
             }
         };
+        // Cleanup is best-effort: stale temporary objects must not prevent valid snapshot recovery.
         cleanup_interrupted_store_snapshots(object_store.as_ref(), &self.prefix).await;
         let loaded = match load_latest_from_store(object_store, &self.prefix).await {
             Ok(loaded) => loaded,
@@ -218,6 +237,8 @@ impl PersistenceManager {
             return Ok(false);
         };
 
+        // Convert every absolute deadline before handing entries to the cache; the cache handles
+        // entries whose deadlines have already passed rather than restarting their original TTLs.
         let entries: Vec<_> = payload
             .entries
             .into_iter()
@@ -248,6 +269,8 @@ impl PersistenceManager {
     /// Captures the cache, writes a new snapshot, then prunes older snapshots to retention.
     ///
     /// Concurrent snapshot operations are serialized so naming, writes, and retention cannot race.
+    /// Duration includes waiting for that lock; retention failure marks the attempt unsuccessful
+    /// even if the new snapshot was written.
     pub(crate) async fn snapshot(&self, store: Arc<CacheStore>) -> io::Result<()> {
         let mut recorder = PersistenceRecorder::new(Arc::clone(&self.metrics), true);
         // Serialize snapshot writes and retention so concurrent ticks cannot prune one another's output.
@@ -270,10 +293,13 @@ impl PersistenceManager {
             "cache snapshot serialization started"
         );
         let result = async {
+            // Publish the complete encoded object through the backend's put implementation.
+            // This production path does not use the test helper's explicit rename/fsync sequence.
             object_store
                 .put(&path, encode_snapshot(&payload)?.into())
                 .await
                 .map_err(|error| io::Error::other(format!("write snapshot: {error}")))?;
+            // Never prune on a failed write; a pruning error does not roll back the new object.
             retain_store_snapshots(&object_store, &self.prefix, self.retention).await?;
             Ok::<_, io::Error>(())
         }
@@ -298,11 +324,14 @@ impl PersistenceManager {
         store: Arc<CacheStore>,
         mut lifecycle: tokio::sync::watch::Receiver<ApplicationState>,
     ) {
+        // Wait one full interval before the first snapshot and delay the schedule after missed ticks
+        // rather than issuing a burst of catch-up writes following a slow storage operation.
         let mut snapshots = interval_at(Instant::now() + self.interval, self.interval);
         snapshots.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = snapshots.tick() => {
+                    // Await within the branch so lifecycle changes cannot cancel an in-flight write.
                     if let Err(error) = self.snapshot(Arc::clone(&store)).await {
                         error!(error = %error, "periodic cache snapshot failed");
                     }
@@ -319,11 +348,13 @@ impl PersistenceManager {
         }
     }
 
+    // Let tests hold the same lock as snapshot writes to coordinate queued/in-flight operations.
     #[cfg(test)]
     pub(crate) async fn lock_snapshot_operation(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.operation).lock_owned().await
     }
 
+    // Recovery and snapshot failures share one health component and retain the error as its reason.
     fn report_failure(&self, error: &io::Error) {
         self.health.report(
             HealthComponent::Persistence("snapshots".to_owned()),
@@ -331,6 +362,7 @@ impl PersistenceManager {
         );
     }
 
+    // A later successful operation, including recovery with no candidates, clears unhealthy status.
     fn report_success(&self) {
         self.health.report(
             HealthComponent::Persistence("snapshots".to_owned()),
@@ -339,6 +371,7 @@ impl PersistenceManager {
     }
 }
 
+// Build a backend-independent key and reject paths the object-store abstraction cannot represent.
 fn snapshot_object_path(prefix: &str, name: &str) -> io::Result<ObjectPath> {
     let key = if prefix.is_empty() {
         name.to_owned()
@@ -462,6 +495,7 @@ async fn retain_store_snapshots(
 ) -> io::Result<()> {
     let paths = snapshot_paths(store, prefix).await?;
     let mut snapshots = Vec::new();
+    // Only readable, valid snapshots count toward retention; leave other objects untouched.
     for path in paths {
         if let Ok(payload) = read_store_snapshot(store, &path).await {
             snapshots.push((payload.created_at, path));

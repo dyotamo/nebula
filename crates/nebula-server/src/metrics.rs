@@ -31,11 +31,14 @@ use tokio::{
     time::{interval, MissedTickBehavior},
 };
 
+// The fixed operation set also bounds Prometheus label cardinality; arbitrary names are ignored.
 const OPERATIONS: [&str; 4] = ["ping", "set", "get", "delete"];
+// Bounds are seconds and shared by request, authentication, snapshot, and recovery histograms.
 const LATENCY_BUCKETS: [f64; 8] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 1.0];
 const HISTORY_LIMIT: usize = 360;
 const HISTORY_INTERVAL_SECS: u64 = 5;
 
+// One accumulator per supported operation; requests is also the duration observation count.
 #[derive(Default)]
 struct OperationMetrics {
     requests: AtomicU64,
@@ -44,12 +47,14 @@ struct OperationMetrics {
     latency_buckets: [AtomicU64; 8],
 }
 
+// Attempt counts include failures, so duration means and histograms describe all recorded attempts.
 #[derive(Default)]
 struct PersistenceMetrics {
     snapshots: AtomicU64,
     snapshot_failures: AtomicU64,
     snapshot_duration_ns: AtomicU64,
     snapshot_duration_buckets: [AtomicU64; 8],
+    // Zero is the unset sentinel; failures leave the most recent success time unchanged.
     last_snapshot_success_timestamp_secs: AtomicU64,
     recoveries: AtomicU64,
     recovery_failures: AtomicU64,
@@ -148,6 +153,7 @@ pub struct Metrics {
     auth_active_connections: AtomicU64,
     auth_revocations: AtomicU64,
     persistence: PersistenceMetrics,
+    // History is sampled by dashboard reads, not a background timer or the Prometheus exporter.
     history: Mutex<VecDeque<HistoryPoint>>,
     last_history_sample: Mutex<Option<Instant>>,
 }
@@ -191,6 +197,8 @@ impl Metrics {
         metrics
             .latency_sum_ns
             .fetch_add(elapsed_ns, Ordering::Relaxed);
+        // Buckets are cumulative: one request increments every enclosing bound. Durations above
+        // the largest bound still contribute to requests, which becomes the exported +Inf bucket.
         let elapsed_secs = elapsed_ns as f64 / 1_000_000_000.0;
         for (bucket, bound) in metrics.latency_buckets.iter().zip(LATENCY_BUCKETS) {
             if elapsed_secs <= bound {
@@ -254,6 +262,8 @@ impl Metrics {
             .fetch_add(elapsed_ns, Ordering::Relaxed);
         record_buckets(&self.persistence.snapshot_duration_buckets, elapsed_ns);
         if success {
+            // This is wall-clock completion time, unlike the monotonic uptime/history clocks.
+            // Pre-epoch clock values collapse to the same zero sentinel as an unset timestamp.
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -285,12 +295,15 @@ impl Metrics {
     /// Reads dashboard metrics and appends a history point if five seconds have elapsed.
     /// The first call samples immediately; history is capped at 360 points. Rates use
     /// the latest two samples, while latency and persistence durations are lifetime means.
+    /// Rates stay unchanged between samples even when the current counters advance.
     pub fn dashboard_snapshot(
         &self,
         store: &CacheStore,
         lifecycle: ApplicationState,
         health: &HealthManager,
     ) -> DashboardSnapshot {
+        // Aggregate lifetime sums across operations rather than averaging per-operation means,
+        // so frequently used operations carry their proportional weight in the displayed latency.
         let (requests_total, errors_total, latency_sum_ns, request_count) = self.request_totals();
         let uptime_secs = self.started.elapsed().as_secs();
         let active_connections = self.active_connections.load(Ordering::Relaxed);
@@ -536,6 +549,8 @@ impl Metrics {
 
         let snapshot = health.snapshot();
         let _ = writeln!(output, "# HELP nebula_health_status Whether the application or component is healthy.\n# TYPE nebula_health_status gauge");
+        // Prometheus health is binary: degraded and unhealthy both export zero;
+        // the dashboard preserves the three-state distinction.
         let overall = if snapshot.overall == ApplicationHealth::Healthy {
             1.0
         } else {
@@ -780,6 +795,7 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
     let path = path.ancestors().find(|candidate| candidate.is_dir())?;
     let path = CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: path is NUL-terminated and stats is writable; both outlive the call.
     let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
     if result != 0 {
         return None;

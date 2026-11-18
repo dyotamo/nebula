@@ -1,3 +1,4 @@
+/// Request operation codes; numeric discriminants are part of the wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Opcode {
@@ -23,16 +24,20 @@ impl TryFrom<u8> for Opcode {
     }
 }
 
+/// Decoded request with owned byte payloads; frame codecs enforce operation-specific shape.
+/// AUTH payloads contain bearer secrets, including in this type's derived `Debug` output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub opcode: Opcode,
     pub key: Vec<u8>,
+    /// Cache bytes for SET, bearer-token bytes for AUTH, otherwise empty.
     pub value: Vec<u8>,
-    /// TTL in seconds. Zero means no expiration.
+    /// TTL in seconds for SET; zero means no expiration. AUTH requires zero.
     pub ttl_secs: u64,
 }
 
 impl Request {
+    /// Builds a payload-free liveness request.
     pub fn ping() -> Self {
         Self {
             opcode: Opcode::Ping,
@@ -42,6 +47,7 @@ impl Request {
         }
     }
 
+    /// Copies a bearer token into the value; codecs reject empty tokens or tokens over 1 KiB.
     pub fn auth(token: impl AsRef<[u8]>) -> Self {
         Self {
             opcode: Opcode::Auth,

@@ -13,11 +13,16 @@ use nebula_core::CacheStore;
 use crate::metrics::Metrics;
 
 /// Applies a request to the cache without recording request metrics.
+///
+/// The caller must enforce readiness, authentication, and authorization before dispatching here.
 pub async fn handle(request: Request, store: Arc<CacheStore>) -> Response {
     handle_observed(request, store, None).await
 }
 
 /// Applies a request and records its operation, outcome, and elapsed time.
+///
+/// Like [`handle`], this does not enforce connection-level access controls. Only `Ok` responses
+/// count as successful requests; cache misses are recorded as non-successes.
 pub async fn handle_with_metrics(
     request: Request,
     store: Arc<CacheStore>,
@@ -26,6 +31,7 @@ pub async fn handle_with_metrics(
     handle_observed(request, store, Some(metrics)).await
 }
 
+/// Shares dispatch between observed and unobserved callers so status mapping cannot diverge.
 async fn handle_observed(
     request: Request,
     store: Arc<CacheStore>,
@@ -43,6 +49,7 @@ async fn handle_observed(
         Opcode::Ping => Response::ok(b"PONG".to_vec()),
 
         Opcode::Set => {
+            // Empty keys are a request error; capacity rejection is reported separately below.
             if request.key.is_empty() {
                 Response::invalid_argument()
             } else {
@@ -54,6 +61,7 @@ async fn handle_observed(
             }
         }
 
+        // Store reads apply expiration semantics, so expired values surface as ordinary misses.
         Opcode::Get => match store.get(&request.key) {
             Some(value) => Response::ok(value),
             None => Response::not_found(),
@@ -66,8 +74,10 @@ async fn handle_observed(
                 Response::not_found()
             }
         }
+        // AUTH is consumed by the connection handshake, not by cache operation dispatch.
         Opcode::Auth => Response::invalid_argument(),
     };
+    // Measure validation and store work only, excluding frame I/O and response serialization.
     if let Some(metrics) = metrics {
         metrics.record_request(
             operation,

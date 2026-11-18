@@ -1,4 +1,10 @@
-"""Pooled synchronous binary-protocol client and accepted CacheValue input types."""
+"""Pooled synchronous client for version 1 of the NebulaCache TCP protocol.
+
+Each checked-out socket carries one request/response exchange at a time because
+frames contain no request identifier for multiplexing. Transport and framing
+failures retire the socket; complete server error responses leave it reusable.
+Text is encoded only on input, while retrieved values remain uninterpreted bytes.
+"""
 
 from __future__ import annotations
 
@@ -15,14 +21,20 @@ from typing import TypeAlias
 
 from .exceptions import CacheConnectionError, CacheProtocolError, CacheResponseError
 
+# SET accepts text or these binary buffers; all are serialized as immutable bytes.
 CacheValue: TypeAlias = str | bytes | bytearray | memoryview
 
+# Network byte order, without native padding: magic, version, opcode, key byte
+# length, value byte length, and an unsigned 64-bit TTL in seconds (22 bytes).
 _REQUEST_HEADER = struct.Struct("!4sBBIIQ")
+# Responses carry magic, version, status, and value byte length (10 bytes).
 _RESPONSE_HEADER = struct.Struct("!4sBBI")
 _MAGIC = b"NEBU"
 _VERSION = 1
+# Limits apply to encoded byte lengths, not the number of Unicode characters.
 _MAX_KEY_LEN = 1024
 _MAX_VALUE_LEN = 8 * 1024 * 1024
+# Known nonzero statuses are valid frames, not evidence of a corrupted stream.
 _STATUS_NAMES = {
     0: "OK",
     1: "NOT_FOUND",
@@ -35,6 +47,13 @@ _STATUS_NAMES = {
 
 @dataclass(eq=False)
 class _PooledConnection:
+    """Track one socket by identity and monotonic pool-creation/idle timestamps.
+
+    Identity equality keeps distinct connections independently hashable in the
+    live set. The pool condition protects membership and last_used updates;
+    only the borrower performs request I/O, though close may interrupt it.
+    """
+
     socket: socket.socket
     created_at: float
     last_used: float
@@ -48,6 +67,11 @@ class NebulaCache:
     CacheResponseError for unsuccessful server statuses other than handled misses.
     Keys must be non-empty strings of at most 1024 UTF-8 bytes: invalid types raise
     TypeError, and empty or oversized keys raise ValueError.
+
+    Instances may be shared by threads, with exclusive socket ownership per
+    operation. Construction is lazy; call close when finished to release idle
+    connections and interrupt outstanding operations. Only GET transport failures
+    are eligible for retry, so failed writes may have an unknown server outcome.
     """
 
     def __init__(
@@ -99,8 +123,10 @@ class NebulaCache:
             TypeError: ssl_context is neither an SSLContext nor None.
         """
         self.host, self.port = self._parse_address(address)
+        # Preserve the positional timeout as the fallback, not as a total budget.
         connect_timeout = timeout if connect_timeout is None else connect_timeout
         request_timeout = timeout if request_timeout is None else request_timeout
+        # Reject bool explicitly: Python otherwise treats it as a numeric duration.
         for name, duration in (
             ("timeout", timeout),
             ("connect_timeout", connect_timeout),
@@ -116,6 +142,7 @@ class NebulaCache:
                 or duration <= 0
             ):
                 raise ValueError(f"{name} must be finite and greater than zero")
+        # Integral counts and a positive upper bound keep capacity reservations valid.
         for name, size in (
             ("min_pool_size", min_pool_size),
             ("max_pool_size", max_pool_size),
@@ -137,16 +164,23 @@ class NebulaCache:
         self.max_retries = max_retries
         if ssl_context is not None and not isinstance(ssl_context, ssl.SSLContext):
             raise TypeError("ssl_context must be an ssl.SSLContext or None")
+        # Authentication is independent of TLS; callers choose whether to encrypt
+        # tokens in transit. Validate their encoded size before any socket is opened.
         if token is not None:
             if not isinstance(token, str) or not token or len(token.encode("utf-8")) > 1024:
                 raise ValueError("token must be a non-empty string no longer than 1024 bytes")
         self.ssl_context = ssl_context
         self.token = token
+        # One condition serializes pool membership, reservations, and retry tokens.
+        # The event also permits close to interrupt retry backoff without polling.
         self._condition = threading.Condition()
         self._closed = threading.Event()
+        # Idle is a subset of all live connections; checked-out sockets stay live.
         self._connections: set[_PooledConnection] = set()
         self._idle: list[_PooledConnection] = []
+        # Reservations count toward max_pool_size while setup runs outside the lock.
         self._connecting = 0
+        # A per-client bucket bounds retries across operations, not initial attempts.
         self._retry_tokens = 10.0
         self._retry_updated_at = time.monotonic()
 
@@ -156,6 +190,8 @@ class NebulaCache:
         Repeated calls are safe; subsequent valid operations raise CacheConnectionError.
         """
         with self._condition:
+            # Publish shutdown before touching sockets so no waiter can borrow one.
+            # Connections still being established check this flag before joining.
             self._closed.set()
             for connection in self._connections:
                 self._close_socket(connection.socket)
@@ -165,13 +201,21 @@ class NebulaCache:
 
     @staticmethod
     def _close_socket(connection: socket.socket) -> None:
+        """Interrupt blocked I/O before releasing the descriptor, even after EOF."""
         try:
             connection.shutdown(socket.SHUT_RDWR)
         except OSError:
+            # Shutdown may fail for an already disconnected or closed socket.
             pass
         connection.close()
 
     def _expire_idle(self, now: float) -> None:
+        """Remove expired idle members with the pool condition held by the caller.
+
+        now uses the same monotonic clock as both timestamps. Checked-out sockets
+        are deliberately excluded so expiry cannot interrupt an active operation.
+        """
+        # Iterate over a snapshot because retirement mutates the idle collection.
         for connection in self._idle[:]:
             if (
                 now - connection.last_used >= self.idle_timeout
@@ -195,6 +239,7 @@ class NebulaCache:
                 if self._closed.is_set():
                     raise CacheConnectionError("NebulaCache client is closed")
                 now = time.monotonic()
+                # Retire only idle sockets; active ones are checked when released.
                 for connection in self._idle[:]:
                     if (
                         now - connection.last_used >= self.idle_timeout
@@ -207,25 +252,33 @@ class NebulaCache:
                 if remaining <= 0:
                     raise CacheConnectionError("Timed out acquiring a NebulaCache connection")
                 total = len(self._connections) + self._connecting
+                # Fill the minimum before reusing idle sockets. Reservations keep
+                # simultaneous growers within the cap while they release the lock.
                 if total < self.min_pool_size or (not self._idle and total < self.max_pool_size):
                     self._connecting += 1
                 elif self._idle:
+                    # Removing from idle grants exclusive use, not removal from live.
                     return self._idle.pop()
                 else:
+                    # Wakeups may be spurious or another waiter may win the socket.
                     self._condition.wait(remaining)
                     continue
             connection_socket = None
             try:
+                # Slow connection setup must not block releases or pool shutdown.
                 connection_socket = socket.create_connection(
                     (self.host, self.port), timeout=min(self.connect_timeout, remaining)
                 )
                 if self.ssl_context is not None:
+                    # Keep the hostname for SNI and the context's verification policy.
                     connection_socket = self.ssl_context.wrap_socket(
                         connection_socket, server_hostname=self.host
                     )
                 if self.token is not None:
+                    # Authentication belongs to a session and precedes pool visibility.
                     self._authenticate(connection_socket)
             except BaseException:
+                # Even cancellation-like exceptions must release the reserved slot.
                 if connection_socket is not None:
                     self._close_socket(connection_socket)
                 with self._condition:
@@ -235,6 +288,7 @@ class NebulaCache:
             with self._condition:
                 self._connecting -= 1
                 if self._closed.is_set():
+                    # close may have run while this socket was outside the live set.
                     self._close_socket(connection_socket)
                     self._condition.notify_all()
                     raise CacheConnectionError("NebulaCache client is closed")
@@ -243,17 +297,25 @@ class NebulaCache:
                 self._connections.add(connection)
                 self._idle.append(connection)
                 self._condition.notify_all()
+                # Loop to recheck the deadline and minimum target before borrowing.
 
     def _release(self, connection: _PooledConnection, healthy: bool) -> None:
-        """Return a healthy socket to idle, or discard it if failed, expired, or closed."""
+        """Return a healthy socket to idle, or discard it if failed, expired, or closed.
+
+        healthy means a complete, valid response was consumed, not that the server
+        returned OK. The caller must release each borrowed connection once.
+        """
         with self._condition:
             if connection not in self._connections:
+                # close already retired this borrower's socket during active I/O.
                 return
             now = time.monotonic()
             if not healthy or self._closed.is_set() or now - connection.created_at >= self.max_lifetime:
+                # Lifetime expiry takes effect after, never during, the exchange.
                 self._connections.remove(connection)
                 self._close_socket(connection.socket)
             else:
+                # Idle age starts at release, excluding time spent serving a request.
                 connection.last_used = now
                 self._idle.append(connection)
             self._condition.notify_all()
@@ -265,19 +327,24 @@ class NebulaCache:
         CacheResponseError. Send and response each use request_timeout separately;
         clear the socket timeout only after successful authentication.
         """
+        # Only acquisition calls this helper, after confirming a token is configured.
         token = self.token.encode("utf-8")
+        # AUTH has no key or TTL; its value field carries the UTF-8 token bytes.
         header = _REQUEST_HEADER.pack(_MAGIC, _VERSION, 5, 0, len(token), 0)
         connection.settimeout(self.request_timeout)
         connection.sendall(header + token)
         status, value = self._read_response(connection, time.monotonic() + self.request_timeout)
         if status != 0 or value != b"AUTH_RESULT":
+            # Even OK is insufficient without the expected authentication marker.
             raise CacheResponseError(status, "authentication failed")
+        # Each subsequent operation installs its own request budget on checkout.
         connection.settimeout(None)
 
     def _take_retry_token(self) -> bool:
         """Spend a shared retry token unless closed or empty; refill one/second up to 10."""
         with self._condition:
             now = time.monotonic()
+            # Fractional tokens retain elapsed time without a refill timer/thread.
             self._retry_tokens = min(10.0, self._retry_tokens + now - self._retry_updated_at)
             self._retry_updated_at = now
             if self._closed.is_set() or self._retry_tokens < 1:
@@ -287,6 +354,11 @@ class NebulaCache:
 
     @staticmethod
     def _is_transient(error: OSError) -> bool:
+        """Identify transport failures eligible for the GET-only retry policy.
+
+        Other OSErrors, including failures without a recognized errno or subclass,
+        terminate the operation instead of assuming that retry can repair them.
+        """
         return isinstance(error, (TimeoutError, ConnectionError)) or error.errno in {
             errno.ECONNABORTED,
             errno.ECONNREFUSED,
@@ -305,6 +377,7 @@ class NebulaCache:
         Raise CacheProtocolError for an OK response without PONG, or the shared
         connection/response exceptions for transport or server failures.
         """
+        # PING has empty key/value fields; OK must also carry the literal PONG.
         status, value = self._request(4)
         self._ensure_ok(status, value)
         if value != b"PONG":
@@ -324,6 +397,8 @@ class NebulaCache:
         A transport failure does not imply that the write was not applied.
         """
         encoded_key = self._encode_key(key)
+        # Normalize buffers before framing so later mutation cannot change the
+        # advertised byte length or the request's immutable payload snapshot.
         if isinstance(value, str):
             encoded_value = value.encode("utf-8")
         elif isinstance(value, (bytes, bytearray, memoryview)):
@@ -334,12 +409,15 @@ class NebulaCache:
         if len(encoded_value) > _MAX_VALUE_LEN:
             raise ValueError(f"value exceeds the {_MAX_VALUE_LEN}-byte protocol limit")
         
+        # bool is an int subclass but is not an explicit TTL. The wire's Q field
+        # cannot represent negatives, fractions, or values above unsigned 64-bit.
         if isinstance(ttl_secs, bool) or not isinstance(ttl_secs, int):
             raise ValueError("ttl_secs must be a non-negative 64-bit integer")
         
         if not 0 <= ttl_secs <= 0xFFFFFFFFFFFFFFFF:
             raise ValueError("ttl_secs must be a non-negative 64-bit integer")
 
+        # Validation finishes before acquisition; an OK write body is not returned.
         status, response_value = self._request(1, encoded_key, encoded_value, ttl_secs)
         self._ensure_ok(status, response_value)
 

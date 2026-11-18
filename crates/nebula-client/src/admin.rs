@@ -10,6 +10,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Authenticated HTTP session for the admin API.
+///
+/// Authentication state is retained locally and attached to each request; the underlying HTTP
+/// client does not manage a cookie jar, so the session cookie and CSRF token stay paired here.
 pub(super) struct AdminClient {
     base_url: Url,
     client: reqwest::Client,
@@ -258,6 +261,7 @@ impl AdminClient {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid admin base URL")
             })?;
             path.pop_if_empty();
+            // Appending path segments keeps user names and token IDs percent-escaped.
             path.extend(segments.iter().copied());
         }
         Ok(endpoint)

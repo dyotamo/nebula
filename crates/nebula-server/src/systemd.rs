@@ -16,6 +16,7 @@ pub fn notify(message: &str) -> io::Result<bool> {
     let Ok(socket_path) = std::env::var("NOTIFY_SOCKET") else {
         return Ok(false);
     };
+    // systemd spells Linux abstract socket names with '@'; the kernel expects a leading NUL.
     let path_bytes = socket_path.as_bytes();
     let abstract_socket = path_bytes.first() == Some(&b'@');
     let address_bytes = if abstract_socket {
@@ -25,6 +26,7 @@ pub fn notify(message: &str) -> io::Result<bool> {
     };
     let path_capacity =
         std::mem::size_of_val(&unsafe { std::mem::zeroed::<libc::sockaddr_un>() }.sun_path);
+    // Filesystem paths need a trailing NUL; abstract names need a leading NUL instead.
     let required = address_bytes.len() + 1;
     if required > path_capacity {
         return Err(io::Error::new(
@@ -33,11 +35,13 @@ pub fn notify(message: &str) -> io::Result<bool> {
         ));
     }
 
+    // Each notification owns a short-lived descriptor that must not leak into spawned programs.
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
 
+    // Start with a fully initialized address, including unused path bytes, before passing it to C.
     let mut address = unsafe { std::mem::zeroed::<libc::sockaddr_un>() };
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     if abstract_socket {
@@ -51,6 +55,7 @@ pub fn notify(message: &str) -> io::Result<bool> {
         }
         address.sun_path[address_bytes.len()] = 0;
     }
+    // Pass only the used bytes: padding would become part of an abstract socket's name.
     let path_length = std::mem::size_of_val(&address.sun_family) + required;
     let address_length = path_length as libc::socklen_t;
     let sent = unsafe {
@@ -63,6 +68,7 @@ pub fn notify(message: &str) -> io::Result<bool> {
             address_length,
         )
     };
+    // Preserve sendto errno before close can overwrite it, while closing on every send outcome.
     let send_error = (sent < 0).then(io::Error::last_os_error);
     unsafe { libc::close(fd) };
     if let Some(error) = send_error {
@@ -77,7 +83,9 @@ pub fn notify(message: &str) -> io::Result<bool> {
     }
 }
 
-/// Returns a safe ping interval derived from systemd's watchdog environment, if active.
+/// Returns half of `WATCHDOG_USEC`, floored at 100 ms, when enabled for this process.
+///
+/// An absent `WATCHDOG_PID` applies to this process; a mismatched or invalid PID disables pings.
 pub fn watchdog_interval() -> Option<Duration> {
     let usec = std::env::var("WATCHDOG_USEC").ok()?.parse::<u64>().ok()?;
     if usec == 0 {
@@ -88,10 +96,13 @@ pub fn watchdog_interval() -> Option<Duration> {
             return None;
         }
     }
+    // Leave deadline headroom under normal settings without permitting an extremely tight loop.
     Some(Duration::from_micros(usec / 2).max(Duration::from_millis(100)))
 }
 
 /// Sends `WATCHDOG=1` only while the application is ready and every health component is healthy.
+///
+/// Unhealthy/degraded periods deliberately withhold pings so systemd can enforce its deadline.
 pub async fn run_watchdog(
     lifecycle: Lifecycle,
     health: HealthManager,
@@ -103,6 +114,7 @@ pub async fn run_watchdog(
     loop {
         tokio::select! {
             _ = ticks.tick() => {
+                // Require both aggregate and per-component health; readiness alone is insufficient.
                 if lifecycle.state() == ApplicationState::Ready
                     && health.snapshot().overall == ApplicationHealth::Healthy
                     && health.snapshot().components.values().all(|status| *status == ComponentHealth::Healthy)
@@ -112,6 +124,7 @@ pub async fn run_watchdog(
                     }
                 }
             }
+            // A dropped lifecycle sender also ends the task, even without a terminal state update.
             changed = updates.changed() => {
                 if changed.is_err() || matches!(
                     *updates.borrow(),

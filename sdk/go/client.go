@@ -1,3 +1,6 @@
+// Package nebulacache provides a pooled client for NebulaCache's version 1 binary
+// TCP protocol, with optional TLS and per-connection token authentication.
+// Clients connect lazily and must be closed when no longer needed.
 package nebulacache
 
 import (
@@ -20,48 +23,66 @@ import (
 )
 
 const (
-	// DefaultAddress is the local binary-protocol endpoint.
+	// DefaultAddress is the local binary-protocol endpoint used when New has no address.
 	DefaultAddress = "127.0.0.1:17171"
 	// DefaultTimeout is the default connect, request, and acquisition timeout.
-	DefaultTimeout  = 5 * time.Second
-	maxKeyLength    = 1024
-	maxValueLength  = 8 * 1024 * 1024
-	requestHeader   = 22
+	// These are separate phase limits, not a single end-to-end operation deadline.
+	DefaultTimeout = 5 * time.Second
+	// Length limits apply to encoded bytes, not Unicode code points.
+	maxKeyLength   = 1024
+	maxValueLength = 8 * 1024 * 1024
+	// Requests contain magic, version, opcode, key/value lengths, and an unsigned TTL.
+	requestHeader = 22
+	// Responses contain magic, version, status, and a value length; no key is echoed.
 	responseHeader  = 10
 	protocolVersion = 1
 )
 
+// protocolMagic identifies binary frames in both directions; it is not a terminator.
 var protocolMagic = [4]byte{'N', 'E', 'B', 'U'}
 
-// Config controls the connection pool, deadlines, and optional TLS authentication.
-// Start with DefaultConfig; the zero value is not valid.
+// Config controls connection pooling, phase deadlines, TLS, and token authentication.
+// Start with DefaultConfig; the zero value is not valid, and zero durations do not
+// disable timeouts. NewWithConfig copies the struct, but TLSConfig remains a pointer.
 type Config struct {
 	// Address is host:port, with brackets required around IPv6 hosts.
+	// The host must be non-empty and the port must be numeric, between 1 and 65535.
 	Address string
 	// MinPoolSize is the pool size targeted lazily during acquisition.
+	// Zero disables minimum-size filling; no background task maintains this target.
 	MinPoolSize int
 	// MaxPoolSize bounds established connections and in-progress dials together.
+	// It must be positive and at least MinPoolSize; acquisitions wait when full.
 	MaxPoolSize int
 	// ConnectTimeout bounds each dial, including the TLS handshake when enabled.
+	// The acquisition deadline may end dialing sooner; AUTH is a separate exchange.
 	ConnectTimeout time.Duration
 	// RequestTimeout bounds a request's writes and reads, and each AUTH exchange.
+	// Each attempt gets a fresh deadline after acquisition, shared by writing and reading.
 	RequestTimeout time.Duration
 	// AcquireTimeout bounds pool acquisition, including waiting and dialing.
 	// AUTH uses its own RequestTimeout and is not canceled by this deadline.
 	AcquireTimeout time.Duration
 	// IdleTimeout retires unused connections when the pool is next acquired.
+	// Reuse restarts idle time; expiration is lazy rather than driven by a timer.
 	IdleTimeout time.Duration
 	// MaxLifetime retires aged connections during acquisition or release, not mid-request.
+	// Unlike IdleTimeout, its age is not reset when a connection is reused.
 	MaxLifetime time.Duration
 	// MaxRetries limits additional GET attempts after transient transport failures.
+	// Zero disables retries; a shared client-wide token budget can stop retries sooner.
 	MaxRetries int
 	// TLSConfig enables TLS when non-nil and is cloned for each dial.
+	// Do not mutate the supplied configuration while the client is using it.
 	TLSConfig *tls.Config
 	// Token enables per-connection AUTH when non-empty.
+	// It does not enable TLS: without TLSConfig, the token travels in plaintext.
 	Token string
 }
 
 // DefaultConfig returns a valid configuration with a lazy pool of at most ten connections.
+// It uses five-second phase timeouts, a one-minute idle timeout, a five-minute
+// maximum lifetime, and up to two GET retries. TLS and authentication are disabled.
 func DefaultConfig() Config {
 	return Config{
 		Address:        DefaultAddress,
@@ -75,6 +96,8 @@ func DefaultConfig() Config {
 	}
 }
 
+// pooledConnection tracks separate lifetime and idle clocks. Creation time is fixed
+// after dialing and AUTH succeed; idle time is updated only when returned to the pool.
 type pooledConnection struct {
 	net.Conn
 	createdAt time.Time
@@ -85,29 +108,42 @@ type pooledConnection struct {
 // Connections are opened lazily and carry at most one in-flight request each.
 // Keys must be non-empty UTF-8 of at most 1024 bytes; values are limited to 8 MiB.
 // Construct clients with New, NewWithTimeout, or NewWithConfig, then call Close.
+// The zero value is not usable, and a client must not be copied after first use.
+// Only GET is automatically retried; mutation errors can leave the server outcome unknown.
 type NebulaCache struct {
-	address     string
-	endpoint    string
-	config      Config
-	mu          sync.Mutex
+	// Keep the caller's address for diagnostics and a normalized endpoint for dialing.
+	address  string
+	endpoint string
+	config   Config
+	// mu protects pool membership, dial reservations, closure, and retry accounting.
+	mu sync.Mutex
+	// connections includes idle and leased sockets; idle is the available subset.
 	connections map[*pooledConnection]struct{}
 	idle        []*pooledConnection
-	dialing     int
-	closed      bool
-	changed     chan struct{}
-	ctx         context.Context
-	cancel      context.CancelFunc
+	// Reservations count toward capacity before network work begins outside the lock.
+	dialing int
+	closed  bool
+	// Each state change closes this generation, waking every waiter that captured it.
+	changed chan struct{}
+	// Client lifetime cancellation interrupts acquisition dials and retry backoff.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// Fractional tokens preserve elapsed-time refill across requests and goroutines.
 	retryTokens float64
 	retryRefill time.Time
 }
 
+// response holds a fully consumed frame. A nonzero status is a server outcome,
+// not a framing error, so callers interpret it after the connection can be reused.
 type response struct {
 	status byte
 	value  []byte
 }
 
 // New creates a client with defaults and an optional host:port address.
-// It does not connect to the server until the first operation.
+// With no argument it uses DefaultAddress; an empty or malformed address is an error.
+// It does not connect to the server until the first operation, so construction
+// validates configuration but does not establish reachability or authentication.
 func New(address ...string) (*NebulaCache, error) {
 	if len(address) > 1 {
 		return nil, fmt.Errorf("New accepts at most one address")
@@ -122,6 +158,8 @@ func New(address ...string) (*NebulaCache, error) {
 }
 
 // NewWithTimeout sets the connect and request timeouts; acquisition keeps its default.
+// The timeout must be positive and applies separately to each phase and attempt,
+// not to the total duration including pool acquisition and retry backoff.
 func NewWithTimeout(address string, timeout time.Duration) (*NebulaCache, error) {
 	if timeout <= 0 {
 		return nil, fmt.Errorf("timeout must be greater than zero")
@@ -135,7 +173,10 @@ func NewWithTimeout(address string, timeout time.Duration) (*NebulaCache, error)
 }
 
 // NewWithConfig validates config and creates a client without opening connections.
+// Pool bounds, positive durations, a nonnegative retry count, and a numeric-port
+// endpoint are required. TLS and token acceptance are checked only on first dial.
 func NewWithConfig(config Config) (*NebulaCache, error) {
+	// Reject inconsistent bounds up front so slot reservation cannot exceed capacity.
 	if config.MinPoolSize < 0 || config.MaxPoolSize <= 0 || config.MinPoolSize > config.MaxPoolSize {
 		return nil, fmt.Errorf("pool sizes must satisfy 0 <= minPoolSize <= maxPoolSize and maxPoolSize > 0")
 	}
@@ -152,6 +193,8 @@ func NewWithConfig(config Config) (*NebulaCache, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A single lifetime context ties future dials and retry waits to Close without
+	// starting any goroutines or performing network I/O during construction.
 	ctx, cancel := context.WithCancel(context.Background())
 	return &NebulaCache{
 		address:     config.Address,
@@ -167,15 +210,19 @@ func NewWithConfig(config Config) (*NebulaCache, error) {
 }
 
 // Close permanently closes the client, interrupts active connections, and wakes waiters.
-// Repeated calls are safe and return nil.
+// Repeated and concurrent calls are safe and return nil; socket close errors are ignored.
+// It cancels in-progress dials but does not wait for connection setup to finish.
+// An AUTH exchange already underway retains its own request deadline.
 func (c *NebulaCache) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return nil
 	}
+	// Publish closure before cancellation so awakened operations report ErrClosed.
 	c.closed = true
 	c.cancel()
+	// Membership includes leased sockets, allowing blocked I/O to be interrupted.
 	for connection := range c.connections {
 		connection.Close()
 		delete(c.connections, connection)
@@ -186,16 +233,22 @@ func (c *NebulaCache) Close() error {
 }
 
 // notify broadcasts a pool state change; the caller must hold c.mu.
+// Replacing the closed channel lets current waiters wake without making future
+// waiters spin on an already-closed notification.
 func (c *NebulaCache) notify() {
 	close(c.changed)
 	c.changed = make(chan struct{})
 }
 
+// acquire leases one socket exclusively, filling toward the minimum when needed.
+// One acquisition context spans all waits and dials, rather than restarting its
+// timeout after every notification or newly created connection.
 func (c *NebulaCache) acquire() (*pooledConnection, error) {
 	ctx, cancel := context.WithTimeout(c.ctx, c.config.AcquireTimeout)
 	defer cancel()
 	for {
 		c.mu.Lock()
+		// Closure takes precedence over the lifetime context's cancellation error.
 		if c.closed {
 			c.mu.Unlock()
 			return nil, ErrClosed
@@ -205,6 +258,7 @@ func (c *NebulaCache) acquire() (*pooledConnection, error) {
 			return nil, connectionError(c.address, err)
 		}
 		now := time.Now()
+		// Prune only idle sockets: expiry must not interrupt an in-flight request.
 		idle := c.idle[:0]
 		for _, connection := range c.idle {
 			if now.Sub(connection.idleSince) >= c.config.IdleTimeout || now.Sub(connection.createdAt) >= c.config.MaxLifetime {
@@ -215,8 +269,11 @@ func (c *NebulaCache) acquire() (*pooledConnection, error) {
 			}
 		}
 		c.idle = idle
+		// Reserved dials count toward both capacity and the lazy minimum target.
 		total := len(c.connections) + c.dialing
 		if len(c.idle) > 0 && total >= c.config.MinPoolSize {
+			// Prefer the most recently returned socket and remove it from availability
+			// while retaining membership so Close can still interrupt the lease.
 			last := len(c.idle) - 1
 			connection := c.idle[last]
 			c.idle[last] = nil
@@ -229,6 +286,8 @@ func (c *NebulaCache) acquire() (*pooledConnection, error) {
 			if count < 1 {
 				count = 1
 			}
+			// Reserve the entire fill before unlocking; concurrent callers cannot
+			// race to claim the same capacity while network work is in progress.
 			c.dialing += count
 			c.mu.Unlock()
 			if err := c.fill(ctx, count); err != nil {
@@ -236,6 +295,8 @@ func (c *NebulaCache) acquire() (*pooledConnection, error) {
 			}
 			continue
 		}
+		// Capture the generation while locked to avoid missing a release or Close
+		// between checking capacity and beginning to wait. Recheck on either wakeup.
 		changed := c.changed
 		c.mu.Unlock()
 		select {
@@ -246,6 +307,8 @@ func (c *NebulaCache) acquire() (*pooledConnection, error) {
 }
 
 // fill consumes dial slots reserved under c.mu so concurrent acquisitions cannot exceed capacity.
+// Successful connections become available individually; an error releases all
+// remaining reservations without removing connections already added by this fill.
 func (c *NebulaCache) fill(ctx context.Context, count int) error {
 	for remaining := count; remaining > 0; remaining-- {
 		dialer := net.Dialer{Timeout: c.config.ConnectTimeout}
@@ -254,15 +317,19 @@ func (c *NebulaCache) fill(ctx context.Context, count int) error {
 		if c.config.TLSConfig == nil {
 			connection, err = dialer.DialContext(ctx, "tcp", c.endpoint)
 		} else {
+			// Clone per dial and let tls.Dialer apply the dial timeout to the handshake.
 			tlsDialer := tls.Dialer{NetDialer: &dialer, Config: c.config.TLSConfig.Clone()}
 			connection, err = tlsDialer.DialContext(ctx, "tcp", c.endpoint)
 		}
 		if err == nil && c.config.Token != "" {
+			// Authenticate before publishing the socket. AUTH uses its own deadline,
+			// independent of the acquisition context used for dialing.
 			err = authenticateConnection(connection, c.config.Token, c.config.RequestTimeout)
 		}
 		c.mu.Lock()
 		c.dialing--
 		if c.closed || err != nil {
+			// Abandon unstarted dials too, and never publish a socket after Close.
 			c.dialing -= remaining - 1
 			if connection != nil {
 				connection.Close()
@@ -275,6 +342,7 @@ func (c *NebulaCache) fill(ctx context.Context, count int) error {
 			}
 			return connectionError(c.address, err)
 		}
+		// The socket is ready for any acquirer, not reserved for this fill's caller.
 		now := time.Now()
 		pooled := &pooledConnection{Conn: connection, createdAt: now, idleSince: now}
 		c.connections[pooled] = struct{}{}
@@ -285,13 +353,17 @@ func (c *NebulaCache) fill(ctx context.Context, count int) error {
 	return nil
 }
 
+// release returns a leased socket only if its response was fully validated and
+// its transport is still usable. Every return or retirement wakes capacity waiters.
 func (c *NebulaCache) release(connection *pooledConnection, healthy bool) {
+	// A prior request's deadline must not leak into a later lease or idle period.
 	if healthy && connection.SetDeadline(time.Time{}) != nil {
 		healthy = false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed || !healthy || time.Since(connection.createdAt) >= c.config.MaxLifetime {
+		// Lifetime can expire during a request; retire it here, not mid-exchange.
 		connection.Close()
 		delete(c.connections, connection)
 	} else {

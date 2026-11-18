@@ -37,17 +37,22 @@ use crate::{
 pub struct Application {
     config: Config,
     store: std::sync::Arc<CacheStore>,
+    // Cloned lifecycle and health handles let services publish failures and observe stop requests.
     lifecycle: Lifecycle,
     health: HealthManager,
     watchdog: Watchdog,
     metrics: Arc<Metrics>,
     persistence: Option<PersistenceManager>,
+    // Every task in this set is mandatory while run() is supervising the application.
     services: JoinSet<io::Result<()>>,
     shutdown_timeout: Duration,
 }
 
 impl Application {
     /// Creates an application with its cache limits and optional persistence manager configured.
+    ///
+    /// Construction does not bind listeners, open authentication storage, or restore snapshots;
+    /// those fallible operations are deferred to `start` while the lifecycle is initializing.
     pub fn new(config: Config) -> Self {
         let lifecycle = Lifecycle::new();
         let health = HealthManager::new(lifecycle.clone(), config.admin.enabled);
@@ -57,6 +62,8 @@ impl Application {
             config.resource_limits.max_cache_size_bytes,
             config.resource_limits.eviction_policy,
         ));
+        // Register the optional component before any restore can report a persistence failure.
+        // Its initial health is not a readiness signal; startup still has to finish successfully.
         let persistence = if config.persistence.mode == PersistenceMode::Snapshot {
             health.report(
                 HealthComponent::Persistence("snapshots".to_owned()),
@@ -86,20 +93,30 @@ impl Application {
     }
 
     /// Returns the current lifecycle state.
+    ///
+    /// Component health reports can change this state after startup, not just lifecycle methods.
     pub fn state(&self) -> ApplicationState {
         self.lifecycle.state()
     }
 
     /// Returns a cloneable handle for reading and reporting component health.
+    ///
+    /// The handle shares live state with the application rather than copying a health snapshot.
     pub fn health(&self) -> HealthManager {
         self.health.clone()
     }
 
     /// Starts the application, waits for an OS shutdown signal, and performs graceful shutdown.
+    ///
+    /// Any background service exit is fatal, even `Ok(())`; that failure path stops the
+    /// remaining services without writing a final snapshot.
     pub async fn run(mut self) -> Result<(), Box<dyn Error>> {
+        // Register Unix signal handlers before startup so signals arriving during startup are seen.
         let mut signals = ShutdownSignals::new()?;
         self.start().await?;
 
+        // Preserve the distinction between a requested stop and any completion of a mandatory task.
+        // An empty JoinSet is also an unexpected exit, represented by Some(None) here.
         let exited_service = tokio::select! {
             _ = signals.wait() => None,
             result = self.services.join_next() => Some(result),
@@ -116,7 +133,11 @@ impl Application {
     ///
     /// Startup is one-shot. On failure, the application transitions to `Failed` and started
     /// services are stopped before the error is returned.
+    ///
+    /// Listener startup acknowledgements precede readiness; periodic maintenance starts afterward.
+    /// Embedded callers must arrange supervision themselves if they do not use `run`.
     pub async fn start(&mut self) -> Result<(), Box<dyn Error>> {
+        // Reject repeated startup without disturbing services or the current lifecycle state.
         if self.lifecycle.state() != ApplicationState::Initializing {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -125,6 +146,7 @@ impl Application {
             .into());
         }
 
+        // Embedded callers can construct Config directly, bypassing file-loader validation.
         if self.config.ttl_cleanup_interval_secs == 0 {
             return Err(self
                 .fail_startup(
@@ -137,6 +159,8 @@ impl Application {
                 .await);
         }
 
+        // Only snapshot mode requires a usable destination and nonzero scheduling/retention.
+        // Destination requirements depend on the selected backend; the unused path can be empty.
         if self.config.persistence.mode == PersistenceMode::Snapshot
             && (self.config.persistence.snapshot_interval_secs == 0
                 || self.config.persistence.snapshot_retention == 0
@@ -161,6 +185,7 @@ impl Application {
                 .await);
         }
 
+        // The HTTP admin component depends on the identity store even when TCP TLS is disabled.
         if self.config.admin.enabled && !self.config.security.authentication {
             return Err(self
                 .fail_startup(
@@ -173,6 +198,8 @@ impl Application {
                 .await);
         }
 
+        // Initialize a single identity store shared by protocol sessions and the admin listener.
+        // PostgreSQL's URL guard is repeated here for configurations constructed without the loader.
         let auth_store = if self.config.security.authentication {
             let opened_store = match self.config.security.auth.backend {
                 AuthStorageBackend::Sqlite => {
@@ -202,6 +229,8 @@ impl Application {
                         .await);
                 }
             };
+            // Emit a credential only when the store creates one; ordinary restarts may return None.
+            // Bootstrap failures are fatal so listeners never start with incomplete auth setup.
             match store.ensure_bootstrap_credential() {
                 Ok(Some(credential)) => {
                     eprintln!(
@@ -220,11 +249,14 @@ impl Application {
             None
         };
 
+        // Validate protocol TLS material before restoring data or acquiring listener addresses.
         let tls_acceptor = match load_tls_acceptor(&self.config.tls) {
             Ok(acceptor) => acceptor,
             Err(err) => return Err(self.fail_startup("configure TCP TLS", err).await),
         };
 
+        // Recovery finishes before clients can connect; restore errors must not expose an empty
+        // replacement cache as though persisted state had loaded successfully.
         if let Some(persistence) = &self.persistence {
             if let Err(err) = persistence.restore(Arc::clone(&self.store)).await {
                 return Err(self.fail_startup("restore cache snapshot", err).await);
@@ -255,11 +287,14 @@ impl Application {
             None
         };
 
+        // Protocol frame bounds are fixed defaults; connection concurrency comes from configuration.
         let frame_limits = self.config.frame_limits();
         let limits = server::ServerLimits {
             frame: frame_limits,
             max_connections: self.config.resource_limits.max_connections,
         };
+        // A bound socket alone is not the startup acknowledgement. The running service owns the
+        // sender, while its lifecycle subscription and heartbeat connect it to shutdown and health.
         let (tcp_started_tx, tcp_started_rx) = oneshot::channel();
         let tcp_store = self.store.clone();
         let tcp_auth_store = auth_store.clone();
@@ -497,6 +532,8 @@ impl Application {
     ///
     /// Repeated calls after shutdown has begun are harmless. An in-progress shutdown failure
     /// transitions the application to `Failed`.
+    /// The timeout bounds service draining, not the final snapshot; a timeout alone forces
+    /// task cancellation without failing shutdown.
     pub async fn shutdown(&mut self) -> Result<(), Box<dyn Error>> {
         match self.lifecycle.state() {
             ApplicationState::Stopped | ApplicationState::Stopping => return Ok(()),
@@ -616,6 +653,7 @@ impl Application {
         })
         .await;
 
+        // Forced shutdown must also join tasks: abort_all only requests cancellation.
         match drained {
             Ok(Ok(())) => None,
             Ok(Err(err)) => {

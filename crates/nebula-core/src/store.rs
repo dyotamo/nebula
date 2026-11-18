@@ -9,35 +9,58 @@ use dashmap::DashMap;
 
 use super::{CacheEntry, EvictionPolicy};
 
+/// Persistable key/value pair using wall-clock expiration to survive restarts.
+///
+/// Eviction history is intentionally absent: restoration treats retained records as
+/// fresh insertions, but preserves their absolute expiration deadlines.
 #[derive(Clone, Debug)]
 pub struct PersistenceEntry {
+    /// Owned key bytes, without protocol-level restrictions on encoding or length.
     pub key: Vec<u8>,
+    /// Full value bytes; persistence snapshots copy rather than borrow live storage.
     pub value: Vec<u8>,
+    /// Absolute deadline; downtime counts toward expiration. `None` never expires.
     pub expires_at: Option<SystemTime>,
 }
 
+/// Value-free entry metadata; expiration checks use a monotonic deadline, not wall time.
+///
+/// This is an owned observation, not a live handle: replacing or deleting the key
+/// does not update metadata already returned to a caller.
 #[derive(Clone, Debug)]
 pub struct CacheEntryMetadata {
+    /// Key used to correlate this observation with later direct lookups.
     pub key: Vec<u8>,
+    /// Combined key and value length, excluding allocation and index overhead.
     pub size: usize,
+    /// Time of insertion, replacement, or restoration into this store instance.
     pub created_at: SystemTime,
+    /// Display-oriented wall-clock deadline; monotonic time governs actual expiry.
     pub expires_at: Option<SystemTime>,
+    /// Last successful value read, initially equal to the insertion time on `set`.
     pub last_accessed: SystemTime,
+    // Keep the original deadline so stale snapshots can still reject expired keys.
     expires_at_instant: Option<Instant>,
 }
 
 impl CacheEntryMetadata {
+    /// Checks expiration now, even when this metadata came from an older snapshot.
     pub fn is_expired(&self) -> bool {
         self.is_expired_at(Instant::now())
     }
 
+    /// Checks expiration against a caller-supplied monotonic time.
+    /// Reusing one time across a listing gives every row the same expiration cutoff.
     pub fn is_expired_at(&self, now: Instant) -> bool {
         self.expires_at_instant
             .is_some_and(|expires_at| now >= expires_at)
     }
 
+    /// Rounds remaining TTL up to whole seconds; expired entries yield `Some(0)`.
+    /// `None` means the entry has no expiration.
     pub fn remaining_ttl_secs_at(&self, now: Instant) -> Option<u64> {
         self.expires_at_instant.map(|expires_at| {
+            // Ceiling avoids reporting a still-live subsecond TTL as already expired.
             let remaining = expires_at.saturating_duration_since(now);
             remaining
                 .as_secs()
@@ -46,10 +69,14 @@ impl CacheEntryMetadata {
     }
 }
 
+// Internal policy history stays separate from values so eviction and admin listings
+// need not clone potentially large payloads. Access is serialized by accounting.
 struct EntryMetadata {
     size: usize,
+    // Logical ticks order operations even when wall time moves backwards.
     inserted: u64,
     accessed: u64,
+    // Reads only; insertion and replacement start a new frequency history.
     hits: u64,
     created_at: SystemTime,
     expires_at: Option<SystemTime>,
@@ -57,6 +84,8 @@ struct EntryMetadata {
     last_accessed: SystemTime,
 }
 
+// While this mutex is held, mutations keep the registry and value map aligned;
+// total_bytes tracks the registered key-plus-value lengths, not resident allocation.
 #[derive(Default)]
 struct CacheAccounting {
     total_bytes: usize,
@@ -64,10 +93,21 @@ struct CacheAccounting {
     entries: HashMap<Vec<u8>, EntryMetadata>,
 }
 
+/// Thread-safe byte cache with lazy expiration and key-plus-value capacity limits.
+///
+/// Value reads also take the accounting lock to update eviction history atomically.
+/// Expired entries can remain physically stored until a lookup, cleanup, or pressure
+/// reclaims them; physical length is therefore not a count of live keys.
 pub struct CacheStore {
     entries: DashMap<Vec<u8>, CacheEntry>,
+    // Full persistence operations exclude lightweight length/emptiness readers too,
+    // preventing those readers from seeing an intermediate restore state.
     snapshot_gate: RwLock<()>,
+    // Mutations lock accounting before snapshot_gate and DashMap shards, keeping
+    // values and eviction metadata in sync without reversing the lock order.
     accounting: Mutex<CacheAccounting>,
+    // Independent, time-bounded cache: mutations do not acquire this lock, avoiding
+    // an inverse dependency when snapshot rebuilding takes the accounting lock.
     admin_snapshot: RwLock<Option<(Instant, Arc<Vec<CacheEntryMetadata>>)>>,
     max_size_bytes: usize,
     eviction_policy: EvictionPolicy,
@@ -80,10 +120,13 @@ impl Default for CacheStore {
 }
 
 impl CacheStore {
+    /// Creates an LRU cache with no configured capacity bound beyond `usize::MAX`.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets the key-plus-value byte budget; allocator and metadata overhead are not counted.
+    /// Keys and values may be empty here; wire-level validation belongs to the protocol.
     pub fn with_limits(max_size_bytes: usize, eviction_policy: EvictionPolicy) -> Self {
         Self {
             entries: DashMap::new(),
@@ -95,6 +138,9 @@ impl CacheStore {
         }
     }
 
+    /// Inserts or replaces an entry, reclaiming expired entries before evicting live ones.
+    /// Zero TTL disables expiration. Oversized entries return `false` without replacing
+    /// an existing value; successful replacement resets access and insertion history.
     pub fn set(&self, key: Vec<u8>, value: Vec<u8>, ttl_secs: u64) -> bool {
         let mut accounting = self
             .accounting
@@ -105,10 +151,13 @@ impl CacheStore {
             .read()
             .unwrap_or_else(|error| error.into_inner());
         let size = key.len().saturating_add(value.len());
+        // Reject before removing an existing value, preserving it on oversized writes.
         if size > self.max_size_bytes {
             return false;
         }
 
+        // Replacement credits the old bytes first; only pressure triggers a full
+        // expiration scan, keeping writes with spare capacity off that O(n) path.
         Self::remove_key(&self.entries, &mut accounting, &key);
         if accounting.total_bytes.saturating_add(size) > self.max_size_bytes {
             Self::remove_expired(&self.entries, &mut accounting);
@@ -123,6 +172,8 @@ impl CacheStore {
         let tick = Self::next_tick(&mut accounting);
         let entry = CacheEntry::new(value, ttl_secs);
         let created_at = SystemTime::now();
+        // Wall time is for display; the copied Instant remains authoritative even
+        // if the wall-clock conversion overflows or the system clock later changes.
         let expires_at = entry.expires_at.and_then(|deadline| {
             SystemTime::now().checked_add(deadline.saturating_duration_since(Instant::now()))
         });
@@ -144,12 +195,15 @@ impl CacheStore {
         true
     }
 
+    /// Clones a live value and updates access history; expired entries are removed.
+    /// No map guard escapes, so callers can retain or modify the result independently.
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.get_inner(key, |value, _| value)
     }
 
     /// Reads the value from the primary store and returns metadata from the same
-    /// synchronized lookup.
+    /// synchronized lookup. Metadata includes this read in its access timestamp;
+    /// it does not come from the potentially stale administrative snapshot.
     pub fn get_with_metadata(&self, key: &[u8]) -> Option<(Vec<u8>, CacheEntryMetadata)> {
         self.get_inner(key, |value, metadata| {
             metadata.map(|metadata| (value, Self::admin_metadata(key, metadata)))
@@ -157,6 +211,8 @@ impl CacheStore {
         .flatten()
     }
 
+    // One lookup path keeps ordinary reads and value-plus-metadata reads identical
+    // for lazy expiry and eviction accounting. The projection runs under the lock.
     fn get_inner<R>(
         &self,
         key: &[u8],
@@ -172,6 +228,7 @@ impl CacheStore {
             .unwrap_or_else(|error| error.into_inner());
         let entry = self.entries.get(key)?;
         if entry.is_expired() {
+            // Release the shard read guard before removal needs a write guard.
             drop(entry);
             Self::remove_key(&self.entries, &mut accounting, key);
             return None;
@@ -179,6 +236,7 @@ impl CacheStore {
         let value = entry.value.clone();
         drop(entry);
 
+        // Misses and expired values do not increase frequency or refresh recency.
         let tick = Self::next_tick(&mut accounting);
         let mut metadata = accounting.entries.get_mut(key);
         if let Some(metadata) = metadata.as_deref_mut() {
@@ -189,6 +247,8 @@ impl CacheStore {
         Some(result(value, metadata.as_deref()))
     }
 
+    /// Removes a stored key and reports whether it existed, even if already expired.
+    /// Removal also releases its accounted bytes; repeated deletion returns `false`.
     pub fn delete(&self, key: &[u8]) -> bool {
         let mut accounting = self
             .accounting
@@ -201,6 +261,8 @@ impl CacheStore {
         Self::remove_key(&self.entries, &mut accounting, key)
     }
 
+    /// Clears values and accounting; cached admin snapshots age out normally.
+    /// Previously returned metadata remains readable and is not an existence guarantee.
     pub fn clear(&self) {
         let mut accounting = self
             .accounting
@@ -215,6 +277,8 @@ impl CacheStore {
         accounting.entries.clear();
     }
 
+    /// Counts stored entries, including expired entries not yet reclaimed.
+    /// A later operation can immediately change the count; no reservation is made.
     pub fn len(&self) -> usize {
         let _snapshot_guard = self
             .snapshot_gate
@@ -223,6 +287,8 @@ impl CacheStore {
         self.entries.len()
     }
 
+    /// Returns accounted key/value bytes, including expired entries not yet reclaimed.
+    /// This is the eviction budget metric, not a measurement of process memory use.
     pub fn memory_usage(&self) -> usize {
         self.accounting
             .lock()
@@ -230,8 +296,10 @@ impl CacheStore {
             .total_bytes
     }
 
-    /// Returns an immutable, key-ordered metadata projection, refreshed on demand
-    /// at least once per second. A returned snapshot remains stable for its caller.
+    /// Returns an immutable, key-ordered metadata view, cached for one second.
+    /// May include expired or recently changed entries; callers can check expiration.
+    /// Previously returned snapshots remain stable across mutations.
+    /// Sharing the `Arc` avoids repeated sorting and key copies for frequent polling.
     pub fn admin_snapshot(&self) -> Arc<Vec<CacheEntryMetadata>> {
         if let Some((built_at, snapshot)) = self
             .admin_snapshot
@@ -248,6 +316,7 @@ impl CacheStore {
             .admin_snapshot
             .write()
             .unwrap_or_else(|error| error.into_inner());
+        // Another caller may have refreshed the view while this writer waited.
         if let Some((built_at, snapshot)) = cached.as_ref() {
             if built_at.elapsed() < Duration::from_secs(1) {
                 return Arc::clone(snapshot);
@@ -265,6 +334,8 @@ impl CacheStore {
                 .collect();
             (Instant::now(), entries)
         };
+        // Sorting owned metadata outside accounting lets cache operations resume
+        // while this immutable view is prepared for publication.
         entries.sort_by(|left, right| left.key.cmp(&right.key));
         let snapshot = Arc::new(entries);
         *cached = Some((built_at, Arc::clone(&snapshot)));
@@ -272,6 +343,8 @@ impl CacheStore {
     }
 
     /// Looks up metadata directly in the registry and removes an expired entry.
+    /// Does not update access time or eviction frequency.
+    /// Unlike a cached listing this checks the current registry, but does not read values.
     pub fn admin_entry(&self, key: &[u8]) -> Option<CacheEntryMetadata> {
         let mut accounting = self
             .accounting
@@ -283,6 +356,8 @@ impl CacheStore {
             .get(key)
             .is_some_and(|metadata| metadata.expires_at_instant.is_some_and(|time| now >= time));
         if expired {
+            // Accounting excludes other mutations, so this deadline and the removed
+            // value belong to the same key version without reading its payload.
             Self::remove_key(&self.entries, &mut accounting, key);
             return None;
         }
@@ -292,6 +367,7 @@ impl CacheStore {
             .map(|metadata| Self::admin_metadata(key, metadata))
     }
 
+    /// Tests physical emptiness without reclaiming expired entries.
     pub fn is_empty(&self) -> bool {
         let _snapshot_guard = self
             .snapshot_gate
@@ -300,6 +376,8 @@ impl CacheStore {
         self.entries.is_empty()
     }
 
+    /// Reclaims expired entries and their accounted bytes, returning the removal count.
+    /// This scans the registry synchronously; callers choose the cleanup cadence.
     pub fn cleanup_expired(&self) -> usize {
         let mut accounting = self
             .accounting
@@ -312,6 +390,10 @@ impl CacheStore {
         Self::remove_expired(&self.entries, &mut accounting)
     }
 
+    /// Copies live entries in unspecified order with remaining TTLs rounded down to seconds.
+    /// A subsecond TTL becomes `Some(0)`; passing that zero to [`Self::set`] disables expiration.
+    /// Use [`Self::snapshot_for_persistence`] for restart-safe expiration deadlines.
+    /// The owned copy is stable against writes, but TTLs continue elapsing during copying.
     pub fn snapshot(&self) -> Vec<(Vec<u8>, Vec<u8>, Option<u64>)> {
         let mut accounting = self
             .accounting
@@ -335,6 +417,8 @@ impl CacheStore {
             .collect()
     }
 
+    /// Copies live entries with absolute wall-clock deadlines so TTLs include downtime.
+    /// Does not update access history, so saving a snapshot cannot promote entries.
     pub fn snapshot_for_persistence(&self) -> Vec<PersistenceEntry> {
         let mut accounting = self
             .accounting
@@ -344,6 +428,7 @@ impl CacheStore {
             .snapshot_gate
             .write()
             .unwrap_or_else(|error| error.into_inner());
+        // Convert every deadline against the same clock pair to avoid per-entry drift.
         let instant_now = Instant::now();
         let system_now = SystemTime::now();
         Self::remove_expired(&self.entries, &mut accounting);
@@ -359,6 +444,10 @@ impl CacheStore {
             .collect()
     }
 
+    /// Replaces cache contents, skipping expired or individually oversized entries,
+    /// then evicts to capacity and returns the retained count. Access history is reset.
+    /// An out-of-range deadline returns an error after any earlier entries were restored;
+    /// the previous contents are not rolled back.
     pub fn restore_from_persistence(&self, entries: Vec<PersistenceEntry>) -> io::Result<usize> {
         let mut accounting = self
             .accounting
@@ -368,8 +457,11 @@ impl CacheStore {
             .snapshot_gate
             .write()
             .unwrap_or_else(|error| error.into_inner());
+        // Rebuild monotonic deadlines from wall time so elapsed downtime is not reset.
         let system_now = SystemTime::now();
         let instant_now = Instant::now();
+        // Restore is replacement, not merge. Clearing first also means a later
+        // invalid deadline leaves a partial restore rather than the old contents.
         self.entries.clear();
         accounting.total_bytes = 0;
         accounting.entries.clear();
@@ -393,6 +485,8 @@ impl CacheStore {
             if size > self.max_size_bytes {
                 continue;
             }
+            // Duplicate keys in input use the last accepted record and must not
+            // double-count either their bytes or their eviction metadata.
             Self::remove_key(&self.entries, &mut accounting, &entry.key);
             let tick = Self::next_tick(&mut accounting);
             accounting.total_bytes = accounting.total_bytes.saturating_add(size);
@@ -418,6 +512,8 @@ impl CacheStore {
             );
         }
 
+        // Apply the current capacity after loading; snapshots may come from a
+        // larger cache, and fresh policy history follows accepted input order.
         while accounting.total_bytes > self.max_size_bytes {
             let Some(victim) = Self::victim_key(&accounting, self.eviction_policy) else {
                 break;
@@ -428,11 +524,16 @@ impl CacheStore {
         Ok(self.entries.len())
     }
 
+    // Saturation prevents wraparound from making new operations look oldest.
+    // At u64::MAX distinct operations can tie, rather than reversing their order.
     fn next_tick(accounting: &mut CacheAccounting) -> u64 {
+        // Eviction recency follows operation order, independent of wall-clock adjustments.
         accounting.clock = accounting.clock.saturating_add(1);
         accounting.clock
     }
 
+    // Omit payloads and policy counters while retaining the monotonic deadline
+    // needed to expire an observation after the registry lock has been released.
     fn admin_metadata(key: &[u8], metadata: &EntryMetadata) -> CacheEntryMetadata {
         CacheEntryMetadata {
             key: key.to_vec(),
@@ -444,6 +545,8 @@ impl CacheStore {
         }
     }
 
+    // All removal paths share this accounting update. Callers hold accounting
+    // and must release any DashMap read guard before requesting the shard write.
     fn remove_key(
         entries: &DashMap<Vec<u8>, CacheEntry>,
         accounting: &mut CacheAccounting,
@@ -456,6 +559,8 @@ impl CacheStore {
         removed
     }
 
+    // Collect keys before deletion so iteration never retains a shard read lock
+    // while removal requests its write lock. Missing values also shed stale metadata.
     fn remove_expired(
         entries: &DashMap<Vec<u8>, CacheEntry>,
         accounting: &mut CacheAccounting,
@@ -477,6 +582,8 @@ impl CacheStore {
         removed
     }
 
+    // Policy-specific tuple ordering supplies the tie-breakers. Exact ties have
+    // no guaranteed winner because the registry is a HashMap, not an ordered index.
     fn victim_key(accounting: &CacheAccounting, policy: EvictionPolicy) -> Option<Vec<u8>> {
         accounting
             .entries

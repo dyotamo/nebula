@@ -14,11 +14,13 @@ let server;
 let cache;
 let serverAddress;
 
+// The shared test server below implements enough of the wire protocol to exercise real TCP client calls.
 before(async () => {
   server = net.createServer((socket) => {
     let request = Buffer.alloc(0);
     socket.on('data', (chunk) => {
       request = Buffer.concat([request, chunk]);
+      // TCP can split or coalesce requests; wait for the fixed 22-byte header and then the full payload.
       while (request.length >= 22) {
         const keyLength = request.readUInt32BE(6);
         const valueLength = request.readUInt32BE(10);
@@ -167,6 +169,8 @@ async function fixture(t, onRequest, options = {}) {
       }
     });
   });
+  // Teardown closes clients before the peer so pending exchanges can finish or
+  // fail deterministically; assert that asynchronous handlers did not throw.
   t.after(async () => {
     await Promise.all(clients.map((client) => client.close()));
     for (const socket of sockets) {
@@ -240,6 +244,8 @@ test('creates the configured minimum lazily and respects the pool maximum', asyn
   assert.equal(client._connections.size, 2);
 });
 
+// The handler holds all leased requests until the pool is full, making the
+// acquisition-timeout assertion independent of network scheduling.
 test('bounds concurrent requests and acquisition waits', async (t) => {
   let active = 0;
   let peakActive = 0;
@@ -275,6 +281,8 @@ test('bounds concurrent requests and acquisition waits', async (t) => {
   assert.equal(fixture.accepted.length, 2);
 });
 
+// A lost response is ambiguous for SET, but GET is safe to repeat; frame counts
+// make that idempotency boundary observable at the fake server.
 test('retries GET transport failures but never replays mutations', async (t) => {
   const fixture = await createFixture(t, ({ socket, opcode, key }) => {
     if (opcode === 2 && fixture.requests.filter((request) => request.key === key).length === 1) {
@@ -370,6 +378,8 @@ async function createFixture(t, onRequest, options = {}) {
       }
     });
   });
+  // Teardown closes clients before the peer so pending exchanges can finish or
+  // fail deterministically; assert that asynchronous handlers did not throw.
   t.after(async () => {
     await Promise.all(clients.map((client) => client.close()));
     for (const socket of sockets) {

@@ -185,6 +185,7 @@ fn load_tls_connector(path: impl AsRef<Path>) -> Result<TlsConnector, ClientErro
         .into());
     }
 
+    // Treat the supplied CA bundle as the trust boundary for this TLS connection.
     let mut roots = RootCertStore::empty();
     for certificate in certificates {
         roots

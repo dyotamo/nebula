@@ -1,3 +1,8 @@
+//! Cooperative worker monitoring based on elapsed monotonic time.
+//!
+//! Workers must call their heartbeat handles even when idle. Monitoring reports
+//! health changes; it neither restarts workers nor interrupts overdue work.
+
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -7,21 +12,32 @@ use std::{
 use nebula_health::{lifecycle::ApplicationState, ComponentHealth, HealthComponent, HealthManager};
 use tokio::{sync::watch, time::MissedTickBehavior};
 
+// Detection is polling-based: a missed deadline is noticed on a later tick, not
+// by a dedicated timer for each worker. Scheduling delays can add further latency.
 const WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
+// Recovery recognizes this exact reason so it does not clear unrelated component failures.
 const WATCHDOG_FAILURE: &str = "worker heartbeat deadline exceeded";
 
+/// Shared worker deadlines that translate missed heartbeats into component health failures.
+///
+/// Clones share registrations. Monitoring is cooperative: a heartbeat proves the caller
+/// reached that point, not that all work associated with the component is progressing.
 #[derive(Clone)]
 pub struct Watchdog {
     health: HealthManager,
     workers: Arc<Mutex<BTreeMap<String, WorkerState>>>,
 }
 
+// The registry lock protects each deadline and its component association together;
+// a reused ID replaces the entire registration rather than retaining an old deadline.
 struct WorkerState {
     component: HealthComponent,
     last_heartbeat: Instant,
     timeout: Duration,
 }
 
+/// Clonable heartbeat handle; dropping it does not unregister the worker.
+/// Handles identify a registration by name, so any clone refreshes the shared deadline.
 #[derive(Clone)]
 pub struct WorkerHeartbeat {
     watchdog: Watchdog,
@@ -29,6 +45,8 @@ pub struct WorkerHeartbeat {
 }
 
 impl Watchdog {
+    /// Creates an empty registry; deadline checks start only when `run` is polled.
+    /// Heartbeat refresh and timeout recovery can still run without the monitoring loop.
     pub fn new(health: HealthManager) -> Self {
         Self {
             health,
@@ -36,6 +54,12 @@ impl Watchdog {
         }
     }
 
+    /// Starts a deadline at registration time and marks the component healthy.
+    ///
+    /// Reusing an ID replaces its deadline/component; existing handles also refer to that new entry.
+    /// Registration reports healthy even if the component had another failure reason.
+    /// Use distinct components when worker health must be tracked independently: reports
+    /// are keyed by component, not aggregated across all workers sharing that component.
     pub fn register_worker(
         &self,
         worker_id: impl Into<String>,
@@ -62,8 +86,12 @@ impl Watchdog {
         }
     }
 
+    /// Checks deadlines every 250 ms until shutdown, failure, or closure is observed on `lifecycle`.
+    /// The loop does not remove registrations or change their last reported health on exit.
     pub async fn run(&self, mut lifecycle: watch::Receiver<ApplicationState>) {
         let mut interval = tokio::time::interval(WATCHDOG_INTERVAL);
+        // After scheduler stalls, resume at the normal cadence instead of issuing
+        // a burst of catch-up scans against nearly identical heartbeat state.
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -80,13 +108,18 @@ impl Watchdog {
         }
     }
 
+    // One time sample gives the scan a common cutoff. Reports use a snapshot of
+    // registrations, so a heartbeat racing the scan may be reflected on the next tick.
     fn check_workers(&self, now: Instant) {
+        // Release the registry lock before health reporting so heartbeats need not wait for it.
         let updates: Vec<_> = self
             .workers
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .values()
             .map(|worker| {
+                // A heartbeat can be newer than the scan time; saturation treats
+                // that race as zero elapsed time rather than an overdue worker.
                 let expired = now.saturating_duration_since(worker.last_heartbeat) > worker.timeout;
                 (worker.component.clone(), expired)
             })
@@ -94,6 +127,8 @@ impl Watchdog {
 
         for (component, expired) in updates {
             let current = self.health.snapshot().components.get(&component).cloned();
+            // Timeouts replace current component health, but automatic recovery
+            // clears only our exact timeout reason, not a later unrelated failure.
             let replacement = if expired {
                 Some(ComponentHealth::Unhealthy(WATCHDOG_FAILURE.to_owned()))
             } else if current == Some(ComponentHealth::Unhealthy(WATCHDOG_FAILURE.to_owned())) {
@@ -107,6 +142,8 @@ impl Watchdog {
         }
     }
 
+    // Refresh under the registry lock, then report recovery without holding it;
+    // health reporting can publish snapshots and trigger lifecycle transitions.
     fn heartbeat(&self, worker_id: &str) {
         let component = {
             let mut workers = self
@@ -129,6 +166,8 @@ impl Watchdog {
 }
 
 impl WorkerHeartbeat {
+    /// Refreshes the deadline and clears a watchdog timeout, but not an unrelated failure reason.
+    /// Call periodically while idle too; completing a unit of work is not required.
     pub fn heartbeat(&self) {
         self.watchdog.heartbeat(&self.worker_id);
     }
